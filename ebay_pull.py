@@ -4,11 +4,11 @@ import requests
 import json
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from statistics import mean, stdev
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
@@ -16,16 +16,16 @@ log = logging.getLogger(__name__)
 EBAY_APP_ID   = os.getenv("EBAY_APP_ID")       # Client ID from eBay Developer portal
 EBAY_SECRET   = os.getenv("EBAY_SECRET")       # Client Secret from eBay Developer portal
 DB_PATH       = os.getenv("DB_PATH", "pokemon_prices.db")
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", 30))   # How far back to pull sold data
-OUTLIER_SIGMA = float(os.getenv("OUTLIER_SIGMA", 2.0)) # Std-dev threshold for outlier removal
+LOOKBACK_DAYS = 30   # How far back to pull sold data
+OUTLIER_SIGMA = 2.0  # Std-dev threshold for outlier removal
+LISTING_LIMIT  = 50  # Max number of sold listings to pull per card
+CONDITIONS = ["Ungraded"]
+
 
 # Cards to track
 CARDS_TO_TRACK = [
-    "Charizard Base Set Holo",
-    "Pikachu Illustrator",
-    "Lugia Neo Genesis Holo",
-    "Blastoise Base Set Holo",
-    "Mewtwo Base Set Holo",
+    "MEGA VENUSAUR EX MEP013",
+    "yveltal ex xy150a",
 ]
 
 # ── OAuth token ───────────────────────────────────────────────────────────────
@@ -53,7 +53,6 @@ def get_ebay_token() -> str:
     data = resp.json()
     _token_cache["token"] = data["access_token"]
     _token_cache["expires_at"] = time.time() + int(data["expires_in"])
-    log.info("eBay OAuth token refreshed.")
     return _token_cache["token"]
 
 
@@ -98,6 +97,7 @@ def init_db(path: str) -> sqlite3.Connection:
 def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     """
     Uses eBay Browse API (search endpoint) with filter for sold items.
+    Excludes graded/slabbed cards at the query level.
     Returns a list of raw item dicts.
     """
     token = get_ebay_token()
@@ -107,70 +107,45 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
         "Content-Type": "application/json",
     }
 
-    date_from = (datetime.utcnow() - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    date_from = (
+        datetime.now(timezone.utc) - timedelta(days=days_back)
+    ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     params = {
-        "q": f"{query} pokemon card",
-        "category_ids": "2536",  # Pokémon Individual Cards category
+        "q": f"{query} pokemon card -PSA -BGS -CGC -SGC -graded -slab",
         "filter": f"buyingOptions:{{FIXED_PRICE|AUCTION}},soldDate:[{date_from}]",
         "sort": "newlyListed",
-        "limit": "200",
+        "limit": str(LISTING_LIMIT),
     }
 
-    all_items = []
-    offset = 0
+    resp = requests.get(
+        "https://api.ebay.com/buy/browse/v1/item_summary/search",
+        headers=headers,
+        params=params,
+        timeout=15,
+    )
 
-    while True:
-        params["offset"] = str(offset)
-        resp = requests.get(
-            "https://api.ebay.com/buy/browse/v1/item_summary/search",
-            headers=headers,
-            params=params,
-            timeout=15,
-        )
+    if resp.status_code == 429:
+        log.warning("Rate limited — sleeping 60s")
+        time.sleep(60)
+        return []
 
-        if resp.status_code == 429:
-            log.warning("Rate limited — sleeping 60s")
-            time.sleep(60)
-            continue
+    resp.raise_for_status()
+    data = resp.json()
+    items = data.get("itemSummaries", [])
 
-        resp.raise_for_status()
-        data = resp.json()
-        items = data.get("itemSummaries", [])
-        all_items.extend(items)
+    log.info(f" {len(items)} sold listings found")
 
-        total = int(data.get("total", 0))
-        offset += len(items)
-        if offset >= total or not items:
-            break
-
-        time.sleep(0.5)  # polite delay between pages
-
-    log.info(f"  '{query}' → {len(all_items)} sold listings found")
-    return all_items
+    return items
 
 
-# ── Parsing & Cleaning ────────────────────────────────────────────────────────
-CONDITION_MAP = {
-    "NEW": "New",
-    "LIKE_NEW": "NM",
-    "EXCELLENT": "LP",
-    "VERY_GOOD": "MP",
-    "GOOD": "HP",
-    "ACCEPTABLE": "DMG",
-    "FOR_PARTS_OR_NOT_WORKING": "DMG",
-}
-
+# Parsing
 def parse_item(item: dict, card_query: str) -> dict | None:
-    """Extract and normalise fields from a raw eBay item dict."""
     try:
         price_info = item.get("price", {})
         price = float(price_info.get("value", 0))
         if price <= 0:
             return None
-
-        raw_condition = item.get("condition", "UNKNOWN")
-        condition = CONDITION_MAP.get(raw_condition.upper(), raw_condition)
 
         buying_options = item.get("buyingOptions", [])
         if "FIXED_PRICE" in buying_options:
@@ -188,11 +163,11 @@ def parse_item(item: dict, card_query: str) -> dict | None:
             "title":        item.get("title", ""),
             "price":        price,
             "currency":     price_info.get("currency", "USD"),
-            "condition":    condition,
+            "condition":    item.get("condition", "UNKNOWN"),
             "listing_type": listing_type,
             "sold_date":    sold_date,
             "url":          item.get("itemWebUrl", ""),
-            "pulled_at":    datetime.utcnow().isoformat(),
+            "pulled_at":    datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         log.debug(f"Skipping item due to parse error: {e}")
@@ -213,7 +188,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
     Reads stored sold listings for a card and writes a price snapshot.
     Applies recency weighting: sales in last 14 days count 2×.
     """
-    cutoff = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days_back)).isoformat()
     rows = conn.execute(
         """
         SELECT price, listing_type, sold_date
@@ -227,27 +202,31 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
     ).fetchall()
 
     if not rows:
-        log.warning(f"No data for '{card_query}' — skipping snapshot.")
+        log.warning(f"  No data for '{card_query}' — skipping snapshot.")
         return
+        
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
 
-    # BIN prices are typically closer to "fair value" than auctions
-    # Apply a small uplift to auction prices when mixing
-    prices = []
-    weighted = []
-    recent_cutoff = (datetime.utcnow() - timedelta(days=14)).isoformat()
-
+    pairs: list[tuple[float, str]] = []
     for price, listing_type, sold_date in rows:
-        adj_price = price * 1.12 if listing_type == "Auction" else price
-        prices.append(adj_price)
-        weight = 2 if sold_date >= recent_cutoff else 1
-        weighted.extend([adj_price] * weight)
+        pairs.append((price, sold_date))
 
-    prices  = remove_outliers(prices, OUTLIER_SIGMA)
-    weighted = remove_outliers(weighted, OUTLIER_SIGMA)
+    # Outlier-filter on price, keeping dates attached``
+    if len(pairs) >= 4:
+        raw_prices = [p for p, _ in pairs]
+        m, s = mean(raw_prices), stdev(raw_prices)
+        pairs = [(p, d) for p, d in pairs if abs(p - m) <= OUTLIER_SIGMA * s]
 
-    if not prices:
-        log.warning(f"All prices for '{card_query}' were outliers — skipping.")
+    if not pairs:
+        log.warning(f"  All prices for '{card_query}' were outliers — skipping.")
         return
+
+    # Derive prices and weighted list from the same cleaned pairs
+    prices = [p for p, _ in pairs]
+    weighted = []
+    for p, sold_date in pairs:
+        weight = 2 if sold_date >= recent_cutoff else 1
+        weighted.extend([p] * weight)
 
     sorted_p = sorted(prices)
     n = len(sorted_p)
@@ -255,7 +234,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
 
     snapshot = {
         "card_query":    card_query,
-        "snapshot_date": datetime.utcnow().date().isoformat(),
+        "snapshot_date": datetime.now(timezone.utc).date().isoformat(),
         "sample_size":   n,
         "avg_price":     round(mean(prices), 2),
         "median_price":  round(median, 2),
@@ -277,18 +256,12 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
         snapshot,
     )
     conn.commit()
-    log.info(
-        f"  Snapshot → {card_query}: "
-        f"weighted_avg=${snapshot['weighted_avg']:.2f}  "
-        f"median=${snapshot['median_price']:.2f}  "
-        f"n={n}"
-    )
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
 def print_report(conn: sqlite3.Connection):
     """Print a simple pricing summary table to stdout."""
-    today = datetime.utcnow().date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     rows = conn.execute(
         """
         SELECT card_query, weighted_avg, median_price, avg_price,
@@ -304,20 +277,16 @@ def print_report(conn: sqlite3.Connection):
         print("No snapshots for today yet.")
         return
 
-    print(f"\n{'='*80}")
-    print(f"  Pokémon Card Price Report  —  {today}")
-    print(f"{'='*80}")
-    print(f"{'Card':<35} {'Wtd Avg':>9} {'Median':>9} {'Avg':>9} {'Min':>7} {'Max':>7} {'n':>4}")
-    print(f"{'-'*80}")
+    print(f"{'Card':<35} {'Wtd Avg':>8} {'Median':>8} {'Avg':>8} {'Min':>8} {'Max':>8} {'n':>4}")
+    print(f"{'-'*87}")
     for card, w_avg, median, avg, mn, mx, n in rows:
         name = card[:34]
-        print(f"{name:<35} ${w_avg:>8.2f} ${median:>8.2f} ${avg:>8.2f} ${mn:>6.2f} ${mx:>6.2f} {n:>4}")
-    print(f"{'='*80}\n")
+        print(f"{name:<35} {w_avg:>8.2f} {median:>8.2f} {avg:>8.2f} {mn:>8.2f} {mx:>8.2f} {n:>4}")
+    print(f"{'-'*87}\n")
 
 
 def export_json(conn: sqlite3.Connection, path: str = "price_report.json"):
-    """Export today's snapshots to JSON for use in other tools."""
-    today = datetime.utcnow().date().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     rows = conn.execute(
         "SELECT * FROM price_snapshots WHERE snapshot_date = ?", (today,)
     ).fetchall()
@@ -325,16 +294,11 @@ def export_json(conn: sqlite3.Connection, path: str = "price_report.json"):
     data = [dict(zip(cols, row)) for row in rows]
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
-    log.info(f"Exported {len(data)} snapshots → {path}")
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     conn = init_db(DB_PATH)
-    log.info(f"Database: {DB_PATH}")
-
     for card in CARDS_TO_TRACK:
-        log.info(f"Pulling sold listings for: {card}")
+        log.info(f" Pulling sold listings for: {card}")
         try:
             items = search_sold_listings(card, LOOKBACK_DAYS)
         except requests.HTTPError as e:
@@ -363,9 +327,9 @@ def main():
                 log.debug(f"DB insert error: {e}")
 
         conn.commit()
-        log.info(f"  Inserted {inserted} new listings.")
+        log.info(f" Inserted {inserted} new listings\n")
         compute_snapshot(conn, card, LOOKBACK_DAYS)
-        time.sleep(1)  # be kind to the API
+        time.sleep(1)
 
     print_report(conn)
     export_json(conn)

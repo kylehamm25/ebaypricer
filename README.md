@@ -6,7 +6,7 @@ Pulls sold listings from the eBay Browse API and builds a local pricing model st
 
 ## Setup
 
-### 1. Get eBay API Credentials (free)
+### 1. Get eBay API Credentials 
 1. Go to [developer.ebay.com](https://developer.ebay.com) and create an account
 2. Create a new app under **My Account → Application Keysets**
 3. Copy your **App ID (Client ID)** and **Client Secret**
@@ -32,7 +32,13 @@ CARDS_TO_TRACK = [
 ]
 ```
 
-### 5. Run it
+### 5. (Optional) Filter by listing condition
+Edit `CONDITIONS` in `ebay_pull.py` to limit which eBay listing conditions are tracked:
+```python
+CONDITIONS = ["UNGRADED", "GRADED"] 
+```
+
+### 6. Run it
 ```bash
 python ebay_pull.py
 ```
@@ -76,41 +82,6 @@ Today's snapshot exported for use in spreadsheets or other tools.
 | Low liquidity | Flagged by low `sample_size` — treat with caution |
 
 The **`weighted_avg`** column is your primary recommended list price.
-
----
-
-## Automate with a schedule
-
-### Mac/Linux (cron)
-```bash
-# Run every Monday at 9am
-crontab -e
-0 9 * * 1 cd /path/to/folder && python ebay_pull.py >> ebay.log 2>&1
-```
-
-### Windows (Task Scheduler)
-1. Open Task Scheduler → Create Basic Task
-2. Set trigger: Weekly
-3. Action: `python C:\path\to\ebay_pull.py`
-
-### Free cloud option (GitHub Actions)
-Push this folder to a private GitHub repo and add `.github/workflows/pull.yml`:
-```yaml
-name: Weekly eBay Pull
-on:
-  schedule:
-    - cron: '0 9 * * 1'
-jobs:
-  pull:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - run: pip install -r requirements.txt
-      - run: python ebay_pull.py
-        env:
-          EBAY_APP_ID: ${{ secrets.EBAY_APP_ID }}
-          EBAY_SECRET: ${{ secrets.EBAY_SECRET }}
-```
 
 ---
 

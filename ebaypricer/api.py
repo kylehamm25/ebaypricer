@@ -2,7 +2,7 @@ import time
 import logging
 import requests
 from datetime import datetime, timedelta, timezone
-from config import EBAY_APP_ID, EBAY_SECRET, LISTING_LIMIT
+from .config import EBAY_APP_ID, EBAY_SECRET, LISTING_LIMIT
 
 log = logging.getLogger(__name__)
 

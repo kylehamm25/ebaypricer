@@ -2,6 +2,5 @@
 .env
 !.env.example
 __pycache__/
-*.json
-*.txt
-*.db
+data/*
+!data/.gitkeep

@@ -1,6 +1,8 @@
 import requests, base64, os, urllib.parse, webbrowser
 from dotenv import load_dotenv
-load_dotenv()
+
+_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(dotenv_path=_env_path)
 
 CLIENT_ID     = os.getenv("EBAY_APP_ID")
 CLIENT_SECRET = os.getenv("EBAY_SECRET")

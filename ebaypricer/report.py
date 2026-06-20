@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from db import get_today_snapshots, get_today_snapshots_full
+from .db import get_today_snapshots, get_today_snapshots_full
 
 
 def print_report(conn: sqlite3.Connection):

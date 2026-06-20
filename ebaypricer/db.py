@@ -2,7 +2,7 @@ import sqlite3
 import logging
 from datetime import datetime, timedelta, timezone
 from statistics import mean, stdev
-from config import DB_PATH, LOOKBACK_DAYS, OUTLIER_SIGMA
+from .config import DB_PATH, LOOKBACK_DAYS, OUTLIER_SIGMA
 
 log = logging.getLogger(__name__)
 

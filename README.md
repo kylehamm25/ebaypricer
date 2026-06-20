@@ -2,11 +2,9 @@
 
 Pulls sold listings from the eBay Browse API and builds a local pricing model stored in SQLite.
 
----
-
 ## Setup
 
-### 1. Get eBay API Credentials 
+### 1. Get eBay API Credentials
 1. Go to [developer.ebay.com](https://developer.ebay.com) and create an account
 2. Create a new app under **My Account → Application Keysets**
 3. Copy your **App ID (Client ID)** and **Client Secret**
@@ -23,27 +21,42 @@ cp .env.example .env
 ```
 
 ### 4. Add your cards to track
-Open `ebay_pull.py` and edit the `CARDS_TO_TRACK` list:
-```python
-CARDS_TO_TRACK = [
-    "Charizard Base Set Holo",
-    "Pikachu 25th Anniversary",
-    # Add any card + set combo here
-]
+Add one card per line to `data/cards_to_track.txt`:
+```
+Charizard Base Set Holo
+Pikachu 25th Anniversary
 ```
 
-### 5. (Optional) Filter by listing condition
-Edit `CONDITIONS` in `ebay_pull.py` to limit which eBay listing conditions are tracked:
-```python
-CONDITIONS = ["UNGRADED", "GRADED"] 
-```
-
-### 6. Run it
+### 5. Run it
 ```bash
-python ebay_pull.py
+python main.py
 ```
 
----
+Point it at a different card list:
+```bash
+python main.py my_cards.txt
+```
+
+## Project Layout
+
+```
+├── ebaypricer/               # core package
+│   ├── config.py             # env vars, CLI args, constants
+│   ├── api.py                # eBay OAuth + Browse API search
+│   ├── db.py                 # SQLite init, inserts, price snapshots
+│   ├── models.py             # item parsing
+│   └── report.py             # console table + JSON export
+├── scripts/
+│   ├── gen_access_token.py   # OAuth user token generator
+│   └── pull_active.py        # fetch your active eBay listings
+├── data/                     # local-only runtime files
+│   ├── cards_to_track.txt
+│   ├── active_listings.txt
+│   └── pokemon_prices.db
+├── main.py                   # entry point
+├── .env.example
+└── requirements.txt
+```
 
 ## Output
 
@@ -54,40 +67,20 @@ Card                                Wtd Avg    Median       Avg     Min     Max 
 Charizard Base Set Holo            $245.00   $230.00   $238.00  $80.00 $450.00   42
 ```
 
-### SQLite database (`pokemon_prices.db`)
+### SQLite database (`data/pokemon_prices.db`)
 Two tables:
 - **`sold_listings`** — raw sold data (deduplicated by eBay item ID)
 - **`price_snapshots`** — daily pricing model per card
 
-Query example:
-```sql
-SELECT card_query, weighted_avg, median_price, sample_size
-FROM price_snapshots
-WHERE snapshot_date = date('now')
-ORDER BY weighted_avg DESC;
-```
-
-### JSON export (`price_report.json`)
+### JSON export (`data/price_report.json`)
 Today's snapshot exported for use in spreadsheets or other tools.
-
----
 
 ## Pricing Model Logic
 
 | Factor | How it's handled |
 |---|---|
-| Listing type | Auctions adjusted +12% toward BIN fair value |
 | Recency | Last 14 days weighted 2× vs older sales |
 | Outliers | Prices beyond 2 std deviations removed |
 | Low liquidity | Flagged by low `sample_size` — treat with caution |
 
 The **`weighted_avg`** column is your primary recommended list price.
-
----
-
-## Tips for better results
-
-- **Be specific with card names** — include set name and variant (Holo, Reverse Holo, 1st Edition)
-- **Check `sample_size`** — fewer than 5 comps means the price is unreliable
-- **PSA/BGS graded cards** — add the grade to the query, e.g. `"Charizard Base Set PSA 10"`
-- **Lots** — eBay lots will skew prices; the category filter (2536) helps exclude most but not all

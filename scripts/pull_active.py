@@ -3,7 +3,8 @@ import xml.etree.ElementTree as ET
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(dotenv_path=_env_path)
 
 # Load token from file saved by your OAuth script, or fallback to .env
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")

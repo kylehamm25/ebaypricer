@@ -20,7 +20,6 @@ DB_PATH       = os.getenv("DB_PATH", "pokemon_prices.db")
 LOOKBACK_DAYS = 150
 OUTLIER_SIGMA = 2.0  
 LISTING_LIMIT  = 50 
-CONDITIONS = ["Ungraded"]
 
 
 def parse_args():
@@ -134,9 +133,9 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     )
 
     if resp.status_code == 429:
-        log.warning("Rate limited — sleeping 60s")
+        log.warning("Rate limited — sleeping 60s before retry")
         time.sleep(60)
-        return []
+        return search_sold_listings(query, days_back)
 
     resp.raise_for_status()
     data = resp.json()
@@ -182,14 +181,6 @@ def parse_item(item: dict, card_query: str) -> dict | None:
         return None
 
 
-def remove_outliers(prices: list[float], sigma: float = 2.0) -> list[float]:
-    """Remove prices more than `sigma` standard deviations from the mean."""
-    if len(prices) < 4:
-        return prices
-    m, s = mean(prices), stdev(prices)
-    return [p for p in prices if abs(p - m) <= sigma * s]
-
-
 # ── Pricing Model ─────────────────────────────────────────────────────────────
 def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int = 30):
     """
@@ -229,12 +220,14 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
         log.warning(f"  All prices for '{card_query}' were outliers — skipping.")
         return
 
-    # Derive prices and weighted list from the same cleaned pairs
+    # Derive prices and weighted average from the same cleaned pairs
     prices = [p for p, _ in pairs]
-    weighted = []
+    weighted_sum = 0.0
+    weight_total = 0
     for p, sold_date in pairs:
-        weight = 2 if sold_date >= recent_cutoff else 1
-        weighted.extend([p] * weight)
+        w = 2 if sold_date >= recent_cutoff else 1
+        weighted_sum += p * w
+        weight_total += w
 
     sorted_p = sorted(prices)
     n = len(sorted_p)
@@ -249,7 +242,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
         "min_price":     round(min(prices), 2),
         "max_price":     round(max(prices), 2),
         "std_dev":       round(stdev(prices), 2) if n > 1 else 0.0,
-        "weighted_avg":  round(mean(weighted), 2),
+        "weighted_avg":  round(weighted_sum / weight_total, 2),
     }
 
     conn.execute(
@@ -296,52 +289,57 @@ def print_report(conn: sqlite3.Connection):
 def export_json(conn: sqlite3.Connection, path: str = "price_report.json"):
     today = datetime.now(timezone.utc).date().isoformat()
     rows = conn.execute(
-        "SELECT * FROM price_snapshots WHERE snapshot_date = ?", (today,)
+        "SELECT card_query, snapshot_date, sample_size, avg_price, median_price, "
+        "min_price, max_price, std_dev, weighted_avg FROM price_snapshots WHERE snapshot_date = ?",
+        (today,)
     ).fetchall()
-    cols = [d[0] for d in conn.execute("SELECT * FROM price_snapshots LIMIT 0").description]
+    cols = ["card_query", "snapshot_date", "sample_size", "avg_price", "median_price",
+            "min_price", "max_price", "std_dev", "weighted_avg"]
     data = [dict(zip(cols, row)) for row in rows]
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
 def main():
     conn = init_db(DB_PATH)
-    for card in CARDS_TO_TRACK:
-        log.info(f" Pulling sold listings for: {card}")
-        try:
-            items = search_sold_listings(card, LOOKBACK_DAYS)
-        except requests.HTTPError as e:
-            log.error(f"eBay API error for '{card}': {e}")
-            continue
-
-        inserted = 0
-        for raw in items:
-            parsed = parse_item(raw, card)
-            if not parsed:
-                continue
+    try:
+        for card in CARDS_TO_TRACK:
+            log.info(f" Pulling sold listings for: {card}")
             try:
-                conn.execute(
-                    """
-                    INSERT OR IGNORE INTO sold_listings
-                        (item_id, card_query, title, price, currency, condition,
-                         listing_type, sold_date, url, pulled_at)
-                    VALUES
-                        (:item_id, :card_query, :title, :price, :currency, :condition,
-                         :listing_type, :sold_date, :url, :pulled_at)
-                    """,
-                    parsed,
-                )
-                inserted += 1
-            except sqlite3.Error as e:
-                log.debug(f"DB insert error: {e}")
+                items = search_sold_listings(card, LOOKBACK_DAYS)
+            except requests.HTTPError as e:
+                log.error(f"eBay API error for '{card}': {e}")
+                continue
 
-        conn.commit()
-        log.info(f" Inserted {inserted} new listings\n")
-        compute_snapshot(conn, card, LOOKBACK_DAYS)
-        time.sleep(1)
+            inserted = 0
+            for raw in items:
+                parsed = parse_item(raw, card)
+                if not parsed:
+                    continue
+                try:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO sold_listings
+                            (item_id, card_query, title, price, currency, condition,
+                             listing_type, sold_date, url, pulled_at)
+                        VALUES
+                            (:item_id, :card_query, :title, :price, :currency, :condition,
+                             :listing_type, :sold_date, :url, :pulled_at)
+                        """,
+                        parsed,
+                    )
+                    inserted += 1
+                except sqlite3.Error as e:
+                    log.debug(f"DB insert error: {e}")
 
-    print_report(conn)
-    export_json(conn)
-    conn.close()
+            conn.commit()
+            log.info(f" Inserted {inserted} new listings\n")
+            compute_snapshot(conn, card, LOOKBACK_DAYS)
+            time.sleep(1)
+
+        print_report(conn)
+        export_json(conn)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

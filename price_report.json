@@ -1,26 +1,14 @@
 [
   {
-    "id": 1,
-    "card_query": "MEGA VENUSAUR EX MEP013",
-    "snapshot_date": "2026-06-18",
-    "sample_size": 3,
-    "avg_price": 4.95,
-    "median_price": 4.26,
-    "min_price": 3.5,
-    "max_price": 7.09,
-    "std_dev": 1.89,
-    "weighted_avg": 5.48
-  },
-  {
-    "id": 2,
-    "card_query": "yveltal ex xy150a",
-    "snapshot_date": "2026-06-18",
-    "sample_size": 1,
-    "avg_price": 243.44,
-    "median_price": 243.44,
-    "min_price": 243.44,
-    "max_price": 243.44,
-    "std_dev": 0.0,
-    "weighted_avg": 243.44
+    "id": 10,
+    "card_query": "Wigglytuff ex 040",
+    "snapshot_date": "2026-06-20",
+    "sample_size": 47,
+    "avg_price": 2.05,
+    "median_price": 1.99,
+    "min_price": 1.0,
+    "max_price": 4.61,
+    "std_dev": 0.82,
+    "weighted_avg": 2.05
   }
 ]

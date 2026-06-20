@@ -4,6 +4,7 @@ import requests
 import json
 import time
 import logging
+import argparse
 from datetime import datetime, timedelta, timezone
 from statistics import mean, stdev
 from dotenv import load_dotenv
@@ -13,20 +14,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # Config
-EBAY_APP_ID   = os.getenv("EBAY_APP_ID")       # Client ID from eBay Developer portal
-EBAY_SECRET   = os.getenv("EBAY_SECRET")       # Client Secret from eBay Developer portal
+EBAY_APP_ID   = os.getenv("EBAY_APP_ID")     
+EBAY_SECRET   = os.getenv("EBAY_SECRET")  
 DB_PATH       = os.getenv("DB_PATH", "pokemon_prices.db")
-LOOKBACK_DAYS = 30   # How far back to pull sold data
-OUTLIER_SIGMA = 2.0  # Std-dev threshold for outlier removal
-LISTING_LIMIT  = 50  # Max number of sold listings to pull per card
+LOOKBACK_DAYS = 150
+OUTLIER_SIGMA = 2.0  
+LISTING_LIMIT  = 50 
 CONDITIONS = ["Ungraded"]
 
 
-# Cards to track
-CARDS_TO_TRACK = [
-    "MEGA VENUSAUR EX MEP013",
-    "yveltal ex xy150a",
-]
+def parse_args():
+    parser = argparse.ArgumentParser(description="Pull eBay sold prices for Pokémon cards.")
+    parser.add_argument("txt", nargs="?", default="cards_to_track.txt",
+                        help="Path to a .txt file with one card name per line")
+    return parser.parse_args()
+
+
+args = parse_args()
+CARDS_FILE = args.txt
+
+with open(CARDS_FILE) as f:
+    CARDS_TO_TRACK = [line.strip() for line in f if line.strip()]
 
 # ── OAuth token ───────────────────────────────────────────────────────────────
 _token_cache: dict = {}
@@ -204,7 +212,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
     if not rows:
         log.warning(f"  No data for '{card_query}' — skipping snapshot.")
         return
-        
+
     recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
 
     pairs: list[tuple[float, str]] = []

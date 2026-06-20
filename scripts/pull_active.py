@@ -1,13 +1,47 @@
+import base64
 import requests
 import xml.etree.ElementTree as ET
 import os
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path)
 
-# Load token from file saved by your OAuth script, or fallback to .env
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
+REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+EBAY_APP_ID = os.getenv("EBAY_APP_ID")
+EBAY_SECRET = os.getenv("EBAY_SECRET")
+
+
+def refresh_access_token() -> str | None:
+    global ACCESS_TOKEN
+    if not REFRESH_TOKEN:
+        print("No REFRESH_TOKEN in .env — can't auto-refresh.")
+        return ACCESS_TOKEN
+
+    basic_auth = base64.b64encode(f"{EBAY_APP_ID}:{EBAY_SECRET}".encode()).decode()
+    r = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {basic_auth}",
+        },
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": REFRESH_TOKEN,
+            "scope": "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+        },
+        timeout=10,
+    )
+    if r.status_code != 200:
+        print(f"Token refresh failed ({r.status_code}): {r.text}")
+        return ACCESS_TOKEN
+
+    data = r.json()
+    ACCESS_TOKEN = data["access_token"]
+    set_key(_env_path, "ACCESS_TOKEN", ACCESS_TOKEN)
+    print("Access token refreshed and saved to .env")
+    return ACCESS_TOKEN
 
 NS = "urn:ebay:apis:eBLBaseComponents"
 
@@ -34,6 +68,7 @@ def get_active_listings() -> list[dict]:
 
     all_listings = []
     page = 1
+    retried = False
 
     while True:
         r = requests.post(
@@ -51,7 +86,16 @@ def get_active_listings() -> list[dict]:
         if ack not in ("Success", "Warning"):
             errors = root.findall(f".//{{{NS}}}ShortMessage")
             for e in errors:
-                print("eBay error:", e.text)
+                emsg = e.text or ""
+                print("eBay error:", emsg)
+            # Auto-refresh on expired token and retry once
+            if not retried and any("hard expired" in (e.text or "") for e in errors):
+                refresh_access_token()
+                headers["X-EBAY-API-IAF-TOKEN"] = ACCESS_TOKEN
+                retried = True
+                page = 1
+                all_listings = []
+                continue
             break
 
         # Parse listings

@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 from datetime import datetime, timedelta, timezone
+from math import exp
 from statistics import mean, stdev
 from .config import DB_PATH, LOOKBACK_DAYS, OUTLIER_SIGMA
 
@@ -80,7 +81,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
         log.warning(f"  No data for '{card_query}' — skipping snapshot.")
         return
 
-    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+    now = datetime.now(timezone.utc)
 
     pairs: list[tuple[float, str]] = []
     for price, listing_type, sold_date in rows:
@@ -97,9 +98,10 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
 
     prices = [p for p, _ in pairs]
     weighted_sum = 0.0
-    weight_total = 0
+    weight_total = 0.0
     for p, sold_date in pairs:
-        w = 2 if sold_date >= recent_cutoff else 1
+        days = (now - datetime.fromisoformat(sold_date)).days
+        w = exp(-days / 7)
         weighted_sum += p * w
         weight_total += w
 

@@ -33,7 +33,7 @@ def get_ebay_token() -> str:
     return _token_cache["token"]
 
 
-def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
+def search_sold_listings(query: str, LOOKBACK_DAYS: int) -> list[dict]:
     token = get_ebay_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -42,7 +42,7 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     }
 
     date_from = (
-        datetime.now(timezone.utc) - timedelta(days=days_back)
+        datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
     ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     params = {
@@ -62,7 +62,7 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     if resp.status_code == 429:
         log.warning("Rate limited — sleeping 60s before retry")
         time.sleep(60)
-        return search_sold_listings(query, days_back)
+        return search_sold_listings(query, LOOKBACK_DAYS)
 
     resp.raise_for_status()
     data = resp.json()

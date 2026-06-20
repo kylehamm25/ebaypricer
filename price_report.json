@@ -1,0 +1,35 @@
+[
+  {
+    "card_query": "mega Charizard",
+    "snapshot_date": "2026-06-20",
+    "sample_size": 38,
+    "avg_price": 272.72,
+    "median_price": 51.91,
+    "min_price": 1.0,
+    "max_price": 1500.0,
+    "std_dev": 461.54,
+    "weighted_avg": 254.25
+  },
+  {
+    "card_query": "Mega Clefable ex 103",
+    "snapshot_date": "2026-06-20",
+    "sample_size": 30,
+    "avg_price": 13.71,
+    "median_price": 10.47,
+    "min_price": 2.12,
+    "max_price": 59.99,
+    "std_dev": 11.11,
+    "weighted_avg": 10.58
+  },
+  {
+    "card_query": "Drakloak 248",
+    "snapshot_date": "2026-06-20",
+    "sample_size": 34,
+    "avg_price": 13.63,
+    "median_price": 12.59,
+    "min_price": 8.98,
+    "max_price": 24.99,
+    "std_dev": 3.89,
+    "weighted_avg": 11.24
+  }
+]

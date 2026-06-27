@@ -1,0 +1,20 @@
+{
+  "name": "ebayprice",
+  "version": "1.0.0",
+  "description": "Pulls sold listings from the eBay Browse API and builds a local pricing model stored in SQLite.",
+  "homepage": "https://github.com/kylehamm25/ebaypricer#readme",
+  "bugs": {
+    "url": "https://github.com/kylehamm25/ebaypricer/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kylehamm25/ebaypricer.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}

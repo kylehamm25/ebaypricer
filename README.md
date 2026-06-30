@@ -79,12 +79,3 @@ Anacron runs all daily jobs shortly after boot, even on machines that aren't on 
 ├── .env.example
 └── requirements.txt
 ```
-
-## How it works
-
-1. **Fetch** — calls `GetMyeBaySelling` (Trading API) for orders after a cutoff date
-2. **Enrich** — calls the Finances API for fee data per order, matching by order/line-item ID
-3. **Combine** — collapses multi-item orders into single rows (joined Item IDs/Titles, summed Qty/Subtotal)
-4. **Dedup** — skips rows whose composite key `(Order ID, sorted Item IDs)` already exists in the workbook
-5. **Append** — writes new rows with alternating shading, auto-width columns, currency formatting  
-6. **Summary** — updates a Summary sheet with totals, averages, and fee breakdowns

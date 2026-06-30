@@ -1,86 +1,90 @@
-# eBay Pokémon Card Price Tracker
+# eBay Sold Orders Exporter
 
-Pulls sold listings from the eBay Browse API and builds a local pricing model stored in SQLite.
+Daily pipeline that fetches eBay sold orders via the Trading API, enriches them with fees from the Finances API, deduplicates, and appends them to an Excel workbook.
 
 ## Setup
 
 ### 1. Get eBay API Credentials
+
 1. Go to [developer.ebay.com](https://developer.ebay.com) and create an account
 2. Create a new app under **My Account → Application Keysets**
-3. Copy your **App ID (Client ID)** and **Client Secret**
+3. Copy your **App ID (Client ID)**, **Client Secret**, and **Dev ID**
 
 ### 2. Install dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure your credentials
+### 3. Configure credentials
+
 ```bash
 cp .env.example .env
-# Open .env and paste your App ID and Secret
+# Fill in EBAY_APP_ID, EBAY_SECRET, EBAY_DEV_ID
 ```
 
-### 4. Add your cards to track
-Add one card per line to `data/cards_to_track.txt`:
+### 4. Generate a refresh token
+
+```bash
+python scripts/gen_access_token.py
 ```
-Charizard Base Set Holo
-Pikachu 25th Anniversary
-```
+
+This opens a browser to authorize the app. Paste the redirected URL back into the terminal — the refresh token is saved to `.env` automatically.
 
 ### 5. Run it
+
 ```bash
-python main.py
+python scripts/append_sold_orders.py
 ```
 
-Point it at a different card list:
+## Usage
+
+### Append recent sold orders to an existing workbook
+
 ```bash
-python main.py my_cards.txt
+python scripts/append_sold_orders.py
 ```
+
+Options:
+
+| Flag | Description |
+|---|---|
+| `--output` | Output xlsx path (default: `H:\My Drive\ebay\ebay_sold_orders.xlsx`) |
+| `--days` | Fetch last N days (default `0` = use hardcoded cutoff `2026-06-29`) |
+
+### Daily automation (Linux / WSL)
+
+A bash wrapper is included for anacron/cron:
+
+```bash
+# Install anacron (Ubuntu/Debian)
+sudo apt install anacron
+
+# Copy the wrapper
+sudo cp scripts/run_daily.sh /etc/cron.daily/ebay_sold
+sudo chmod 755 /etc/cron.daily/ebay_sold
+```
+
+Anacron runs all daily jobs shortly after boot, even on machines that aren't on 24/7.
 
 ## Project Layout
 
 ```
-├── ebaypricer/               # core package
-│   ├── config.py             # env vars, CLI args, constants
-│   ├── api.py                # eBay OAuth + Browse API search
-│   ├── db.py                 # SQLite init, inserts, price snapshots
-│   ├── models.py             # item parsing
-│   └── report.py             # console table + JSON export
 ├── scripts/
-│   ├── gen_access_token.py   # OAuth user token generator
-│   └── pull_active.py        # fetch your active eBay listings
-├── data/                     # local-only runtime files
-│   ├── cards_to_track.txt
-│   ├── active_listings.txt
-│   └── pokemon_prices.db
-├── main.py                   # entry point
+│   ├── append_sold_orders.py   # main daily pipeline
+│   ├── sold_api.py             # shared OAuth + Trading API helpers
+│   ├── get_sold_from_CSV.py    # CSV→xlsx conversion + fee fetching
+│   ├── run_daily.sh            # bash wrapper for anacron/cron
+│   └── gen_access_token.py     # one-time OAuth refresh token setup
 ├── .env.example
 └── requirements.txt
 ```
 
-## Output
+## How it works
 
-### Console report
-Prints a pricing table on every run:
-```
-Card                                Wtd Avg    Median       Avg     Min     Max    n
-Charizard Base Set Holo            $245.00   $230.00   $238.00  $80.00 $450.00   42
-```
-
-### SQLite database (`data/pokemon_prices.db`)
-Two tables:
-- **`sold_listings`** — raw sold data (deduplicated by eBay item ID)
-- **`price_snapshots`** — daily pricing model per card
-
-### JSON export (`data/price_report.json`)
-Today's snapshot exported for use in spreadsheets or other tools.
-
-## Pricing Model Logic
-
-| Factor | How it's handled |
-|---|---|
-| Recency | Last 14 days weighted 2× vs older sales |
-| Outliers | Prices beyond 2 std deviations removed |
-| Low liquidity | Flagged by low `sample_size` — treat with caution |
-
-The **`weighted_avg`** column is your primary recommended list price.
+1. **Fetch** — calls `GetMyeBaySelling` (Trading API) for orders after a cutoff date
+2. **Enrich** — calls the Finances API for fee data per order, matching by order/line-item ID
+3. **Combine** — collapses multi-item orders into single rows (joined Item IDs/Titles, summed Qty/Subtotal)
+4. **Dedup** — skips rows whose composite key `(Order ID, sorted Item IDs)` already exists in the workbook
+5. **Append** — writes new rows with alternating shading, auto-width columns, currency formatting  
+6. **Summary** — updates a Summary sheet with totals, averages, and fee breakdowns

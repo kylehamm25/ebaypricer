@@ -1,0 +1,294 @@
+import base64
+import os
+import sys
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+
+import requests
+from dotenv import load_dotenv, set_key
+
+_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(dotenv_path=_env_path)
+
+NS = "urn:ebay:apis:eBLBaseComponents"
+TRADING_URL = "https://api.ebay.com/ws/api.dll"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _write_env_key(env_path: str, key: str, value: str) -> None:
+    set_key(env_path, key, value)
+
+
+def _t(el, tag: str) -> str:
+    child = el.find(f"{{{NS}}}{tag}")
+    return (child.text or "").strip() if child is not None and child.text else ""
+
+
+def _f(el, path: str, default: float = 0.0) -> float:
+    node = el.find(path)
+    if node is not None and node.text:
+        try:
+            return float(node.text)
+        except ValueError:
+            return default
+    return default
+
+
+def _parse_usd(val: str) -> float:
+    val = val.strip().lstrip("$").replace(",", "")
+    try:
+        return float(val) if val else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _parse_csv_date(date_str: str) -> str:
+    months = {
+        "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
+        "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
+        "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
+    }
+    try:
+        parts = date_str.strip().replace(".", "").split("-")
+        if len(parts) == 3:
+            mon = months.get(parts[0].title(), "01")
+            day = parts[1].zfill(2)
+            yr = ("20" + parts[2]) if len(parts[2]) == 2 else parts[2]
+            return f"{yr}-{mon}-{day}"
+    except (IndexError, KeyError):
+        pass
+    return date_str
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+def get_access_token() -> str:
+    app_id = os.getenv("EBAY_APP_ID")
+    secret = os.getenv("EBAY_SECRET")
+    refresh = os.getenv("REFRESH_TOKEN")
+    dev_id = os.getenv("EBAY_DEV_ID")
+    if not app_id or not secret or not dev_id or not refresh:
+        print("ERROR: EBAY_APP_ID, EBAY_DEV_ID, EBAY_SECRET, and REFRESH_TOKEN must all be set in .env")
+        sys.exit(1)
+
+    credentials = base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+    resp = requests.post(
+        "https://api.ebay.com/identity/v1/oauth2/token",
+        headers={
+            "Authorization": f"Basic {credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh,
+        },
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        print(f"Token refresh failed ({resp.status_code}): {resp.text}")
+        sys.exit(1)
+
+    access_token = resp.json()["access_token"]
+    _write_env_key(_env_path, "ACCESS_TOKEN", access_token)
+    print("Access token refreshed and saved to .env")
+    return access_token
+
+
+# ── Trading API ───────────────────────────────────────────────────────────────
+
+def _build_xml(page: int, start_dt: datetime, end_dt: datetime, access_token: str) -> str:
+    start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    end_str   = end_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{NS}">
+  <RequesterCredentials>
+    <eBayAuthToken>{access_token}</eBayAuthToken>
+  </RequesterCredentials>
+  <SoldList>
+    <Include>true</Include>
+    <OrderStatusFilter>All</OrderStatusFilter>
+    <StartTimeFrom>{start_str}</StartTimeFrom>
+    <StartTimeTo>{end_str}</StartTimeTo>
+    <Pagination>
+      <EntriesPerPage>200</EntriesPerPage>
+      <PageNumber>{page}</PageNumber>
+    </Pagination>
+    <Sort>EndTimeDescending</Sort>
+  </SoldList>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetMyeBaySellingRequest>"""
+
+
+def _trading_headers(access_token: str) -> dict:
+    return {
+        "X-EBAY-API-CALL-NAME":           "GetMyeBaySelling",
+        "X-EBAY-API-SITEID":              "0",
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "967",
+        "X-EBAY-API-APP-NAME":            os.getenv("EBAY_APP_ID", ""),
+        "X-EBAY-API-DEV-NAME":            os.getenv("EBAY_DEV_ID", ""),
+        "X-EBAY-API-CERT-NAME":           os.getenv("EBAY_SECRET", ""),
+        "X-EBAY-API-IAF-TOKEN":           access_token,
+        "Content-Type":                   "text/xml",
+    }
+
+
+def _parse_address(addr_el) -> tuple[str, str, str, str]:
+    if addr_el is None:
+        return "", "", "", ""
+    return (
+        addr_el.findtext(f"{{{NS}}}CityName") or "",
+        addr_el.findtext(f"{{{NS}}}StateOrProvince") or "",
+        addr_el.findtext(f"{{{NS}}}PostalCode") or "",
+        addr_el.findtext(f"{{{NS}}}Country") or "",
+    )
+
+
+def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, order_total) -> dict:
+    title   = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
+    sku     = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
+    item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
+    price_el = txn_el.find(f"{{{NS}}}TransactionPrice")
+    item_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
+    qty_el = txn_el.find(f"{{{NS}}}QuantityPurchased")
+    qty = int(qty_el.text) if qty_el is not None and qty_el.text else 1
+
+    return {
+        "Order ID":     order_id,
+        "Item ID":      item_id,
+        "Sale Date":    created,
+        "Buyer":        buyer,
+        "Item Title":   title,
+        "SKU":          sku,
+        "Quantity":     qty,
+        "Item Price":   item_price,
+        "Subtotal":     subtotal,
+        "Shipping":     shipping,
+        "Order Total":  order_total,
+    }
+
+
+def _parse_order(order_el, rows: list) -> None:
+    order_id      = _t(order_el, "OrderID")
+    created       = _t(order_el, "CreatedTime")[:10]
+    status        = _t(order_el, "OrderStatus")
+    buyer         = order_el.findtext(f".//{{{NS}}}BuyerUserID") or ""
+    total_el      = order_el.find(f"{{{NS}}}Total")
+    order_total   = float(total_el.text) if total_el is not None and total_el.text else 0.0
+    currency      = total_el.get("currencyID", "USD") if total_el is not None else "USD"
+    subtotal_el   = order_el.find(f"{{{NS}}}Subtotal")
+    subtotal      = float(subtotal_el.text) if subtotal_el is not None and subtotal_el.text else 0.0
+    tax_el        = order_el.find(f".//{{{NS}}}SalesTax/{{{NS}}}SalesTaxAmount")
+    tax           = float(tax_el.text) if tax_el is not None and tax_el.text else 0.0
+
+    shipping = _f(order_el, f".//{{{NS}}}ShippingServiceSelected/{{{NS}}}ShippingServiceCost")
+    if shipping == 0.0:
+        shipping = _f(order_el, f".//{{{NS}}}ShippingDetails/{{{NS}}}ShippingServiceOptions/{{{NS}}}ShippingServiceCost")
+    if shipping == 0.0:
+        calc = round(order_total - subtotal - tax, 2)
+        if calc > 0:
+            shipping = calc
+
+    for txn in order_el.findall(f".//{{{NS}}}Transaction"):
+        rows.append(_build_row(
+            order_id=order_id,
+            created=created,
+            status=status,
+            buyer=buyer,
+            txn_el=txn,
+            subtotal=subtotal,
+            shipping=shipping,
+            order_total=order_total,
+        ))
+
+
+def _parse_transaction(txn_el, rows: list) -> None:
+    order_id      = _t(txn_el, "OrderLineItemID") or _t(txn_el, "TransactionID")
+    created       = _t(txn_el, "CreatedDate")[:10]
+    status        = txn_el.findtext(f".//{{{NS}}}CheckoutStatus/{{{NS}}}Status") or ""
+    buyer         = txn_el.findtext(f".//{{{NS}}}Buyer/{{{NS}}}UserID") or ""
+    total_el      = txn_el.find(f"{{{NS}}}TransactionPrice")
+    item_price    = float(total_el.text) if total_el is not None and total_el.text else 0.0
+    ship_cost_el  = txn_el.find(f".//{{{NS}}}ActualShippingCost")
+    shipping      = float(ship_cost_el.text) if ship_cost_el is not None and ship_cost_el.text else 0.0
+    if shipping == 0.0:
+        shipping = _f(txn_el, f".//{{{NS}}}ShippingDetails/{{{NS}}}ShippingServiceOptions/{{{NS}}}ShippingServiceCost")
+    tax_el        = txn_el.find(f".//{{{NS}}}Taxes/{{{NS}}}TotalTaxAmount")
+    tax           = float(tax_el.text) if tax_el is not None and tax_el.text else 0.0
+    qty_el        = txn_el.find(f"{{{NS}}}QuantityPurchased")
+    qty           = int(qty_el.text) if qty_el is not None and qty_el.text else 1
+    order_total   = round(item_price * qty + shipping + tax, 2)
+    addr_el       = txn_el.find(f".//{{{NS}}}Buyer/{{{NS}}}BuyerInfo/{{{NS}}}ShippingAddress")
+    ship_city, ship_state, ship_zip, ship_country = _parse_address(addr_el)
+
+    title  = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
+    sku    = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
+    item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
+
+    rows.append({
+        "Order ID":     order_id,
+        "Item ID":      item_id,
+        "Sale Date":    created,
+        "Buyer":        buyer,
+        "Item Title":   title,
+        "SKU":          sku,
+        "Quantity":     qty,
+        "Item Price":   item_price,
+        "Subtotal":     round(item_price * qty, 2),
+        "Shipping":     shipping,
+        "Order Total":  order_total,
+    })
+
+
+def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
+    headers = _trading_headers(access_token)
+    rows = []
+    page = 1
+
+    while True:
+        resp = requests.post(
+            TRADING_URL,
+            headers=headers,
+            data=_build_xml(page, start_dt, end_dt, access_token),
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        root = ET.fromstring(resp.text)
+        ack = _t(root, "Ack")
+
+        if ack not in ("Success", "Warning"):
+            errors = root.findall(f".//{{{NS}}}ShortMessage")
+            long_errors = root.findall(f".//{{{NS}}}LongMessage")
+            error_codes = root.findall(f".//{{{NS}}}ErrorCode")
+            for code, short, long_ in zip(error_codes, errors, long_errors):
+                print(f"eBay error [{code.text}]: {short.text} — {long_.text}")
+            if not errors:
+                print("Raw response:", resp.text[:2000])
+            sys.exit(1)
+
+        orders = root.findall(
+            f".//{{{NS}}}SoldList/{{{NS}}}OrderTransactionArray/"
+            f"{{{NS}}}OrderTransaction"
+        )
+
+        for ot in orders:
+            order_el = ot.find(f"{{{NS}}}Order")
+            txn_el   = ot.find(f"{{{NS}}}Transaction")
+
+            if order_el is not None:
+                _parse_order(order_el, rows)
+            elif txn_el is not None:
+                _parse_transaction(txn_el, rows)
+
+        total_pages_el = root.find(
+            f".//{{{NS}}}SoldList/{{{NS}}}PaginationResult/{{{NS}}}TotalNumberOfPages"
+        )
+        total_pages = int(total_pages_el.text) if total_pages_el is not None and total_pages_el.text else 1
+        print(f"  Page {page}/{total_pages} — {len(orders)} transactions")
+
+        if page >= total_pages:
+            break
+        page += 1
+
+    return rows

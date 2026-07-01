@@ -52,26 +52,30 @@ def read_header_cols(ws: Worksheet) -> dict[str, int]:
     return col
 
 
-def get_existing_keys(ws: Worksheet) -> set[tuple[str, tuple[str, ...]]]:
-    """Build dedup key set of (Order ID, sorted-Item-IDs) from existing rows."""
+def get_existing_keys(ws: Worksheet) -> set[tuple[tuple[str, ...], str]]:
+    """Build dedup key set of (sorted Item IDs, Sale Date) from existing rows."""
     col = read_header_cols(ws)
-    oid_idx = col.get("Order ID", 0)
+    date_idx = col.get("Sale Date", 2)
     iid_idx = col.get("Item ID", 1)
-    keys: set[tuple[str, tuple[str, ...]]] = set()
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        oid = str(row[oid_idx]).strip() if len(row) > oid_idx and row[oid_idx] is not None else ""
+    last_data_row = find_last_data_row(ws)
+    keys: set[tuple[tuple[str, ...], str]] = set()
+    row_count = 0
+    for row in ws.iter_rows(min_row=2, max_row=last_data_row, values_only=True):
+        row_count += 1
+        date = str(row[date_idx]).strip() if len(row) > date_idx and row[date_idx] is not None else ""
         iid_raw = str(row[iid_idx]).strip() if len(row) > iid_idx and row[iid_idx] is not None else ""
         item_ids = tuple(sorted(i.strip() for i in iid_raw.split("; ") if i.strip()))
-        if oid:
-            keys.add((oid, item_ids))
+        if item_ids:
+            keys.add((item_ids, date))
+    print(f"  Scanned {row_count} data rows ({len(keys)} unique keys, ws.max_row={ws.max_row})")
     return keys
 
 
-def order_key(order: dict) -> tuple[str, tuple[str, ...]]:
-    oid = order.get("Order ID", "")
+def order_key(order: dict) -> tuple[tuple[str, ...], str]:
     iid_raw = order.get("Item ID", "")
     item_ids = tuple(sorted(i.strip() for i in iid_raw.split("; ") if i.strip()))
-    return (oid, item_ids)
+    date = order.get("Sale Date", "")
+    return (item_ids, date)
 
 
 def find_last_data_row(ws: Worksheet) -> int:
@@ -204,9 +208,32 @@ def main():
     raw_rows = fetch_sold_orders(token, start_dt, now)
     print(f"  API returned {len(raw_rows)} line items")
 
+    # Deduplicate by (Item ID, Sale Date) — same item can appear via Order
+    # element and standalone Transaction with different Order IDs.
+    # Prefer the entry with the real-looking Order ID (doesn't start with Item ID).
+    seen: dict = {}
+    deduped = []
+    for r in raw_rows:
+        key = (r["Item ID"], r.get("Sale Date", ""))
+        if key not in seen:
+            seen[key] = len(deduped)
+            deduped.append(r)
+        else:
+            existing = deduped[seen[key]]
+            existing_oid = existing.get("Order ID", "")
+            candidate_oid = r.get("Order ID", "")
+            # Prefer the one whose Order ID doesn't start with the Item ID
+            # (real Order IDs have a different format than ItemID-TransactionID)
+            if existing_oid.startswith(existing.get("Item ID", "")) and not candidate_oid.startswith(r.get("Item ID", "")):
+                deduped[seen[key]] = r
+    if len(deduped) < len(raw_rows):
+        print(f"  Removed {len(raw_rows) - len(deduped)} duplicate line items")
+    raw_rows = deduped
+
     if not raw_rows:
         print(f"No orders found after {label}.")
         sys.exit(0)
+
 
     fee_start = start_dt - timedelta(days=15)
     fees_by_order, item_id_index = fetch_finance_fees(token, fee_start, now)
@@ -219,7 +246,7 @@ def main():
 
     xlsx_path = args.output
     existing_keys: set = set()
-
+    
     fetched_keys = {order_key(r) for r in combined}
 
     if os.path.exists(xlsx_path):
@@ -227,9 +254,11 @@ def main():
         wb = load_workbook(xlsx_path)
         ws = wb["Sold Orders"]
         existing_keys = get_existing_keys(ws)
-        pre_existing = existing_keys - fetched_keys
-        print(f"  Orders in file before this fetch: {len(pre_existing)}")
+        total = len(existing_keys)
+        overlapping = len(existing_keys & fetched_keys)
+        print(f"  Orders in file before this fetch: {total} ({overlapping} overlap with current fetch)")
     else:
+        existing_keys = set()
         print("No existing workbook found, creating new one")
         wb, ws = create_new_workbook(headers)
 

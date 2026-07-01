@@ -203,7 +203,8 @@ def _parse_order(order_el, rows: list) -> None:
 
 
 def _parse_transaction(txn_el, rows: list) -> None:
-    order_id      = _t(txn_el, "OrderLineItemID") or _t(txn_el, "TransactionID")
+    containing    = txn_el.find(f"{{{NS}}}ContainingOrder")
+    order_id      = (_t(containing, "OrderID") if containing is not None else "") or _t(txn_el, "OrderLineItemID") or _t(txn_el, "TransactionID")
     created       = _t(txn_el, "CreatedDate")[:10]
     status        = txn_el.findtext(f".//{{{NS}}}CheckoutStatus/{{{NS}}}Status") or ""
     buyer         = txn_el.findtext(f".//{{{NS}}}Buyer/{{{NS}}}UserID") or ""

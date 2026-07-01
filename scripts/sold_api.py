@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 import sys
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -287,6 +288,123 @@ def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -
         )
         total_pages = int(total_pages_el.text) if total_pages_el is not None and total_pages_el.text else 1
         print(f"  Page {page}/{total_pages} — {len(orders)} transactions")
+
+        if page >= total_pages:
+            break
+        page += 1
+
+    return rows
+
+
+# ── Active Listings ──────────────────────────────────────────────────────────
+
+def _build_active_xml(page: int, access_token: str) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetMyeBaySellingRequest xmlns="{NS}">
+  <RequesterCredentials>
+    <eBayAuthToken>{access_token}</eBayAuthToken>
+  </RequesterCredentials>
+  <ActiveList>
+    <Include>true</Include>
+    <Pagination>
+      <EntriesPerPage>200</EntriesPerPage>
+      <PageNumber>{page}</PageNumber>
+    </Pagination>
+    <Sort>TimeLeft</Sort>
+  </ActiveList>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetMyeBaySellingRequest>"""
+
+
+_DURATION_RE = re.compile(
+    r"P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?"
+)
+
+
+def _parse_iso_duration(duration: str) -> timedelta:
+    """Parse eBay's TimeLeft duration format, e.g. 'P2DT23H31M51S'."""
+    m = _DURATION_RE.match(duration or "")
+    if not m:
+        return timedelta()
+    parts = {k: int(v) if v else 0 for k, v in m.groupdict().items()}
+    return timedelta(days=parts["days"], hours=parts["hours"],
+                      minutes=parts["minutes"], seconds=parts["seconds"])
+
+
+def _parse_active_item(item_el, rows: list, now: datetime) -> None:
+    item_id = _t(item_el, "ItemID")
+    title = _t(item_el, "Title")
+ 
+    price_el = item_el.find(f"{{{NS}}}SellingStatus/{{{NS}}}CurrentPrice")
+    current_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
+ 
+    qty_avail_el = item_el.find(f"{{{NS}}}QuantityAvailable")
+    qty_available = int(qty_avail_el.text) if qty_avail_el is not None and qty_avail_el.text else 0
+ 
+    start_el = item_el.find(f"{{{NS}}}ListingDetails/{{{NS}}}StartTime")
+    start_date = ""
+    days_listed = 0
+    if start_el is not None and start_el.text:
+        start_dt = datetime.strptime(start_el.text[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        start_date = start_dt.strftime("%Y-%m-%d")
+        days_listed = (now - start_dt).days
+ 
+    watch_el = item_el.find(f"{{{NS}}}WatchCount")
+    watch_count = int(watch_el.text) if watch_el is not None and watch_el.text else 0
+ 
+    rows.append({
+        "Item ID":            item_id,
+        "Title":              title,
+        "Price":              current_price,
+        "Quantity Available": qty_available,
+        "Start Date":         start_date,
+        "Days Listed":        days_listed,
+        "Watchers":           watch_count,
+    })
+
+
+def fetch_active_listings(access_token: str) -> list[dict]:
+    headers = _trading_headers(access_token)
+    rows: list[dict] = []
+    page = 1
+    now = datetime.now(timezone.utc)
+
+    while True:
+        resp = requests.post(
+            TRADING_URL,
+            headers=headers,
+            data=_build_active_xml(page, access_token),
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        with open("active_listing_debug.xml", "w", encoding="utf-8") as f:
+            f.write(resp.text)
+
+        root = ET.fromstring(resp.text)
+        ack = _t(root, "Ack")
+
+        if ack not in ("Success", "Warning"):
+            errors = root.findall(f".//{{{NS}}}ShortMessage")
+            long_errors = root.findall(f".//{{{NS}}}LongMessage")
+            error_codes = root.findall(f".//{{{NS}}}ErrorCode")
+            for code, short, long_ in zip(error_codes, errors, long_errors):
+                print(f"eBay error [{code.text}]: {short.text} — {long_.text}")
+            if not errors:
+                print("Raw response:", resp.text[:2000])
+            sys.exit(1)
+
+        items = root.findall(
+            f".//{{{NS}}}ActiveList/{{{NS}}}ItemArray/{{{NS}}}Item"
+        )
+        for item_el in items:
+            _parse_active_item(item_el, rows, now)
+
+        total_pages_el = root.find(
+            f".//{{{NS}}}ActiveList/{{{NS}}}PaginationResult/{{{NS}}}TotalNumberOfPages"
+        )
+        total_pages = int(total_pages_el.text) if total_pages_el is not None and total_pages_el.text else 1
+        print(f"  Page {page}/{total_pages} — {len(items)} active listings")
 
         if page >= total_pages:
             break

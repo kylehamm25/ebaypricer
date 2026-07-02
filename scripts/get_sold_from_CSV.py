@@ -83,12 +83,11 @@ def read_csv_orders(csv_path: str) -> list[dict]:
                 "Sale Date": _parse_csv_date(csv_row[col["Sale Date"]]),
                 "Buyer": csv_row[col["Buyer Username"]].strip(),
                 "Item Title": csv_row[col["Item Title"]].strip(),
-                "SKU": csv_row[col["Custom Label"]].strip(),
                 "Quantity": qty,
-                "Item Price": sold_for,
                 "Subtotal": round(sold_for * qty, 2),
                 "Shipping": shipping,
                 "Order Total": total_price,
+                "SKU": csv_row[col["Custom Label"]].strip(),
             })
 
     if not rows:
@@ -313,13 +312,12 @@ def combine_orders(rows: list[dict]) -> list[dict]:
             "Sale Date": first["Sale Date"],
             "Buyer": first["Buyer"],
             "Item Title": "; ".join(r["Item Title"] for r in group),
-            "SKU": "; ".join(skus),
             "Quantity": sum(r["Quantity"] for r in group),
-            "Item Price": first["Item Price"],
             "Subtotal": sum(r["Subtotal"] for r in group),
             "Shipping": first["Shipping"],
             "Order Total": first["Order Total"],
             "Link": "; ".join(links),
+            "SKU": "; ".join(skus),
         })
         last = combined[-1]
         for key in ("Total eBay Fees", "Order Earnings"):
@@ -348,7 +346,7 @@ def write_excel(rows: list[dict], filename: str) -> str:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     data_font    = Font(name="Arial", size=10)
-    currency_cols = {"Item Price", "Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
+    currency_cols = {"Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
     int_cols      = {"Quantity"}
 
     for row_idx, row in enumerate(rows, 2):

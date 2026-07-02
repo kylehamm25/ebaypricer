@@ -23,13 +23,13 @@ from get_sold_from_CSV import (
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path)
 
-CUTOFF = datetime(2026, 6, 29, tzinfo=timezone.utc)
+CUTOFF = datetime(2026, 6, 30, tzinfo=timezone.utc)
 
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 DATA_FONT = Font(name="Arial", size=10)
 SHADE_FILL = PatternFill("solid", fgColor="EBF3FB")
-CURRENCY_COLS = {"Item Price", "Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
+CURRENCY_COLS = {"Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
 INT_COLS = {"Quantity"}
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
@@ -39,7 +39,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Append new eBay sold orders to existing Excel workbook")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT, help="Output xlsx path")
     parser.add_argument("--days", type=int, default=0,
-                        help="Fetch last N days (default 0 = use hardcoded cutoff 2026-06-29)")
+                        help="Fetch last N days (default 0 = use hardcoded cutoff 2026-06-30)")
     return parser.parse_args()
 
 
@@ -106,25 +106,32 @@ def _write_headers(ws: Worksheet, headers: list[str]) -> None:
 
 
 def write_data_rows(ws: Worksheet, rows: list[dict], start_row: int) -> None:
-    headers = list(rows[0].keys()) if rows else []
+    col_map = read_header_cols(ws)
+    if not col_map and rows:
+        col_map = {h: i for i, h in enumerate(rows[0].keys())}
     for row_idx, row in enumerate(rows, start_row):
-        for col_idx, h in enumerate(headers, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=row[h])
+        for h, val in row.items():
+            col_idx = col_map.get(h)
+            if col_idx is None:
+                continue
+            cell = ws.cell(row=row_idx, column=col_idx + 1, value=val)
             cell.font = DATA_FONT
             cell.alignment = Alignment(vertical="center")
-            if h in CURRENCY_COLS and row[h] is not None:
+            if h in CURRENCY_COLS and val is not None:
                 cell.number_format = '#,##0.00'
             elif h in INT_COLS:
                 cell.number_format = '0'
         if row_idx % 2 == 0:
-            for col_idx in range(1, len(headers) + 1):
-                shade = ws.cell(row=row_idx, column=col_idx)
-                shade.fill = SHADE_FILL
+            for col_idx in range(1, len(col_map) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = SHADE_FILL
 
 
-def auto_column_widths(ws: Worksheet, headers: list[str], rows: list[dict]) -> None:
-    for col_idx, h in enumerate(headers, 1):
-        col_letter = get_column_letter(col_idx)
+def auto_column_widths(ws: Worksheet, rows: list[dict]) -> None:
+    col_map = read_header_cols(ws)
+    if not col_map and rows:
+        col_map = {h: i for i, h in enumerate(rows[0].keys())}
+    for h, col_idx in col_map.items():
+        col_letter = get_column_letter(col_idx + 1)
         max_len = max(
             len(str(h)),
             max((len(str(row.get(h, ""))) for row in rows), default=0),
@@ -152,13 +159,13 @@ def main():
     raw_rows = fetch_sold_orders(token, start_dt, now)
     print(f"  API returned {len(raw_rows)} line items")
 
-    # Client-side date filter — the eBay API sometimes returns orders
-    # whose sale date falls before the requested StartTimeFrom window.
+    # Hard cutoff — only include orders whose Sale Date is on/after start_dt
     before = len(raw_rows)
-    raw_rows = [r for r in raw_rows if r.get("Sale Date", "") >= start_dt.strftime("%Y-%m-%d")]
+    min_date = start_dt.strftime("%Y-%m-%d")
+    raw_rows = [r for r in raw_rows if r.get("Sale Date", "") >= min_date]
     filtered = before - len(raw_rows)
     if filtered:
-        print(f"  Filtered out {filtered} line item(s) with sale date before {start_dt.date()}")
+        print(f"  Filtered out {filtered} line item(s) with sale date before {min_date}")
 
     # Deduplicate by (Item ID, Sale Date) — same item can appear via Order
     # element and standalone Transaction with different Order IDs.
@@ -227,7 +234,7 @@ def main():
         start_row = 2
 
     write_data_rows(ws, new_orders, start_row)
-    auto_column_widths(ws, headers, combined)
+    auto_column_widths(ws, combined)
 
     wb.save(xlsx_path)
     print(f"Appended {len(new_orders)} new order(s) (skipped {skipped} existing).")

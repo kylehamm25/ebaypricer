@@ -161,13 +161,12 @@ def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, ord
         "Sale Date":    created,
         "Buyer":        buyer,
         "Item Title":   title,
-        "SKU":          sku,
         "Quantity":     qty,
-        "Item Price":   item_price,
         "Subtotal":     subtotal,
         "Shipping":     shipping,
         "Order Total":  order_total,
         "Link":         link,
+        "SKU":          sku,
     }
 
 
@@ -193,11 +192,19 @@ def _parse_order(order_el, rows: list) -> None:
             shipping = calc
 
     for txn in order_el.findall(f".//{{{NS}}}Transaction"):
+        # <Order>/<CreatedTime> and <Order>/<BuyerUserID> are not always present
+        # (e.g. orders that only carry a <TransactionArray>). Fall back to the
+        # per-transaction <CreatedDate> / <Buyer><UserID> so rows never end up
+        # with an empty Sale Date, which silently fails the cutoff-date filter
+        # in append_sold_orders.py and drops the whole order.
+        txn_created = created or _t(txn, "CreatedDate")[:10]
+        txn_buyer = buyer or (txn.findtext(f".//{{{NS}}}Buyer/{{{NS}}}UserID") or "")
+
         rows.append(_build_row(
             order_id=order_id,
-            created=created,
+            created=txn_created,
             status=status,
-            buyer=buyer,
+            buyer=txn_buyer,
             txn_el=txn,
             subtotal=subtotal,
             shipping=shipping,
@@ -236,13 +243,12 @@ def _parse_transaction(txn_el, rows: list) -> None:
         "Sale Date":    created,
         "Buyer":        buyer,
         "Item Title":   title,
-        "SKU":          sku,
         "Quantity":     qty,
-        "Item Price":   item_price,
         "Subtotal":     round(item_price * qty, 2),
         "Shipping":     shipping,
         "Order Total":  order_total,
         "Link":         link,
+        "SKU":          sku,
     })
 
 

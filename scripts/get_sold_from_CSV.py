@@ -276,14 +276,16 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
         fees = fees_by_order.get(real_order_id) if real_order_id else None
         total_fees = round(sum(fees.values()), 2) if fees else None
 
+        deducted = False
         for row in group:
             row["Total eBay Fees"] = total_fees
             order_total = row.get("Order Total") or 0.0
             shipping = row.get("Shipping") or 0.0
             if total_fees is not None:
                 earnings = order_total - total_fees - shipping
-                if shipping == 0.0:
+                if shipping == 0.0 and not deducted:
                     earnings -= 0.74
+                    deducted = True
                 row["Order Earnings"] = round(earnings, 2)
             else:
                 row["Order Earnings"] = None

@@ -60,7 +60,10 @@ def _clear_sheet(ws: Worksheet) -> None:
 def write_data_rows(ws: Worksheet, rows: list[dict], headers: list[str], start_row: int = 2) -> None:
     for row_idx, row in enumerate(rows, start_row):
         for col_idx, h in enumerate(headers, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=row.get(h))
+            val = row.get(h)
+            if h == "Link" and val:
+                val = f'=HYPERLINK("{val}", "link")'
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
             cell.font = DATA_FONT
             cell.alignment = Alignment(vertical="center")
             if h in CURRENCY_COLS and row.get(h) is not None:

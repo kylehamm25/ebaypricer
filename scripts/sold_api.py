@@ -339,7 +339,7 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     item_id = _t(item_el, "ItemID")
     title = _t(item_el, "Title")
     sku = _t(item_el, "SKU")
-    link = _t(item_el, "ViewItemURL")
+    link = item_el.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}ViewItemURL") or ""
  
     price_el = item_el.find(f"{{{NS}}}SellingStatus/{{{NS}}}CurrentPrice")
     current_price = float(price_el.text) if price_el is not None and price_el.text else 0.0

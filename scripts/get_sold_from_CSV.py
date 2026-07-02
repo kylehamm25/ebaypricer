@@ -150,7 +150,6 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
             print("--- end debug ---\n")
 
         transactions = data.get("transactions", [])
-        print(f"  Finances page {page} — {len(transactions)} transactions")
 
         for txn in transactions:
             tdate = txn.get("transactionDate", "")

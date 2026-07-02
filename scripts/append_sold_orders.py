@@ -75,7 +75,6 @@ def get_existing_keys(ws: Worksheet) -> set[tuple[tuple[str, ...], str]]:
         item_ids = tuple(sorted(i.strip() for i in iid_raw.split("; ") if i.strip()))
         if item_ids:
             keys.add((item_ids, date))
-    print(f"  Scanned {row_count} data rows ({len(keys)} unique keys, ws.max_row={ws.max_row})")
     return keys
 
 
@@ -198,23 +197,15 @@ def main():
 
     print(f"Fetching orders after {label} -> {now.date()}")
 
-
     token = get_access_token()
 
     raw_rows = fetch_sold_orders(token, start_dt, now)
-    print(f"  API returned {len(raw_rows)} line items")
 
     # Hard cutoff — only include orders whose Sale Date is on/after start_dt
-    before = len(raw_rows)
     min_date = start_dt.strftime("%Y-%m-%d")
     raw_rows = [r for r in raw_rows if r.get("Sale Date", "") >= min_date]
-    filtered = before - len(raw_rows)
-    if filtered:
-        print(f"  Filtered out {filtered} line item(s) with sale date before {min_date}")
 
-    # Deduplicate by (Item ID, Sale Date) — same item can appear via Order
-    # element and standalone Transaction with different Order IDs.
-    # Prefer the entry with the real-looking Order ID (doesn't start with Item ID).
+    # Deduplicate by (Item ID, Sale Date)
     seen: dict = {}
     deduped = []
     for r in raw_rows:
@@ -226,26 +217,18 @@ def main():
             existing = deduped[seen[key]]
             existing_oid = existing.get("Order ID", "")
             candidate_oid = r.get("Order ID", "")
-            # Prefer the one whose Order ID doesn't start with the Item ID
-            # (real Order IDs have a different format than ItemID-TransactionID)
             if existing_oid.startswith(existing.get("Item ID", "")) and not candidate_oid.startswith(r.get("Item ID", "")):
                 deduped[seen[key]] = r
-    if len(deduped) < len(raw_rows):
-        print(f"  Removed {len(raw_rows) - len(deduped)} duplicate line items")
     raw_rows = deduped
 
     if not raw_rows:
         print(f"No orders found after {label}.")
         sys.exit(0)
 
-
     fee_start = start_dt - timedelta(days=15)
     fees_by_order, item_id_index = fetch_finance_fees(token, fee_start, now)
-    print(f"  Found fee data for {len(fees_by_order)} orders")
     merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
 
-    # Compute per-item allocated fees/earnings BEFORE any blanking, since it
-    # needs the order-level totals present on every row of the group.
     allocate_item_economics(raw_rows)
 
     raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
@@ -253,33 +236,22 @@ def main():
 
     xlsx_path = args.output
     existing_keys: set = set()
-    
     fetched_keys = {order_key(r) for r in raw_rows}
 
     if os.path.exists(xlsx_path):
-        print(f"Loading existing workbook: {xlsx_path}")
         wb = load_workbook(xlsx_path)
         ws = wb["Sold Orders"]
         existing_keys = get_existing_keys(ws)
-        total = len(existing_keys)
-        overlapping = len(existing_keys & fetched_keys)
-        print(f"  Orders in file before this fetch: {total} ({overlapping} overlap with current fetch)")
     else:
-        existing_keys = set()
-        print("No existing workbook found, creating new one")
         wb, ws = create_new_workbook(headers)
 
     new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
     skipped = len(raw_rows) - len(new_orders)
 
     if not new_orders:
-        print(f"No new orders to append (skipped {skipped} duplicates).")
+        print(f"No new orders to append ({skipped} already in file).")
         sys.exit(0)
 
-    # Blank order-level fields (Subtotal, Shipping, Order Total, Total eBay
-    # Fees, Order Earnings) on all but one row per multi-item order, so
-    # those columns can be summed safely. Item Fees (est.) / Item Earnings
-    # (est.) are left untouched on every row since they're per-item.
     blank_order_level_continuation_rows(new_orders)
 
     if os.path.exists(xlsx_path):
@@ -290,8 +262,7 @@ def main():
     write_data_rows(ws, new_orders, start_row)
 
     wb.save(xlsx_path)
-    print(f"Appended {len(new_orders)} new order(s) (skipped {skipped} existing).")
-    print(f"Saved -> {xlsx_path}")
+    print(f"Appended {len(new_orders)} sold order(s) ({skipped} duplicates skipped)")
 
 
 if __name__ == "__main__":

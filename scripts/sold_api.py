@@ -293,12 +293,12 @@ def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -
             f".//{{{NS}}}SoldList/{{{NS}}}PaginationResult/{{{NS}}}TotalNumberOfPages"
         )
         total_pages = int(total_pages_el.text) if total_pages_el is not None and total_pages_el.text else 1
-        print(f"  Page {page}/{total_pages} — {len(orders)} transactions")
 
         if page >= total_pages:
             break
         page += 1
 
+    print(f"  Fetched {len(rows)} sold line items ({total_pages} page(s))")
     return rows
 
 
@@ -414,10 +414,10 @@ def fetch_active_listings(access_token: str) -> list[dict]:
             f".//{{{NS}}}ActiveList/{{{NS}}}PaginationResult/{{{NS}}}TotalNumberOfPages"
         )
         total_pages = int(total_pages_el.text) if total_pages_el is not None and total_pages_el.text else 1
-        print(f"  Page {page}/{total_pages} — {len(items)} active listings")
 
         if page >= total_pages:
             break
         page += 1
 
+    print(f"  Fetched {len(rows)} active listings ({total_pages} page(s))")
     return rows

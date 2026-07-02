@@ -98,10 +98,9 @@ def main():
     token = get_access_token()
 
     rows = fetch_active_listings(token)
-    print(f"  API returned {len(rows)} active listings")
 
     if not rows:
-        print("No active listings returned — leaving existing sheet untouched to avoid wiping data in error.")
+        print("No active listings returned — leaving existing sheet untouched.")
         return
 
     rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)
@@ -110,17 +109,19 @@ def main():
     xlsx_path = args.output
 
     if os.path.exists(xlsx_path):
-        print(f"Loading existing workbook: {xlsx_path}")
         wb = load_workbook(xlsx_path)
     else:
-        print("No existing workbook found, creating new one")
         wb = Workbook()
         default_ws = wb.active
         if default_ws is not None:
             wb.remove(default_ws)
 
+    existing_widths: dict[str, float] = {}
     if SHEET_NAME in wb.sheetnames:
         ws = wb[SHEET_NAME]
+        for col_letter, dim in ws.column_dimensions.items():
+            if dim.width is not None:
+                existing_widths[col_letter] = dim.width
         _clear_sheet(ws)
     else:
         ws = wb.create_sheet(SHEET_NAME)
@@ -128,12 +129,25 @@ def main():
     _write_headers(ws, headers)
     ws.freeze_panes = "A2"
     write_data_rows(ws, rows, headers)
-    auto_column_widths(ws, headers, rows)
+
+    if existing_widths:
+        for col_idx, h in enumerate(headers, 1):
+            col_letter = get_column_letter(col_idx)
+            if col_letter in existing_widths:
+                ws.column_dimensions[col_letter].width = existing_widths[col_letter]
+            else:
+                max_len = max(
+                    len(str(h)),
+                    max((len(str(row.get(h, ""))) for row in rows), default=0),
+                )
+                ws.column_dimensions[col_letter].width = min(max_len + 4, 45)
+    else:
+        auto_column_widths(ws, headers, rows)
+
     write_last_updated(ws, headers, now)
 
     wb.save(xlsx_path)
-    print(f"Refreshed '{SHEET_NAME}' with {len(rows)} active listing(s).")
-    print(f"Saved -> {xlsx_path}")
+    print(f"Active Listings refreshed — {len(rows)} listings")
 
 
 if __name__ == "__main__":

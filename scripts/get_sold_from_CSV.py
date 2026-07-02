@@ -84,6 +84,7 @@ def read_csv_orders(csv_path: str) -> list[dict]:
                 "Buyer": csv_row[col["Buyer Username"]].strip(),
                 "Item Title": csv_row[col["Item Title"]].strip(),
                 "Quantity": qty,
+                "Item Price": sold_for,
                 "Subtotal": round(sold_for * qty, 2),
                 "Shipping": shipping,
                 "Order Total": total_price,
@@ -346,7 +347,7 @@ def write_excel(rows: list[dict], filename: str) -> str:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
     data_font    = Font(name="Arial", size=10)
-    currency_cols = {"Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
+    currency_cols = {"Item Price", "Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
     int_cols      = {"Quantity"}
 
     for row_idx, row in enumerate(rows, 2):

@@ -12,12 +12,11 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sold_api import get_access_token, fetch_sold_orders
 from get_sold_from_CSV import (
-    fetch_finance_fees, merge_fees_into_rows, combine_orders,
+    fetch_finance_fees, merge_fees_into_rows,
 )
 
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -28,8 +27,7 @@ CUTOFF = datetime(2026, 6, 30, tzinfo=timezone.utc)
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 DATA_FONT = Font(name="Arial", size=10)
-SHADE_FILL = PatternFill("solid", fgColor="EBF3FB")
-CURRENCY_COLS = {"Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
+CURRENCY_COLS = {"Item Price", "Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
 INT_COLS = {"Quantity"}
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
@@ -121,23 +119,6 @@ def write_data_rows(ws: Worksheet, rows: list[dict], start_row: int) -> None:
                 cell.number_format = '#,##0.00'
             elif h in INT_COLS:
                 cell.number_format = '0'
-        if row_idx % 2 == 0:
-            for col_idx in range(1, len(col_map) + 1):
-                ws.cell(row=row_idx, column=col_idx).fill = SHADE_FILL
-
-
-def auto_column_widths(ws: Worksheet, rows: list[dict]) -> None:
-    col_map = read_header_cols(ws)
-    if not col_map and rows:
-        col_map = {h: i for i, h in enumerate(rows[0].keys())}
-    for h, col_idx in col_map.items():
-        col_letter = get_column_letter(col_idx + 1)
-        max_len = max(
-            len(str(h)),
-            max((len(str(row.get(h, ""))) for row in rows), default=0),
-        )
-        ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
-
 
 
 def main():
@@ -199,14 +180,13 @@ def main():
     print(f"  Found fee data for {len(fees_by_order)} orders")
     merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
 
-    combined = combine_orders(raw_rows)
-    combined.sort(key=lambda r: r["Sale Date"], reverse=True)
-    headers = list(combined[0].keys())
+    raw_rows.sort(key=lambda r: r["Sale Date"], reverse=True)
+    headers = list(raw_rows[0].keys())
 
     xlsx_path = args.output
     existing_keys: set = set()
     
-    fetched_keys = {order_key(r) for r in combined}
+    fetched_keys = {order_key(r) for r in raw_rows}
 
     if os.path.exists(xlsx_path):
         print(f"Loading existing workbook: {xlsx_path}")
@@ -221,8 +201,8 @@ def main():
         print("No existing workbook found, creating new one")
         wb, ws = create_new_workbook(headers)
 
-    new_orders = [r for r in combined if order_key(r) not in existing_keys]
-    skipped = len(combined) - len(new_orders)
+    new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
+    skipped = len(raw_rows) - len(new_orders)
 
     if not new_orders:
         print(f"No new orders to append (skipped {skipped} duplicates).")
@@ -234,7 +214,6 @@ def main():
         start_row = 2
 
     write_data_rows(ws, new_orders, start_row)
-    auto_column_widths(ws, combined)
 
     wb.save(xlsx_path)
     print(f"Appended {len(new_orders)} new order(s) (skipped {skipped} existing).")

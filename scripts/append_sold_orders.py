@@ -29,7 +29,7 @@ HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 DATA_FONT = Font(name="Arial", size=10)
 CURRENCY_COLS = {
-    "Item Price", "Subtotal", "Shipping", "Order Total",
+    "Item Price", "Shipping", "Order Total",
     "Total eBay Fees", "Order Earnings",
     "Item Fees (est.)", "Item Earnings (est.)",
 }
@@ -38,7 +38,7 @@ INT_COLS = {"Quantity", "Items in Order"}
 # Order-level fields that only make sense once per order. Repeated on every
 # line-item row by the API, so we blank them on continuation rows to make
 # it visually and computationally obvious which rows are order totals.
-ORDER_LEVEL_COLS = ("Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings")
+ORDER_LEVEL_COLS = ("Shipping", "Order Total", "Total eBay Fees", "Order Earnings")
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
@@ -137,28 +137,28 @@ def allocate_item_economics(rows: list[dict]) -> None:
     The eBay API only reports Total eBay Fees / Order Earnings at the order
     level, but repeats item-level rows for multi-item orders. This adds two
     new columns — "Item Fees (est.)" and "Item Earnings (est.)" — allocated
-    to each line item proportionally to its share of the order Subtotal, so
-    every row (not just the first row of an order) has a trustworthy,
-    summable number. Also stamps "Items in Order" on every row for easy
-    filtering/pivoting on single- vs multi-item orders.
+    to each line item proportionally to its share of the order's total
+    (Item Price x Quantity), so every row (not just the first row of an
+    order) has a trustworthy, summable number. Also stamps "Items in Order"
+    on every row for easy filtering/pivoting on single- vs multi-item orders.
     """
     groups = defaultdict(list)
     for r in rows:
         groups[r["Order ID"]].append(r)
 
     for order_rows in groups.values():
-        subtotal = order_rows[0].get("Subtotal") or 0
+        total_items_price = sum((r.get("Item Price") or 0) * (r.get("Quantity") or 1) for r in order_rows)
         total_fees = order_rows[0].get("Total eBay Fees") or 0
         total_earnings = order_rows[0].get("Order Earnings") or 0
         item_count = len(order_rows)
 
         for r in order_rows:
             r["Items in Order"] = item_count
-            if not subtotal:
+            if not total_items_price:
                 r["Item Fees (est.)"] = total_fees if item_count == 1 else None
                 r["Item Earnings (est.)"] = total_earnings if item_count == 1 else None
                 continue
-            share = ((r.get("Item Price") or 0) * (r.get("Quantity") or 1)) / subtotal
+            share = ((r.get("Item Price") or 0) * (r.get("Quantity") or 1)) / total_items_price
             r["Item Fees (est.)"] = round(total_fees * share, 2)
             r["Item Earnings (est.)"] = round(total_earnings * share, 2)
 

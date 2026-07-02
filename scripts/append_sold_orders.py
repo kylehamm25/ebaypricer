@@ -7,6 +7,7 @@ Usage:
 import argparse
 import os
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -203,6 +204,16 @@ def main():
 
     new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
     skipped = len(raw_rows) - len(new_orders)
+
+    # Blank order-level fields on rows 2+ of multi-item orders
+    groups = defaultdict(list)
+    for i, r in enumerate(new_orders):
+        groups[r["Order ID"]].append(i)
+    for indices in groups.values():
+        if len(indices) > 1:
+            for i in indices[1:]:
+                new_orders[i]["Order Earnings"] = None
+                new_orders[i]["Total eBay Fees"] = None
 
     if not new_orders:
         print(f"No new orders to append (skipped {skipped} duplicates).")

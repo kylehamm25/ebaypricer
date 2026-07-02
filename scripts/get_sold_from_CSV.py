@@ -306,7 +306,6 @@ def combine_orders(rows: list[dict]) -> list[dict]:
 
         first = group[0]
         skus = [r["SKU"] for r in group if r["SKU"]]
-        links = [r["Link"] for r in group if r.get("Link")]
         combined.append({
             "Order ID": oid,
             "Item ID": "; ".join(r["Item ID"] for r in group),
@@ -317,12 +316,10 @@ def combine_orders(rows: list[dict]) -> list[dict]:
             "Subtotal": sum(r["Subtotal"] for r in group),
             "Shipping": first["Shipping"],
             "Order Total": first["Order Total"],
-            "Link": "; ".join(links),
+            "Total eBay Fees": first.get("Total eBay Fees"),
+            "Order Earnings": first.get("Order Earnings"),
             "SKU": "; ".join(skus),
         })
-        last = combined[-1]
-        for key in ("Total eBay Fees", "Order Earnings"):
-            last[key] = first.get(key)
 
     print(f"Combined into {len(combined)} orders ({len(rows) - len(combined)} multi-item collapsed)")
     return combined

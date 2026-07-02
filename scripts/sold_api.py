@@ -149,7 +149,6 @@ def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, ord
     title   = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
     sku     = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
     item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
-    link    = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ViewItemURL") or ""
     price_el = txn_el.find(f"{{{NS}}}TransactionPrice")
     item_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
     qty_el = txn_el.find(f"{{{NS}}}QuantityPurchased")
@@ -166,7 +165,6 @@ def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, ord
         "Subtotal":     subtotal,
         "Shipping":     shipping,
         "Order Total":  order_total,
-        "Link":         link,
         "SKU":          sku,
     }
 
@@ -236,7 +234,6 @@ def _parse_transaction(txn_el, rows: list) -> None:
     title  = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
     sku    = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
     item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
-    link   = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ViewItemURL") or ""
 
     rows.append({
         "Order ID":     order_id,
@@ -249,7 +246,6 @@ def _parse_transaction(txn_el, rows: list) -> None:
         "Subtotal":     round(item_price * qty, 2),
         "Shipping":     shipping,
         "Order Total":  order_total,
-        "Link":         link,
         "SKU":          sku,
     })
 

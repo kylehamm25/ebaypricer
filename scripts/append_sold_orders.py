@@ -94,7 +94,6 @@ def create_new_workbook(headers: list[str]) -> tuple[Workbook, Worksheet]:
     ws.title = "Sold Orders"
     _write_headers(ws, headers)
     ws.freeze_panes = "A2"
-    wb.create_sheet("Summary")
     return wb, ws
 
 
@@ -133,61 +132,6 @@ def auto_column_widths(ws: Worksheet, headers: list[str], rows: list[dict]) -> N
         ws.column_dimensions[col_letter].width = min(max_len + 4, 40)
 
 
-def update_summary_sheet(wb: Workbook, headers: list[str], total_rows: int) -> None:
-    if "Summary" in wb.sheetnames:
-        ws_sum = wb["Summary"]
-        for row in ws_sum.iter_rows():
-            for cell in row:
-                cell.value = None
-    else:
-        ws_sum = wb.create_sheet("Summary")
-
-    if ws_sum is None:
-        return
-
-    ws_sum["A1"] = "Summary"
-    ws_sum["A1"].font = Font(bold=True, name="Arial", size=12)
-
-    col_letter = {h: get_column_letter(i) for i, h in enumerate(headers, 1)}
-
-    if "Order ID" not in col_letter:
-        return
-
-    ws_sum["A3"] = "Total Transactions"
-    ws_sum["B3"] = f"=COUNTA('Sold Orders'!{col_letter['Order ID']}2:{col_letter['Order ID']}{total_rows})"
-    ws_sum["A4"] = "Total Revenue"
-    ws_sum["B4"] = f"=SUM('Sold Orders'!{col_letter['Order Total']}2:{col_letter['Order Total']}{total_rows})"
-    ws_sum["B4"].number_format = '#,##0.00'
-    ws_sum["A5"] = "Total Shipping Collected"
-    ws_sum["B5"] = f"=SUM('Sold Orders'!{col_letter['Shipping']}2:{col_letter['Shipping']}{total_rows})"
-    ws_sum["B5"].number_format = '#,##0.00'
-
-    next_row = 6
-    if "Total eBay Fees" in col_letter:
-        ws_sum[f"A{next_row}"] = "Total eBay Fees"
-        ws_sum[f"B{next_row}"] = (
-            f"=SUM('Sold Orders'!{col_letter['Total eBay Fees']}2:"
-            f"{col_letter['Total eBay Fees']}{total_rows})"
-        )
-        ws_sum[f"B{next_row}"].number_format = '#,##0.00'
-        next_row += 1
-    if "Order Earnings" in col_letter:
-        ws_sum[f"A{next_row}"] = "Total Order Earnings"
-        ws_sum[f"B{next_row}"] = (
-            f"=SUM('Sold Orders'!{col_letter['Order Earnings']}2:"
-            f"{col_letter['Order Earnings']}{total_rows})"
-        )
-        ws_sum[f"B{next_row}"].number_format = '#,##0.00'
-        next_row += 1
-
-    ws_sum[f"A{next_row}"] = "Avg Order Value"
-    ws_sum[f"B{next_row}"] = "=IF(B3=0,0,B4/B3)"
-    ws_sum[f"B{next_row}"].number_format = '#,##0.00'
-
-    for r in range(3, next_row + 1):
-        ws_sum.cell(r, 1).font = Font(name="Arial", size=10, bold=True)
-        ws_sum.cell(r, 2).font = Font(name="Arial", size=10)
-
 
 def main():
     args = parse_args()
@@ -207,6 +151,14 @@ def main():
 
     raw_rows = fetch_sold_orders(token, start_dt, now)
     print(f"  API returned {len(raw_rows)} line items")
+
+    # Client-side date filter — the eBay API sometimes returns orders
+    # whose sale date falls before the requested StartTimeFrom window.
+    before = len(raw_rows)
+    raw_rows = [r for r in raw_rows if r.get("Sale Date", "") >= start_dt.strftime("%Y-%m-%d")]
+    filtered = before - len(raw_rows)
+    if filtered:
+        print(f"  Filtered out {filtered} line item(s) with sale date before {start_dt.date()}")
 
     # Deduplicate by (Item ID, Sale Date) — same item can appear via Order
     # element and standalone Transaction with different Order IDs.
@@ -275,10 +227,7 @@ def main():
         start_row = 2
 
     write_data_rows(ws, new_orders, start_row)
-    total_rows = find_last_data_row(ws)
     auto_column_widths(ws, headers, combined)
-
-    update_summary_sheet(wb, headers, total_rows)
 
     wb.save(xlsx_path)
     print(f"Appended {len(new_orders)} new order(s) (skipped {skipped} existing).")

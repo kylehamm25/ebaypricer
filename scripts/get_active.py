@@ -33,7 +33,7 @@ HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 DATA_FONT = Font(name="Arial", size=10)
 SHADE_FILL = PatternFill("solid", fgColor="EBF3FB")
 CURRENCY_COLS = {"Price"}
-INT_COLS = {"Quantity Available", "Days Listed", "Watchers"}
+INT_COLS = {"Quantity", "Days Listed", "Watchers"}
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 

@@ -149,6 +149,7 @@ def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, ord
     title   = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
     sku     = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
     item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
+    link    = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ViewItemURL") or ""
     price_el = txn_el.find(f"{{{NS}}}TransactionPrice")
     item_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
     qty_el = txn_el.find(f"{{{NS}}}QuantityPurchased")
@@ -166,6 +167,7 @@ def _build_row(order_id, created, status, buyer, txn_el, subtotal, shipping, ord
         "Subtotal":     subtotal,
         "Shipping":     shipping,
         "Order Total":  order_total,
+        "Link":         link,
     }
 
 
@@ -226,6 +228,7 @@ def _parse_transaction(txn_el, rows: list) -> None:
     title  = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}Title") or ""
     sku    = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}SKU") or ""
     item_id = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ItemID") or ""
+    link   = txn_el.findtext(f".//{{{NS}}}Item/{{{NS}}}ViewItemURL") or ""
 
     rows.append({
         "Order ID":     order_id,
@@ -239,6 +242,7 @@ def _parse_transaction(txn_el, rows: list) -> None:
         "Subtotal":     round(item_price * qty, 2),
         "Shipping":     shipping,
         "Order Total":  order_total,
+        "Link":         link,
     })
 
 
@@ -334,6 +338,8 @@ def _parse_iso_duration(duration: str) -> timedelta:
 def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     item_id = _t(item_el, "ItemID")
     title = _t(item_el, "Title")
+    sku = _t(item_el, "SKU")
+    link = _t(item_el, "ViewItemURL")
  
     price_el = item_el.find(f"{{{NS}}}SellingStatus/{{{NS}}}CurrentPrice")
     current_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
@@ -351,15 +357,17 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
  
     watch_el = item_el.find(f"{{{NS}}}WatchCount")
     watch_count = int(watch_el.text) if watch_el is not None and watch_el.text else 0
- 
+
     rows.append({
         "Item ID":            item_id,
         "Title":              title,
+        "SKU":                sku,
         "Price":              current_price,
-        "Quantity Available": qty_available,
+        "Quantity":           qty_available,
         "Start Date":         start_date,
         "Days Listed":        days_listed,
         "Watchers":           watch_count,
+        "Link":               link,
     })
 
 

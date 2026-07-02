@@ -280,7 +280,8 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
         for row in group:
             row["Total eBay Fees"] = total_fees
             order_total = row.get("Order Total") or 0.0
-            row["Order Earnings"] = round(order_total - total_fees, 2) if total_fees is not None else None
+            shipping = row.get("Shipping") or 0.0
+            row["Order Earnings"] = round(order_total - total_fees - shipping, 2) if total_fees is not None else None
 
 
 # ── Combine Orders ───────────────────────────────────────────────────────────
@@ -305,6 +306,7 @@ def combine_orders(rows: list[dict]) -> list[dict]:
 
         first = group[0]
         skus = [r["SKU"] for r in group if r["SKU"]]
+        links = [r["Link"] for r in group if r.get("Link")]
         combined.append({
             "Order ID": oid,
             "Item ID": "; ".join(r["Item ID"] for r in group),
@@ -317,6 +319,7 @@ def combine_orders(rows: list[dict]) -> list[dict]:
             "Subtotal": sum(r["Subtotal"] for r in group),
             "Shipping": first["Shipping"],
             "Order Total": first["Order Total"],
+            "Link": "; ".join(links),
         })
         last = combined[-1]
         for key in ("Total eBay Fees", "Order Earnings"):

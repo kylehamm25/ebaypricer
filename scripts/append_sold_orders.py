@@ -248,7 +248,7 @@ def main():
     # needs the order-level totals present on every row of the group.
     allocate_item_economics(raw_rows)
 
-    raw_rows.sort(key=lambda r: r["Sale Date"])
+    raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
     headers = list(raw_rows[0].keys())
 
     xlsx_path = args.output

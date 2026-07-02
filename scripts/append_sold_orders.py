@@ -28,8 +28,17 @@ CUTOFF = datetime(2026, 6, 30, tzinfo=timezone.utc)
 HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
 HEADER_FONT = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 DATA_FONT = Font(name="Arial", size=10)
-CURRENCY_COLS = {"Item Price", "Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
-INT_COLS = {"Quantity"}
+CURRENCY_COLS = {
+    "Item Price", "Subtotal", "Shipping", "Order Total",
+    "Total eBay Fees", "Order Earnings",
+    "Item Fees (est.)", "Item Earnings (est.)",
+}
+INT_COLS = {"Quantity", "Items in Order"}
+
+# Order-level fields that only make sense once per order. Repeated on every
+# line-item row by the API, so we blank them on continuation rows to make
+# it visually and computationally obvious which rows are order totals.
+ORDER_LEVEL_COLS = ("Subtotal", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings")
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
@@ -122,6 +131,60 @@ def write_data_rows(ws: Worksheet, rows: list[dict], start_row: int) -> None:
                 cell.number_format = '0'
 
 
+def allocate_item_economics(rows: list[dict]) -> None:
+    """Add per-item prorated fee/earnings columns and an 'Items in Order' count.
+
+    The eBay API only reports Total eBay Fees / Order Earnings at the order
+    level, but repeats item-level rows for multi-item orders. This adds two
+    new columns — "Item Fees (est.)" and "Item Earnings (est.)" — allocated
+    to each line item proportionally to its share of the order Subtotal, so
+    every row (not just the first row of an order) has a trustworthy,
+    summable number. Also stamps "Items in Order" on every row for easy
+    filtering/pivoting on single- vs multi-item orders.
+    """
+    groups = defaultdict(list)
+    for r in rows:
+        groups[r["Order ID"]].append(r)
+
+    for order_rows in groups.values():
+        subtotal = order_rows[0].get("Subtotal") or 0
+        total_fees = order_rows[0].get("Total eBay Fees") or 0
+        total_earnings = order_rows[0].get("Order Earnings") or 0
+        item_count = len(order_rows)
+
+        for r in order_rows:
+            r["Items in Order"] = item_count
+            if not subtotal:
+                r["Item Fees (est.)"] = total_fees if item_count == 1 else None
+                r["Item Earnings (est.)"] = total_earnings if item_count == 1 else None
+                continue
+            share = ((r.get("Item Price") or 0) * (r.get("Quantity") or 1)) / subtotal
+            r["Item Fees (est.)"] = round(total_fees * share, 2)
+            r["Item Earnings (est.)"] = round(total_earnings * share, 2)
+
+
+def blank_order_level_continuation_rows(rows: list[dict]) -> None:
+    """For multi-item orders, keep order-level totals (Subtotal, Shipping,
+    Order Total, Total eBay Fees, Order Earnings) on exactly one row per
+    order and blank them elsewhere, so summing those columns down the
+    sheet doesn't double-count. The row that keeps the values is the one
+    with the highest Item Price (deterministic, independent of API
+    fetch order) rather than "whichever came first".
+    """
+    groups = defaultdict(list)
+    for i, r in enumerate(rows):
+        groups[r["Order ID"]].append(i)
+
+    for indices in groups.values():
+        if len(indices) <= 1:
+            continue
+        # Keep order-level data on the highest-priced item; blank the rest.
+        indices_sorted = sorted(indices, key=lambda i: rows[i].get("Item Price") or 0, reverse=True)
+        for i in indices_sorted[1:]:
+            for col in ORDER_LEVEL_COLS:
+                rows[i][col] = None
+
+
 def main():
     args = parse_args()
     now = datetime.now(timezone.utc)
@@ -181,7 +244,11 @@ def main():
     print(f"  Found fee data for {len(fees_by_order)} orders")
     merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
 
-    raw_rows.sort(key=lambda r: r["Sale Date"], reverse=True)
+    # Compute per-item allocated fees/earnings BEFORE any blanking, since it
+    # needs the order-level totals present on every row of the group.
+    allocate_item_economics(raw_rows)
+
+    raw_rows.sort(key=lambda r: r["Sale Date"])
     headers = list(raw_rows[0].keys())
 
     xlsx_path = args.output
@@ -205,19 +272,15 @@ def main():
     new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
     skipped = len(raw_rows) - len(new_orders)
 
-    # Blank order-level fields on rows 2+ of multi-item orders
-    groups = defaultdict(list)
-    for i, r in enumerate(new_orders):
-        groups[r["Order ID"]].append(i)
-    for indices in groups.values():
-        if len(indices) > 1:
-            for i in indices[1:]:
-                new_orders[i]["Order Earnings"] = None
-                new_orders[i]["Total eBay Fees"] = None
-
     if not new_orders:
         print(f"No new orders to append (skipped {skipped} duplicates).")
         sys.exit(0)
+
+    # Blank order-level fields (Subtotal, Shipping, Order Total, Total eBay
+    # Fees, Order Earnings) on all but one row per multi-item order, so
+    # those columns can be summed safely. Item Fees (est.) / Item Earnings
+    # (est.) are left untouched on every row since they're per-item.
+    blank_order_level_continuation_rows(new_orders)
 
     if os.path.exists(xlsx_path):
         start_row = find_last_data_row(ws) + 1

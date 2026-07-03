@@ -22,6 +22,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sold_api import get_access_token, fetch_active_listings
+from pokemon_cards import enrich_rows
 
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path)
@@ -102,6 +103,9 @@ def main():
     if not rows:
         print("No active listings returned — leaving existing sheet untouched.")
         return
+
+    print("  Enriching with Pokémon card data ...")
+    enrich_rows(rows, title_key="Title")
 
     rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)
     headers = list(rows[0].keys())

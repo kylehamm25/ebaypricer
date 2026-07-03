@@ -9,6 +9,7 @@ import os
 import sys
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from dotenv import load_dotenv
 from openpyxl import Workbook, load_workbook
@@ -19,6 +20,7 @@ from sold_api import get_access_token, fetch_sold_orders
 from get_sold_from_CSV import (
     fetch_finance_fees, merge_fees_into_rows,
 )
+from pokemon_cards import enrich_rows, get_db, _fmt_card
 
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path)
@@ -31,9 +33,8 @@ DATA_FONT = Font(name="Arial", size=10)
 CURRENCY_COLS = {
     "Item Price", "Shipping", "Order Total",
     "Total eBay Fees", "Order Earnings",
-    "Item Fees (est.)", "Item Earnings (est.)",
 }
-INT_COLS = {"Quantity", "Items in Order"}
+INT_COLS = {"Quantity"}
 
 # Order-level fields that only make sense once per order. Repeated on every
 # line-item row by the API, so we blank them on continuation rows to make
@@ -112,6 +113,64 @@ def _write_headers(ws: Worksheet, headers: list[str]) -> None:
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
 
+def _write_cell(ws: Worksheet, row_idx: int, col_idx: int | None, val: Any, fmt: str | None = None) -> None:
+    if col_idx is None:
+        return
+    cell = ws.cell(row=row_idx, column=col_idx + 1)
+    cell.value = val
+    cell.font = DATA_FONT
+    cell.alignment = Alignment(vertical="center")
+    if fmt:
+        cell.number_format = fmt
+
+
+DEPRECATED_COLS = {
+    "Items in Order", "Item Fees (est.)", "Item Earnings (est.)",
+    "Card Name", "Card Number", "Set Name", "Set Series",
+    "Rarity", "Variant", "Market Price",
+}
+
+
+def _strip_deprecated_cols(ws: Worksheet) -> None:
+    col = read_header_cols(ws)
+    to_del = sorted(
+        (idx for name, idx in col.items() if name in DEPRECATED_COLS),
+        reverse=True,
+    )
+    for idx in to_del:
+        ws.delete_cols(idx + 1)
+
+
+def backfill_enrichment(ws: Worksheet) -> None:
+    col = read_header_cols(ws)
+    card_col = col.get("Card")
+    if card_col is None:
+        return
+    title_col = col.get("Item Title")
+    if title_col is None:
+        return
+
+    db = get_db()
+    filled = 0
+    last_row = find_last_data_row(ws)
+    for row_idx in range(2, last_row + 1):
+        if row_idx % 100 == 0:
+            print(f"    backfilling row {row_idx}...")
+        title = ws.cell(row=row_idx, column=title_col + 1).value
+        if not title:
+            continue
+        existing = ws.cell(row=row_idx, column=card_col + 1).value
+        if existing is not None and str(existing).strip():
+            continue
+        title_clean = str(title).split(";")[0]
+        m = db.match(title_clean)
+        _write_cell(ws, row_idx, card_col, _fmt_card(m))
+        filled += 1
+
+    if filled:
+        print(f"  Backfilled enrichment for {filled} existing row(s)")
+
+
 def write_data_rows(ws: Worksheet, rows: list[dict], start_row: int) -> None:
     col_map = read_header_cols(ws)
     if not col_map and rows:
@@ -128,38 +187,6 @@ def write_data_rows(ws: Worksheet, rows: list[dict], start_row: int) -> None:
                 cell.number_format = '#,##0.00'
             elif h in INT_COLS:
                 cell.number_format = '0'
-
-
-def allocate_item_economics(rows: list[dict]) -> None:
-    """Add per-item prorated fee/earnings columns and an 'Items in Order' count.
-
-    The eBay API only reports Total eBay Fees / Order Earnings at the order
-    level, but repeats item-level rows for multi-item orders. This adds two
-    new columns — "Item Fees (est.)" and "Item Earnings (est.)" — allocated
-    to each line item proportionally to its share of the order's total
-    (Item Price x Quantity), so every row (not just the first row of an
-    order) has a trustworthy, summable number. Also stamps "Items in Order"
-    on every row for easy filtering/pivoting on single- vs multi-item orders.
-    """
-    groups = defaultdict(list)
-    for r in rows:
-        groups[r["Order ID"]].append(r)
-
-    for order_rows in groups.values():
-        total_items_price = sum((r.get("Item Price") or 0) * (r.get("Quantity") or 1) for r in order_rows)
-        total_fees = order_rows[0].get("Total eBay Fees") or 0
-        total_earnings = order_rows[0].get("Order Earnings") or 0
-        item_count = len(order_rows)
-
-        for r in order_rows:
-            r["Items in Order"] = item_count
-            if not total_items_price:
-                r["Item Fees (est.)"] = total_fees if item_count == 1 else None
-                r["Item Earnings (est.)"] = total_earnings if item_count == 1 else None
-                continue
-            share = ((r.get("Item Price") or 0) * (r.get("Quantity") or 1)) / total_items_price
-            r["Item Fees (est.)"] = round(total_fees * share, 2)
-            r["Item Earnings (est.)"] = round(total_earnings * share, 2)
 
 
 def blank_order_level_continuation_rows(rows: list[dict]) -> None:
@@ -229,7 +256,8 @@ def main():
     fees_by_order, item_id_index = fetch_finance_fees(token, fee_start, now)
     merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
 
-    allocate_item_economics(raw_rows)
+    print("  Enriching with Pokémon card data ...")
+    enrich_rows(raw_rows)
 
     raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
     headers = list(raw_rows[0].keys())
@@ -238,18 +266,36 @@ def main():
     existing_keys: set = set()
     fetched_keys = {order_key(r) for r in raw_rows}
 
+    new_cols: list[str] = []
     if os.path.exists(xlsx_path):
         wb = load_workbook(xlsx_path)
         ws = wb["Sold Orders"]
+        _strip_deprecated_cols(ws)
+        existing_cols = read_header_cols(ws)
+        new_cols = [h for h in headers if h not in existing_cols]
+        if new_cols:
+            next_col = max(existing_cols.values()) + 2 if existing_cols else 1
+            for h in new_cols:
+                cell = ws.cell(row=1, column=next_col, value=h)
+                cell.fill = HEADER_FILL
+                cell.font = HEADER_FONT
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                next_col += 1
         existing_keys = get_existing_keys(ws)
     else:
         wb, ws = create_new_workbook(headers)
+
+    if os.path.exists(xlsx_path):
+        backfill_enrichment(ws)
 
     new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
     skipped = len(raw_rows) - len(new_orders)
 
     if not new_orders:
         print(f"No new orders to append ({skipped} already in file).")
+        if new_cols:
+            wb.save(xlsx_path)
+            print(f"  Added {len(new_cols)} new column(s): {', '.join(new_cols)}")
         sys.exit(0)
 
     blank_order_level_continuation_rows(new_orders)

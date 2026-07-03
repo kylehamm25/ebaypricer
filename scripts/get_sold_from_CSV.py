@@ -26,6 +26,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from sold_api import (
     NS, get_access_token, fetch_sold_orders, _parse_usd, _parse_csv_date,
 )
+from pokemon_cards import enrich_rows
 
 _env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
 load_dotenv(dotenv_path=_env_path)
@@ -507,6 +508,9 @@ def main():
         merge_fees_into_rows(rows, fees_by_order, item_id_index)
 
     rows = combine_orders(rows)
+
+    print("  Enriching with Pokémon card data ...")
+    enrich_rows(rows)
     output_file = write_excel(rows, args.output)
     print(f"Saved -> {output_file}")
 

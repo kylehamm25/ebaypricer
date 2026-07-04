@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 import sys
 
 import requests
@@ -9,6 +11,11 @@ log = logging.getLogger(__name__)
 
 MARKETING_URL = "https://api.ebay.com/sell/marketing/v1"
 
+# Trading API returns Item ID as plain "123456789".
+# The Marketing API may return listingId as "v1|123456789|0".
+_LISTING_ID_PREFIX = re.compile(r"^v1\|")
+_LISTING_ID_SUFFIX = re.compile(r"\|0$")
+
 
 def _headers(token: str) -> dict:
     return {
@@ -18,8 +25,14 @@ def _headers(token: str) -> dict:
     }
 
 
+def _normalize_listing_id(raw: str) -> str:
+    """Strip the v1|...|0 wrapper so IDs from Trading API and Marketing API
+    can be compared directly."""
+    return _LISTING_ID_SUFFIX.sub("", _LISTING_ID_PREFIX.sub("", raw))
+
+
 def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
-    """Return all campaigns matching *status* (RUNNING, PAUSED, ENDED, etc.)."""
+    """Return all campaigns matching *status*."""
     resp = requests.get(
         f"{MARKETING_URL}/ad_campaign",
         headers=_headers(token),
@@ -47,7 +60,7 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
 
 
 def get_ads(token: str, campaign_id: str) -> list[dict]:
-    """Return all ads for a campaign, each with adId, bidPercentage, listingId."""
+    """Return all ads for a campaign, with normalized listingId."""
     ads: list[dict] = []
     offset = 0
     limit = 200
@@ -60,20 +73,23 @@ def get_ads(token: str, campaign_id: str) -> list[dict]:
         )
         resp.raise_for_status()
         data = resp.json()
-        ads.extend(data.get("ads", []))
+        for ad in data.get("ads", []):
+            ad["listingId"] = _normalize_listing_id(ad.get("listingId", ""))
+            ads.append(ad)
         if offset + limit >= data.get("total", 0):
             break
         offset += limit
     return ads
 
 
-def bulk_update_bids(token: str, campaign_id: str, requests_list: list[dict]) -> int:
+def bulk_update_bids(token: str, campaign_id: str, requests_list: list[dict]) -> dict:
     """Update bid percentages for up to 500 listings at once.
     Each request: { "listingId": "...", "bidPercentage": "..." }
-    Returns number of updates sent.
+    Returns {"sent": N, "errors": [...]}.
     """
+    result: dict = {"sent": 0, "errors": []}
     if not requests_list:
-        return 0
+        return result
     resp = requests.post(
         f"{MARKETING_URL}/ad_campaign/{campaign_id}/bulk_update_ads_bid_by_listing_id",
         headers=_headers(token),
@@ -81,13 +97,18 @@ def bulk_update_bids(token: str, campaign_id: str, requests_list: list[dict]) ->
         timeout=30,
     )
     if resp.status_code != 200:
-        log.error("Bulk bid update failed (%s): %s", resp.status_code, resp.text[:500])
-        return 0
-    return len(requests_list)
+        log.error("Bulk bid update failed (%s): %s", resp.status_code, resp.text[:1000])
+        result["errors"].append({"status": resp.status_code, "body": resp.text[:1000]})
+        return result
+    result["sent"] = len(requests_list)
+    body = resp.json()
+    if body.get("errors") or body.get("warnings"):
+        result["errors"] = body.get("errors", []) + body.get("warnings", [])
+    return result
 
 
-def create_ad(token: str, campaign_id: str, listing_id: str, bid_pct: float) -> bool:
-    """Add a listing to a campaign with the given bid percentage."""
+def create_ad(token: str, campaign_id: str, listing_id: str, bid_pct: float) -> dict:
+    """Add a listing to a campaign. Returns {"ok": bool, "response": ...}."""
     resp = requests.post(
         f"{MARKETING_URL}/ad_campaign/{campaign_id}/ad",
         headers=_headers(token),
@@ -98,14 +119,17 @@ def create_ad(token: str, campaign_id: str, listing_id: str, bid_pct: float) -> 
         timeout=15,
     )
     if resp.status_code not in (200, 201):
-        log.error("Create ad failed for listing %s (%s): %s", listing_id, resp.status_code, resp.text[:300])
-        return False
-    return True
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text[:500]
+        log.error("Create ad failed for listing %s (%s): %s", listing_id, resp.status_code, json.dumps(body)[:500])
+        return {"ok": False, "status": resp.status_code, "response": body}
+    return {"ok": True, "status": resp.status_code, "response": resp.json() if resp.text else None}
 
 
 def compute_target_bid(days_listed: int, current_bid: float | None = None) -> float | None:
-    """Return the target bid % for a listing that has been listed *days_listed*
-    days. Returns None if no boost is due yet."""
+    """Return the target bid % for a listing. Returns None if no boost due."""
     if days_listed < 10:
         return None
     bucket = days_listed // 10

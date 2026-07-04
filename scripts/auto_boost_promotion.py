@@ -14,6 +14,7 @@ gen_access_token.py to authorize it if you haven't already.
 """
 
 import argparse
+import json
 import logging
 import sys
 
@@ -47,6 +48,8 @@ def parse_args():
                         help="Maximum bid percentage (default: 10.0)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would be done without making changes")
+    parser.add_argument("--debug", action="store_true",
+                        help="Print raw API responses for debugging")
     return parser.parse_args()
 
 
@@ -72,6 +75,8 @@ def main():
             campaign = campaigns[0]
         campaign_id = campaign["campaignId"]
         print(f"Using campaign: {campaign.get('campaignName', campaign_id)} ({campaign_id})")
+        if args.debug:
+            print(f"  Full campaign data: {json.dumps(campaign, indent=2)}")
 
     # ── Get active listings ─────────────────────────────────────────────
     print("\nFetching active listings ...")
@@ -92,12 +97,17 @@ def main():
             ads_by_listing[lid] = ad
     print(f"  {len(ads)} existing promoted listings")
 
+    if args.debug and ads:
+        print(f"  Sample ad: {json.dumps(ads[0], indent=2)}")
+        print(f"  Sample listing (Trading API ID): {json.dumps(listings[0].get('Item ID', ''))}")
+
     # ── Build update list ───────────────────────────────────────────────
     to_update: list[dict] = []
     to_create: list[tuple[str, float]] = []
     boosts = 0
     at_cap = 0
     skipped_days = 0
+    no_ad_found = 0
 
     for item in listings:
         days = item.get("Days Listed", 0)
@@ -154,8 +164,11 @@ def main():
         print(f"\nCreating {len(to_create)} new promoted listing(s) ...")
         ok = 0
         for listing_id, bid_pct in to_create:
-            if create_ad(token, campaign_id, listing_id, bid_pct):
+            result = create_ad(token, campaign_id, listing_id, bid_pct)
+            if result["ok"]:
                 ok += 1
+            elif args.debug:
+                print(f"  FAILED listing {listing_id}: {json.dumps(result['response'], indent=2)[:300]}")
         print(f"  {ok}/{len(to_create)} created")
 
     # ── Execute bulk updates ────────────────────────────────────────────
@@ -164,9 +177,11 @@ def main():
         total_sent = 0
         for i in range(0, len(to_update), BATCH_SIZE):
             batch = to_update[i:i + BATCH_SIZE]
-            n = bulk_update_bids(token, campaign_id, batch)
-            total_sent += n
-            print(f"  batch {i // BATCH_SIZE + 1}: {n} updates")
+            result = bulk_update_bids(token, campaign_id, batch)
+            total_sent += result["sent"]
+            if result["errors"] and args.debug:
+                print(f"  batch {i // BATCH_SIZE + 1} errors: {json.dumps(result['errors'], indent=2)[:500]}")
+            print(f"  batch {i // BATCH_SIZE + 1}: {result['sent']} updates")
         print(f"  Total: {total_sent} bid update(s) sent")
 
 

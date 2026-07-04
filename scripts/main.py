@@ -16,6 +16,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ebaypricer.api_counter import summary as api_summary
+
 LOG_FILE = Path(__file__).resolve().parent.parent / "logs" / "run.log"
 
 
@@ -80,6 +82,7 @@ def main():
         print(f"WARNING: auto_boost_promotion.py skipped (exit {result.returncode})")
 
     log_run(results)
+    print(f"\n{api_summary()}\n")
 
 if __name__ == "__main__":
     main()

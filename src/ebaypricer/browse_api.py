@@ -9,6 +9,7 @@ from statistics import mean, stdev
 
 import requests
 
+from .api_counter import track
 from .auth import get_ebay_token
 
 log = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
         params=params,
         timeout=15,
     )
+    track("ebay_browse")
 
     if resp.status_code == 429:
         log.warning("Rate limited — sleeping 60s before retry")

@@ -6,6 +6,7 @@ import time
 import requests
 from dotenv import set_key
 
+from .api_counter import track
 from .paths import ENV_PATH
 
 
@@ -62,6 +63,7 @@ def get_access_token() -> str:
         },
         timeout=10,
     )
+    track("ebay_oauth")
     if resp.status_code != 200:
         print(f"Token refresh failed ({resp.status_code}): {resp.text}")
         sys.exit(1)

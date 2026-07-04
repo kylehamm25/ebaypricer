@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from .api_counter import track
+
 FINANCE_URL = "https://apiz.ebay.com/sell/finances/v1/transaction"
 
 
@@ -38,6 +40,7 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
 
     while url:
         resp = requests.get(url, headers=headers, params=params if page == 1 else None, timeout=30)
+        track("ebay_finances")
         if resp.status_code != 200:
             print(f"Finances API error ({resp.status_code}): {resp.text[:500]}")
             sys.exit(1)

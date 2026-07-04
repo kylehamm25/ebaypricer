@@ -138,11 +138,13 @@ def remove_orphan_columns(ws, headers: list[str]) -> list[str]:
 
 def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
     col_map = {}
+    last_data_col = 0
     for i, h in enumerate(headers):
         if h is not None:
             col_map[str(h).strip()] = i
+            last_data_col = i + 1
 
-    next_col = len(headers) + 1
+    next_col = last_data_col + 1
     price_col_map = {}
     for col_name, _ in PRICE_COLUMNS:
         if col_name in col_map:

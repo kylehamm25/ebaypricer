@@ -10,12 +10,15 @@ CLIENT_SECRET = os.getenv("EBAY_SECRET")
 RUNAME        = os.getenv("RUNAME")
 SCOPE         = "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.marketing"
 
+import secrets
+state = secrets.token_urlsafe(16)
+
 auth_url = "https://auth.ebay.com/oauth2/authorize?" + urllib.parse.urlencode({
     "client_id":     CLIENT_ID,
     "redirect_uri":  RUNAME,
     "response_type": "code",
     "scope":         SCOPE,
-    "prompt":        "consent",
+    "state":         state,
 })
 
 print("Requesting OAuth scopes:")
@@ -61,13 +64,18 @@ if r.status_code != 200:
     print("\nToken exchange failed — check your credentials and RUNAME.")
     exit(1)
 
-granted_scopes = data.get("scope", "")
-if "sell.marketing" not in granted_scopes:
+granted_scopes = data.get("scope")
+if granted_scopes is None:
+    print("\nScope field not returned — eBay omits it when all requested")
+    print("scopes are granted (per OAuth 2.0 spec). Token should be fine.\n")
+elif "sell.marketing" not in granted_scopes:
     print("\n⚠ WARNING: sell.marketing scope was NOT granted.")
     print("  eBay only grants this scope if your seller account is eligible")
     print("  for Promoted Listings (requires: eBay Store, Top Rated/Above")
     print("  Standard seller level, and accepted Promoted Listings terms).")
     print("  The boost script will not work until this is resolved.\n")
+else:
+    print("\n✓ sell.marketing scope confirmed in response.\n")
 
 access_token = data.get("access_token", "")
 refresh_token = data.get("refresh_token", "")

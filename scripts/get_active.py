@@ -10,6 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_active_listings
 from ebaypricer.cards import enrich_rows
+from ebaypricer.marketing_api import get_campaigns, get_ads
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT, SHADE_FILL,
     ACTIVE_CURRENCY_COLS, ACTIVE_INT_COLS, write_headers,
@@ -59,9 +60,8 @@ def auto_column_widths(ws: Worksheet, headers: list[str], rows: list[dict]) -> N
         ws.column_dimensions[col_letter].width = min(max_len + 4, 45)
 
 
-def write_last_updated(ws: Worksheet, headers: list[str], now: datetime) -> None:
-    note_col = len(headers) + 2
-    cell = ws.cell(row=1, column=note_col, value=f"Last updated: {now.strftime('%Y-%m-%d %H:%M UTC')}")
+def write_last_updated(ws: Worksheet, now: datetime) -> None:
+    cell = ws.cell(row=1, column=50, value=f"Last updated: {now.strftime('%Y-%m-%d %H:%M UTC')}")
     cell.font = Font(italic=True, name="Arial", size=9, color="808080")
 
 
@@ -71,9 +71,12 @@ def main():
 
     xlsx_path = args.output
 
+    PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked"]
+
     ws = None
     existing_widths: dict[str, float] = {}
     existing_cards: dict[str, str] = {}
+    existing_prices: dict[str, dict[str, object]] = {}
     if os.path.exists(xlsx_path):
         wb = load_workbook(xlsx_path)
         if SHEET_NAME in wb.sheetnames:
@@ -87,6 +90,22 @@ def main():
                     card_val = str(row[card_col]).strip() if len(row) > card_col and row[card_col] else ""
                     if item_id and card_val:
                         existing_cards[item_id] = card_val
+            price_cols_map: dict[str, int] = {}
+            for name in PRICE_COLS_TO_SAVE:
+                idx = col_to_idx.get(name)
+                if idx is not None:
+                    price_cols_map[name] = idx
+            if price_cols_map and itemid_col is not None:
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    item_id = str(row[itemid_col]).strip() if len(row) > itemid_col and row[itemid_col] else ""
+                    if not item_id:
+                        continue
+                    prices: dict[str, object] = {}
+                    for name, idx in price_cols_map.items():
+                        if len(row) > idx:
+                            prices[name] = row[idx]
+                    if any(v is not None for v in prices.values()):
+                        existing_prices[item_id] = prices
             for col_letter, dim in ws.column_dimensions.items():
                 if dim.width is not None:
                     existing_widths[col_letter] = dim.width
@@ -118,6 +137,29 @@ def main():
         if preserved:
             print(f"  Preserved {preserved} existing Card value(s)")
 
+    print("  Fetching promoted listing ad rates ...")
+    try:
+        campaigns = get_campaigns(token)
+        ad_rate_by_listing: dict[str, float] = {}
+        if campaigns:
+            ads = get_ads(token, campaigns[0]["campaignId"])
+            for ad in ads:
+                lid = ad.get("listingId", "")
+                try:
+                    ad_rate_by_listing[lid] = float(ad.get("bidPercentage") or 0)
+                except (ValueError, TypeError):
+                    pass
+        for row in rows:
+            lid = row.get("Item ID", "")
+            rate = ad_rate_by_listing.get(lid)
+            if rate is not None:
+                row["Ad Rate"] = f"{rate:.0f}%"
+        print(f"  Found {len(ad_rate_by_listing)} promoted listing(s) with ad rates")
+    except SystemExit:
+        pass
+    except Exception as e:
+        print(f"  Skipped ad rates: {e}")
+
     rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)
     headers = list(rows[0].keys())
 
@@ -128,6 +170,28 @@ def main():
     write_headers(ws, headers)
     ws.freeze_panes = "A2"
     write_data_rows(ws, rows, headers)
+
+    if existing_prices:
+        data_headers = list(rows[0].keys())
+        price_start_col = len(data_headers) + 1
+        for col_name in PRICE_COLS_TO_SAVE:
+            cell = ws.cell(row=1, column=price_start_col, value=col_name)
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            price_start_col += 1
+        for row_idx, row in enumerate(rows, 2):
+            item_id = row.get("Item ID", "")
+            saved = existing_prices.get(item_id)
+            if not saved:
+                continue
+            col_offset = len(data_headers) + 1
+            for col_name in PRICE_COLS_TO_SAVE:
+                val = saved.get(col_name)
+                if val is not None:
+                    ws.cell(row=row_idx, column=col_offset, value=val)  # type: ignore
+                col_offset += 1
+        print(f"  Restored price data for {len(existing_prices)} listing(s)")
 
     if existing_widths:
         for col_idx, h in enumerate(headers, 1):
@@ -143,7 +207,7 @@ def main():
     else:
         auto_column_widths(ws, headers, rows)
 
-    write_last_updated(ws, headers, now)
+    write_last_updated(ws, now)
 
     wb.save(xlsx_path)
     print(f"Active Listings refreshed — {len(rows)} listings")

@@ -13,6 +13,8 @@ Requires a refresh token with the sell.marketing scope. Re-run
 gen_access_token.py to authorize it if you haven't already.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
@@ -44,8 +46,8 @@ def parse_args():
                         help="Campaign ID (overrides --campaign-name)")
     parser.add_argument("--min-days", type=int, default=10,
                         help="Days listed before first boost (default: 10)")
-    parser.add_argument("--max-bid", type=float, default=10.0,
-                        help="Maximum bid percentage (default: 10.0)")
+    parser.add_argument("--max-bid", type=float, default=5.0,
+                        help="Maximum bid percentage (default: 5.0)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print what would be done without making changes")
     parser.add_argument("--debug", action="store_true",
@@ -77,6 +79,17 @@ def main():
         print(f"Using campaign: {campaign.get('campaignName', campaign_id)} ({campaign_id})")
         if args.debug:
             print(f"  Full campaign data: {json.dumps(campaign, indent=2)}")
+
+        funding_model = campaign.get("fundingStrategy", {}).get("fundingModel")
+        if funding_model and funding_model != "COST_PER_SALE":
+            print(f"\nERROR: this campaign uses the {funding_model} funding model.")
+            print("  bidPercentage and bulk_update_ads_bid_by_listing_id only work for")
+            print("  Cost-Per-Sale (General strategy) campaigns - eBay rejects/ignores them")
+            print("  for Cost-Per-Click (Priority strategy) campaigns, which bid via")
+            print("  keywords and ad groups instead.")
+            print("  Point this script at a General strategy campaign, or pass its ID")
+            print("  explicitly with --campaign-id.")
+            sys.exit(1)
 
     # ── Get active listings ─────────────────────────────────────────────
     print("\nFetching active listings ...")
@@ -114,35 +127,33 @@ def main():
         item_id = item.get("Item ID", "")
         title = item.get("Title", "")
 
+        current_bid = None
+        ad = ads_by_listing.get(item_id)
+        if ad:
+            current_bid = float(ad.get("bidPercentage") or 0)
+
+        current_str = f"{current_bid:.0f}%" if current_bid is not None else "N/A"
+
         if days < args.min_days:
             skipped_days += 1
             continue
 
-        current_bid = None
-        ad = ads_by_listing.get(item_id)
-        if ad:
-            current_bid = float(ad.get("bidPercentage", 0))
-
-        target = compute_target_bid(days, current_bid)
+        target = compute_target_bid(days, current_bid, args.max_bid)
         if target is None:
             at_cap += 1
             continue
-
-        if target >= args.max_bid:
-            target = args.max_bid
 
         if ad:
             to_update.append({
                 "listingId": item_id,
                 "bidPercentage": f"{target:.1f}",
             })
-            status = f"{current_bid:.0f}% -> {target:.0f}% (update)"
         else:
             to_create.append((item_id, target))
-            status = f"{target:.0f}% (create)"
 
+        target_str = f"{target:.0f}%"
         boosts += 1
-        print(f"  {status:30s}  {title[:60]}")
+        print(f"  {days:>5}  {current_str:>7}  {target_str:>7}  {title[:60]}")
 
     print(f"\nSummary:")
     print(f"  Skipped (under {args.min_days} days):  {skipped_days}")
@@ -156,7 +167,6 @@ def main():
         return
 
     if not to_update and not to_create:
-        print("\nNothing to do.")
         return
 
     # ── Create new ads ──────────────────────────────────────────────────

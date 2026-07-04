@@ -55,8 +55,5 @@ def main():
     if result.returncode != 0:
         print(f"WARNING: auto_boost_promotion.py skipped (exit {result.returncode})")
 
-    print("\nDone.")
-
-
 if __name__ == "__main__":
     main()

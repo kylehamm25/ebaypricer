@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -12,9 +14,9 @@ log = logging.getLogger(__name__)
 MARKETING_URL = "https://api.ebay.com/sell/marketing/v1"
 
 # Trading API returns Item ID as plain "123456789".
-# The Marketing API may return listingId as "v1|123456789|0".
-_LISTING_ID_PREFIX = re.compile(r"^v1\|")
-_LISTING_ID_SUFFIX = re.compile(r"\|0$")
+# The Marketing API may return listingId as "v1|123456789|0" for a plain
+# listing, or "v1|123456789|<variationId>" for a specific variation in a
+# multi-variation listing (the last segment is NOT always "0").
 
 
 def _headers(token: str) -> dict:
@@ -26,9 +28,13 @@ def _headers(token: str) -> dict:
 
 
 def _normalize_listing_id(raw: str) -> str:
-    """Strip the v1|...|0 wrapper so IDs from Trading API and Marketing API
-    can be compared directly."""
-    return _LISTING_ID_SUFFIX.sub("", _LISTING_ID_PREFIX.sub("", raw))
+    """Strip the v1|...|<suffix> wrapper so IDs from Trading API and
+    Marketing API can be compared directly. Works for both plain listings
+    (.../0) and multi-variation listings (.../<variationId>)."""
+    parts = raw.split("|")
+    if len(parts) >= 2 and parts[0] == "v1":
+        return parts[1]
+    return raw
 
 
 def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
@@ -41,6 +47,11 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
     )
     if resp.status_code == 404:
         return []
+    if resp.status_code == 401:
+        print("ERROR: eBay returned 401 Unauthorized for the Marketing API.")
+        print("  Your access token is likely invalid or expired.")
+        print("  Run: python scripts/gen_access_token.py")
+        sys.exit(1)
     if resp.status_code == 403:
         print("ERROR: eBay returned 403 Forbidden for the Marketing API.")
         try:
@@ -84,6 +95,14 @@ def get_ads(token: str, campaign_id: str) -> list[dict]:
             params={"limit": limit, "offset": offset},
             timeout=15,
         )
+        if resp.status_code == 404:
+            # No ads in this campaign yet - not an error.
+            break
+        if resp.status_code == 401:
+            print("ERROR: eBay returned 401 Unauthorized for the Marketing API.")
+            print("  Your access token is likely invalid or expired.")
+            print("  Run: python scripts/gen_access_token.py")
+            sys.exit(1)
         resp.raise_for_status()
         data = resp.json()
         for ad in data.get("ads", []):
@@ -141,12 +160,12 @@ def create_ad(token: str, campaign_id: str, listing_id: str, bid_pct: float) -> 
     return {"ok": True, "status": resp.status_code, "response": resp.json() if resp.text else None}
 
 
-def compute_target_bid(days_listed: int, current_bid: float | None = None) -> float | None:
+def compute_target_bid(days_listed: int, current_bid: float | None = None, max_bid: float = 5.0) -> float | None:
     """Return the target bid % for a listing. Returns None if no boost due."""
     if days_listed < 10:
         return None
     bucket = days_listed // 10
-    target = min(2.0 + bucket * 1.0, 10.0)
+    target = min(2.0 + bucket * 1.0, max_bid)
     if current_bid is not None and target <= current_bid:
         return None
     return target

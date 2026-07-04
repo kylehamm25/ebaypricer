@@ -39,6 +39,9 @@ def _parse_csv_date(date_str: str) -> str:
     return date_str
 
 
+MARKETING_SCOPE = "https://api.ebay.com/oauth/api_scope/sell.marketing"
+
+
 def get_access_token() -> str:
     """Trading API OAuth — uses refresh_token grant."""
     app_id = os.getenv("EBAY_APP_ID")
@@ -50,25 +53,35 @@ def get_access_token() -> str:
         sys.exit(1)
 
     credentials = base64.b64encode(f"{app_id}:{secret}".encode()).decode()
+
+    data: dict = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "scope": MARKETING_SCOPE,
+    }
     resp = requests.post(
         "https://api.ebay.com/identity/v1/oauth2/token",
         headers={
             "Authorization": f"Basic {credentials}",
             "Content-Type": "application/x-www-form-urlencoded",
         },
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-        },
+        data=data,
         timeout=10,
     )
     if resp.status_code != 200:
         print(f"Token refresh failed ({resp.status_code}): {resp.text}")
         sys.exit(1)
 
-    access_token = resp.json()["access_token"]
+    body = resp.json()
+    access_token = body["access_token"]
+    granted_scopes = body.get("scope", "(not returned)")
     _write_env_key("ACCESS_TOKEN", access_token)
-    print("Access token refreshed and saved to .env")
+    print(f"Access token refreshed (scopes: {granted_scopes})")
+    if MARKETING_SCOPE not in str(granted_scopes):
+        print("WARNING: sell.marketing scope was NOT granted.")
+        print("  The refresh token may not have this scope.")
+        print("  Run: python scripts/gen_access_token.py")
+        print("  and complete the browser authorization to re-authorize.")
     return access_token
 
 

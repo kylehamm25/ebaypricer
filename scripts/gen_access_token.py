@@ -8,7 +8,7 @@ load_dotenv(dotenv_path=ENV_PATH)
 CLIENT_ID     = os.getenv("EBAY_APP_ID")
 CLIENT_SECRET = os.getenv("EBAY_SECRET")
 RUNAME        = os.getenv("RUNAME")
-SCOPE         = "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
+SCOPE         = "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.marketing"
 
 auth_url = "https://auth.ebay.com/oauth2/authorize?" + urllib.parse.urlencode({
     "client_id":     CLIENT_ID,

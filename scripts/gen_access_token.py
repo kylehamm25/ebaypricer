@@ -19,6 +19,7 @@ auth_url = "https://auth.ebay.com/oauth2/authorize?" + urllib.parse.urlencode({
 
 print("Opening eBay login in your browser...")
 webbrowser.open(auth_url)
+print(f"\nIf the browser doesn't open, copy this URL:\n{auth_url}\n")
 
 raw = input("\nPaste the FULL redirect URL").strip()
 

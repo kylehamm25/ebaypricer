@@ -1,4 +1,5 @@
 import logging
+import sys
 
 import requests
 
@@ -27,6 +28,19 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
     )
     if resp.status_code == 404:
         return []
+    if resp.status_code == 403:
+        print("ERROR: eBay returned 403 Forbidden for the Marketing API.")
+        print("  Possible causes:")
+        print("    1. Your eBay app does not have the Marketing API enabled.")
+        print("       Go to https://developer.ebay.com -> My Account -> Application Keysets")
+        print("       and check that 'sell.marketing' is in your app's scopes.")
+        print("    2. Your refresh token was not re-generated with sell.marketing scope.")
+        print("       Run: python scripts/gen_access_token.py")
+        print("       Make sure you complete the browser authorization step.")
+        print("    3. Your seller account may not be eligible for Promoted Listings.")
+        print("       Requires: Top Rated or Above Standard seller level,")
+        print("       active eBay Store, and accepted Promoted Listings terms.")
+        sys.exit(1)
     resp.raise_for_status()
     campaigns = resp.json().get("campaigns", [])
     return [c for c in campaigns if c.get("campaignStatus") == status]

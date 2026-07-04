@@ -43,6 +43,11 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
         return []
     if resp.status_code == 403:
         print("ERROR: eBay returned 403 Forbidden for the Marketing API.")
+        try:
+            detail = resp.json()
+        except Exception:
+            detail = resp.text[:1000]
+        print(f"  Response body: {json.dumps(detail, indent=2) if isinstance(detail, dict) else detail}")
         print("  Possible causes:")
         print("    1. Your eBay app does not have the Marketing API enabled.")
         print("       Go to https://developer.ebay.com -> My Account -> Application Keysets")

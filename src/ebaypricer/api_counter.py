@@ -5,6 +5,7 @@ from datetime import date
 from .paths import DATA_DIR
 
 COUNTER_PATH = os.path.join(DATA_DIR, "api_counter.json")
+DAILY_LIMIT = 5000
 
 _categories = {
     "ebay_oauth": "eBay OAuth token requests",
@@ -48,12 +49,6 @@ def get_counts() -> dict:
 
 def summary() -> str:
     data = _load()
-    lines = [f"API calls for {data['date']}:"]
-    total = 0
-    for name, label in _categories.items():
-        count = data["counts"].get(name, 0)
-        if count:
-            lines.append(f"  {label}: {count}")
-        total += count
-    lines.append(f"  Total: {total}")
-    return "\n".join(lines)
+    total = sum(data["counts"].values())
+    pct = total / DAILY_LIMIT * 100
+    return f"API calls: {total}/{DAILY_LIMIT} ({pct:.1f}%)"

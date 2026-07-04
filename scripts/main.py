@@ -82,7 +82,7 @@ def main():
         print(f"WARNING: auto_boost_promotion.py skipped (exit {result.returncode})")
 
     log_run(results)
-    print(f"\n{api_summary()}\n")
+    print(f"  {api_summary()}")
 
 if __name__ == "__main__":
     main()

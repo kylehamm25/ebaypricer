@@ -61,6 +61,14 @@ if r.status_code != 200:
     print("\nToken exchange failed — check your credentials and RUNAME.")
     exit(1)
 
+granted_scopes = data.get("scope", "")
+if "sell.marketing" not in granted_scopes:
+    print("\n⚠ WARNING: sell.marketing scope was NOT granted.")
+    print("  eBay only grants this scope if your seller account is eligible")
+    print("  for Promoted Listings (requires: eBay Store, Top Rated/Above")
+    print("  Standard seller level, and accepted Promoted Listings terms).")
+    print("  The boost script will not work until this is resolved.\n")
+
 access_token = data.get("access_token", "")
 refresh_token = data.get("refresh_token", "")
 

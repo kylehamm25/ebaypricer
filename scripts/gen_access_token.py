@@ -1,15 +1,15 @@
 import requests, base64, os, urllib.parse, webbrowser
 from dotenv import load_dotenv
 
-_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path=_env_path)
+from ebaypricer.paths import ENV_PATH
+
+load_dotenv(dotenv_path=ENV_PATH)
 
 CLIENT_ID     = os.getenv("EBAY_APP_ID")
 CLIENT_SECRET = os.getenv("EBAY_SECRET")
 RUNAME        = os.getenv("RUNAME")
 SCOPE         = "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly"
 
-# Build URL
 auth_url = "https://auth.ebay.com/oauth2/authorize?" + urllib.parse.urlencode({
     "client_id":     CLIENT_ID,
     "redirect_uri":  RUNAME,
@@ -22,7 +22,6 @@ webbrowser.open(auth_url)
 
 raw = input("\nPaste the FULL redirect URL").strip()
 
-# handles both full URL and bare code
 if "code=" in raw:
     code = urllib.parse.parse_qs(urllib.parse.urlparse(raw).query).get("code", [None])[0]
     if not code:
@@ -56,12 +55,10 @@ if r.status_code != 200:
     print("\nToken exchange failed — check your credentials and RUNAME.")
     exit(1)
 
-# Save tokens to .env
 access_token = data.get("access_token", "")
 refresh_token = data.get("refresh_token", "")
 
-env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-with open(env_path, "r") as f:
+with open(ENV_PATH, "r") as f:
     lines = f.readlines()
 
 new_lines = []
@@ -83,7 +80,7 @@ if not written_at:
 if refresh_token and not written_ref:
     new_lines.append(f'REFRESH_TOKEN="{refresh_token}"\n')
 
-with open(env_path, "w") as f:
+with open(ENV_PATH, "w") as f:
     f.writelines(new_lines)
 
 print(f"\nACCESS_TOKEN saved to .env ({len(access_token)} chars)")

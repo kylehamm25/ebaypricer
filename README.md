@@ -16,6 +16,12 @@ Daily pipeline that fetches eBay sold orders via the Trading API, enriches them 
 pip install -r requirements.txt
 ```
 
+For development, install the package in editable mode:
+
+```bash
+pip install -e .
+```
+
 ### 3. Configure credentials
 
 ```bash
@@ -70,12 +76,28 @@ Anacron runs all daily jobs shortly after boot, even on machines that aren't on 
 ## Project Layout
 
 ```
-├── scripts/
-│   ├── append_sold_orders.py   # main daily pipeline
-│   ├── sold_api.py             # shared OAuth + Trading API helpers
-│   ├── get_sold_from_CSV.py    # CSV→xlsx conversion + fee fetching
-│   ├── run_daily.sh            # bash wrapper for anacron/cron
-│   └── gen_access_token.py     # one-time OAuth refresh token setup
+├── src/ebaypricer/          # reusable Python package
+│   ├── auth.py              # OAuth token management (Trading + Browse APIs)
+│   ├── trading_api.py       # eBay Trading API (sold orders, active listings)
+│   ├── browse_api.py        # eBay Browse API (item search, price snapshots)
+│   ├── finances.py          # eBay Finances API (fee fetching)
+│   ├── cards.py             # Pokemon card database + fuzzy matching
+│   ├── excel.py             # shared Excel styling helpers
+│   └── paths.py             # centralized file paths
+├── scripts/                 # executable entry points
+│   ├── main.py              # orchestrator (runs all daily pipelines)
+│   ├── append_sold_orders.py
+│   ├── get_active.py
+│   ├── price_active_listings.py
+│   ├── get_prices.py
+│   ├── csv_report.py
+│   ├── gen_access_token.py
+│   ├── check_pricing.py
+│   └── run_daily.sh
+├── data/                    # JSON cache files (Pokemon card DB, pricing)
+├── db/                      # SQLite database (sold listings + price snapshots)
+├── tests/                   # test stubs
 ├── .env.example
+├── pyproject.toml
 └── requirements.txt
 ```

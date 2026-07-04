@@ -1,10 +1,3 @@
-"""
-Pokemon Card Database enrichment module.
-
-Sources card data from PokemonTCG/pokemon-tcg-data on GitHub (raw JSON).
-Optional pricing from TCGdex API.
-"""
-
 from __future__ import annotations
 
 import json
@@ -15,12 +8,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
-from rapidfuzz import process as fuzz_process
+from rapidfuzz import fuzz, process as fuzz_process
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_FILE = os.path.join(_SCRIPT_DIR, "..", "data", "cards_cache.json")
-PRICING_CACHE = os.path.join(_SCRIPT_DIR, "..", "data", "pricing_cache.json")
-TCGDEX_SET_MAP = os.path.join(_SCRIPT_DIR, "..", "data", "tcgdex_set_map.json")
+from .paths import CACHE_FILE, PRICING_CACHE, TCGDEX_SET_MAP
 
 GITHUB_BASE = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
 TCGDEX_API = "https://api.tcgdex.net/v2/en"
@@ -28,19 +18,78 @@ TCGDEX_API = "https://api.tcgdex.net/v2/en"
 POKEMON_NOISE = {
     "pokemon", "pokemon", "tcg", "card", "cards", "nm", "lp", "mp", "hp",
     "near", "mint", "lightly", "played", "damaged", "rare", "ultra", "holo",
-    "holofoil", "reverse", "reverseholofoil", "full", "art", "vmax", "vstar",
-    "ex", "gx", "v", "tag", "team", "prism", "star", "break", "trainer",
+    "holofoil", "reverse", "reverseholofoil", "full", "art",
+    "tag", "team", "prism", "star", "break", "trainer",
     "gallery", "galarian", "radiant", "amazing", "shiny", "baby",
     "promo", "black", "white", "sword", "shield", "scarlet", "violet",
     "standard", "envelope", "lot", "lot of", "mixed", "common", "uncommon",
     "secret", "illustration", "anime", "japanese", "english", "first", "edition",
-    "1st", "ed", "foil", "non", "sv", "swsh", "sm", "xy", "bw", "hgss", "dp",
-    "pl", "pop", "np", "holo", "poke", "ball", "energy", "basic", "stage",
-    "level", "ancient", "future", "tera", "ex", "v", "vmax", "vstar", "gx",
+    "1st", "ed", "foil", "non", "hgss", "dp",
+    "pl", "pop", "np", "poke", "ball", "energy", "basic", "stage",
+    "level", "ancient", "future", "tera",
 }
 
+SET_ABBREV = {
+    "pal": "paldea evolved",
+    "svi": "scarlet violet",
+    "obf": "obsidian flames",
+    "par": "paradox rift",
+    "paf": "paldean fates",
+    "tef": "temporal forces",
+    "twm": "twilight masquerade",
+    "scr": "stellar crown",
+    "ssp": "surging sparks",
+    "pre": "prismatic evolutions",
+    "jtg": "journey together",
+    "mew": "151",
+    "crz": "crown zenith",
+    "sit": "silver tempest",
+    "lor": "lost origin",
+    "asr": "astral radiance",
+    "brs": "brilliant stars",
+    "fst": "fusion strike",
+    "evs": "evolving skies",
+    "cre": "chilling reign",
+    "bst": "battle styles",
+    "viv": "vivid voltage",
+    "daa": "darkness ablaze",
+    "rcl": "rebel clash",
+    "ssh": "sword shield",
+    "cec": "cosmic eclipse",
+    "unm": "unified minds",
+    "unb": "unbroken bonds",
+    "lot": "lost thunder",
+    "ces": "celestial storm",
+    "fli": "forbidden light",
+    "gri": "guardians rising",
+    "sum": "sun moon",
+    "det": "detective pikachu",
+    "cel": "celestial storm",
+    "drm": "dragon majesty",
+}
+
+SET_PREFIX_RE = re.compile(r"\b(s[vv]\d{2}|swsh\d{2?}|bw\d{2?}|xy\d{2?}|sm\d{2?})\b", re.IGNORECASE)
 CARD_NUM_RE = re.compile(r"\b(\d{1,4}/\d{2,4})\b")
+
+PROMO_NUM_RE = re.compile(r"\b(SVP|MEP|SWSH|BW|SM|XY|DP|HGSS|POP)\s*(\d{1,4})\b", re.IGNORECASE)
+
+_PROMO_PREFIX_MAP: dict[str, tuple[str, int]] = {
+    "svp":  ("svp",   0),
+    "mep":  ("svp",   0),
+    "swsh": ("swshp", 3),
+    "bw":   ("bwp",   0),
+    "sm":   ("smp",   0),
+    "xy":   ("xyp",   0),
+    "dp":   ("dpp",   0),
+    "hgss": ("hsp",   0),
+    "pop":  ("pop",   0),
+}
+
 HEADERS = ["Card"]
+
+_PROMO_SET_TO_PREFIX = {
+    "svp": "SVP",
+}
 
 RARITY_ABBREV = {
     "illustration rare": "IR",
@@ -49,6 +98,8 @@ RARITY_ABBREV = {
 
 
 _STOPWORDS = {"with", "and", "the", "for", "from", "in", "of", "to", "a", "an", "its"}
+
+_REVERSE_RE = re.compile(r'\breverse\b', re.IGNORECASE)
 
 
 def _norm(s: str) -> str:
@@ -60,7 +111,21 @@ def _significant_tokens(s: str) -> list[str]:
     return [t for t in re.split(r"\W+", s.lower()) if len(t) > 3 and t not in skip]
 
 
-# ── pricing helpers ───────────────────────────────────────────────────────
+def _expand_set_abbrevs(title_norm: str) -> str:
+    result = title_norm
+    for abbr, full in SET_ABBREV.items():
+        result = result.replace(abbr, full)
+    m = SET_PREFIX_RE.search(title_norm)
+    if m:
+        prefix = m.group(1).lower()
+        if prefix not in SET_ABBREV:
+            series_map = {"sv": "scarlet violet", "swsh": "sword shield", "sm": "sun moon", "xy": "xy", "bw": "black white"}
+            for series_prefix, series_name in series_map.items():
+                if prefix.startswith(series_prefix):
+                    result = result.replace(prefix, series_name)
+                    break
+    return result
+
 
 def _load_json(path: str) -> dict:
     if os.path.isfile(path):
@@ -78,7 +143,6 @@ def _save_json(path: str, data: dict) -> None:
 
 
 def _fetch_tcg_set_map() -> dict[str, str]:
-    """Return {<set_name_lower>: <tcgdex_set_id>}."""
     path = TCGDEX_SET_MAP
     if os.path.isfile(path):
         return _load_json(path)
@@ -104,7 +168,6 @@ def _get_set_map() -> dict[str, str]:
 
 
 def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> float | None:
-    """Return TCGPlayer market price in USD for the best-matching variant."""
     set_map = _get_set_map()
     tcg_set_id = set_map.get(set_name.lower())
     if not tcg_set_id:
@@ -154,14 +217,13 @@ def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> f
     return None
 
 
-# ── card database ─────────────────────────────────────────────────────────
-
 @dataclass
 class CardDatabase:
     cards: list[dict[str, Any]] = field(default_factory=list)
     by_number: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     name_list: list[str] = field(default_factory=list)
     name_to_card: dict[str, dict[str, Any]] = field(default_factory=dict)
+    name_list_by_len: list[str] = field(default_factory=list)
     _loaded: bool = False
 
     def ensure_loaded(self) -> None:
@@ -243,26 +305,51 @@ class CardDatabase:
                 seen.add(key)
                 self.name_list.append(c["name"])
 
-    # ── matching ───────────────────────────────────────────────────────────
+        self.name_list_by_len = sorted(self.name_list, key=len, reverse=True)
 
     def match(self, title: str) -> dict | None:
         result = self._match_by_number(title)
         if result:
             return result
+        result = self._match_by_promo_number(title)
+        if result:
+            return result
+        result = self._match_exact(title)
+        if result:
+            return result
         result = self._match_fuzzy(title)
         return result
 
-    @staticmethod
-    def _title_matches_set(title_norm: str, set_name: str) -> bool:
+    def _title_matches_set(self, title_norm: str, set_name: str) -> bool:
         if not set_name:
             return False
         sn = set_name.lower()
         if sn in title_norm:
             return True
+        expanded = _expand_set_abbrevs(title_norm)
+        if expanded != title_norm and sn in expanded:
+            return True
         tokens = _significant_tokens(set_name)
         if len(tokens) >= 2:
             return sum(t in title_norm for t in tokens) >= 2
         return bool(tokens) and tokens[0] in title_norm
+
+    def _match_exact(self, title: str) -> dict | None:
+        for name in self.name_list_by_len:
+            if re.search(r'\b' + re.escape(name) + r'\b', title, re.IGNORECASE):
+                return dict(self.name_to_card[name])
+        return None
+
+    @staticmethod
+    def _subtypes_match(title: str, subtypes: list[str]) -> bool:
+        if not subtypes:
+            return True
+        title_lower = title.lower()
+        words = set(re.findall(r"[a-z0-9]+", title_lower))
+        for st in subtypes:
+            if st.lower() in words:
+                return True
+        return False
 
     def _match_by_number(self, title: str) -> dict | None:
         m = CARD_NUM_RE.search(title)
@@ -275,13 +362,60 @@ class CardDatabase:
         if len(candidates) == 1:
             return dict(candidates[0])
         desc = _norm(title)
+        matched_by_set = [c for c in candidates if self._title_matches_set(desc, c["set_name"])]
+        if matched_by_set:
+            if len(matched_by_set) == 1:
+                return dict(matched_by_set[0])
+            for c in matched_by_set:
+                if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
+                    return dict(c)
+            return dict(matched_by_set[0])
+        matched_by_series = [c for c in candidates if self._title_matches_set(desc, c["set_series"])]
+        if matched_by_series:
+            if len(matched_by_series) == 1:
+                return dict(matched_by_series[0])
+            for c in matched_by_series:
+                if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
+                    return dict(c)
+            return dict(matched_by_series[0])
         for c in candidates:
-            if self._title_matches_set(desc, c["set_name"]):
+            if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
                 return dict(c)
-        for c in candidates:
-            if self._title_matches_set(desc, c["set_series"]):
-                return dict(c)
-        return dict(candidates[0])
+        return None
+
+    def _match_by_promo_number(self, title: str) -> dict | None:
+        m = PROMO_NUM_RE.search(title)
+        if not m:
+            return None
+        prefix = m.group(1).lower()
+        digits_str = m.group(2)
+        info = _PROMO_PREFIX_MAP.get(prefix)
+        if not info:
+            return None
+        set_id, zfill = info
+
+        if zfill > 0:
+            padded = digits_str.zfill(zfill)
+            full_num = f"{m.group(1).upper()}{padded}"
+            candidates = self.by_number.get(full_num, [])
+            if len(candidates) == 1:
+                return dict(candidates[0])
+            if candidates:
+                desc = _norm(title)
+                for c in candidates:
+                    if self._title_matches_set(desc, c["set_name"]):
+                        return dict(c)
+                for c in candidates:
+                    if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
+                        return dict(c)
+                return dict(candidates[0])
+
+        stripped = digits_str.lstrip("0")
+        compound = f"{set_id}-{stripped}"
+        candidates = self.by_number.get(compound, [])
+        if len(candidates) == 1:
+            return dict(candidates[0])
+        return None
 
     def _match_fuzzy(self, title: str) -> dict | None:
         clean = _norm(title)
@@ -290,14 +424,15 @@ class CardDatabase:
         clean = re.sub(r"\s+", " ", clean).strip()
         if not clean or len(clean) < 3:
             return None
-        result = fuzz_process.extractOne(
-            clean, self.name_list, score_cutoff=65,
+        results = fuzz_process.extract(
+            clean, self.name_list, score_cutoff=80, limit=5,
         )
-        if result:
-            return dict(self.name_to_card[result[0]])
+        for candidate_name, score, _ in results:
+            card = self.name_to_card[candidate_name]
+            if self._subtypes_match(title, card.get("subtypes", [])):
+                return dict(card)
         return None
 
-# ── public API ─────────────────────────────────────────────────────────────
 
 _DB: CardDatabase | None = None
 
@@ -318,9 +453,20 @@ def _fmt_card(m: dict | None) -> str | None:
     ra = RARITY_ABBREV.get(r.lower()) if r else None
     if ra:
         parts.append(ra)
-    parts.append(m["number"])
+    num = m["number"]
+    prefix = _PROMO_SET_TO_PREFIX.get(m.get("set_id", ""))
+    if prefix and not num.startswith(prefix):
+        num = f"{prefix}{num}"
+    parts.append(num)
     parts.append(m["set_name"])
     return " ".join(parts)
+
+
+def format_card(match_result: dict | None, title: str | None = None) -> str | None:
+    card_str = _fmt_card(match_result)
+    if card_str and title and _REVERSE_RE.search(title):
+        card_str += " Reverse"
+    return card_str
 
 
 def enrich_rows(rows: list[dict], title_key: str = "Item Title") -> None:
@@ -328,21 +474,4 @@ def enrich_rows(rows: list[dict], title_key: str = "Item Title") -> None:
     for row in rows:
         title = (row.get(title_key) or "").split(";")[0]
         m = db.match(title)
-        row["Card"] = _fmt_card(m)
-
-
-
-
-
-if __name__ == "__main__":
-    db = get_db()
-    tests = [
-        "Rayquaza V - 100/159 - Ultra Rare - Rapid Strike Near Mint Pokemon Card",
-        "Pokemon Archaludon 155/142 Sv07: Stellar Crown Holo",
-        "Pikachu ex 063/193 Paldea Evolved PAL English Pokemon Card - NM",
-        "Bulbasaur 45/100 Crystal Guardians Regular",
-        "ALPS Outdoorz Pursuit Backpack Brand New Never Used",
-    ]
-    for t in tests:
-        m = db.match(t)
-        print(f"  {_fmt_card(m):50s} | {t}")
+        row["Card"] = format_card(m, title)

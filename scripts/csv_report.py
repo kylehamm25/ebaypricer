@@ -1,42 +1,37 @@
 """
 Usage:
-    python get_sold_from_CSV.py
-    python get_sold_from_CSV.py --days 90
-    python get_sold_from_CSV.py --start 2025-01-01 --end 2025-06-30
-    python get_sold_from_CSV.py --output my_sales.xlsx
-    python get_sold_from_CSV.py --debug-fees
-    python get_sold_from_CSV.py --skip-fees
+    python csv_report.py
+    python csv_report.py --days 90
+    python csv_report.py --start 2025-01-01 --end 2025-06-30
+    python csv_report.py --output my_sales.xlsx
+    python csv_report.py --debug-fees
+    python csv_report.py --skip-fees
 """
 
 import argparse
 import csv
-import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-import requests
-from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.cell import Cell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.worksheet import Worksheet
 
-from sold_api import (
-    NS, get_access_token, fetch_sold_orders, _parse_usd, _parse_csv_date,
-)
-from pokemon_cards import enrich_rows
+from ebaypricer.auth import get_access_token, _parse_usd, _parse_csv_date
+from ebaypricer.trading_api import fetch_sold_orders
+from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
+from ebaypricer.cards import enrich_rows
 
-_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path=_env_path)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-FINANCE_URL = "https://apiz.ebay.com/sell/finances/v1/transaction"
+DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
+
 
 def read_csv_orders(csv_path: str) -> list[dict]:
     if not os.path.isabs(csv_path):
-        csv_path = os.path.join(_SCRIPT_DIR, csv_path)
+        csv_path = os.path.join(SCRIPT_DIR, csv_path)
     with open(csv_path, encoding="utf-8-sig") as f:
         reader = csv.reader(f)
         next(reader)
@@ -98,207 +93,8 @@ def read_csv_orders(csv_path: str) -> list[dict]:
     print(f"Read {len(rows)} line items from CSV")
     return rows
 
-def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, debug: bool = False):
-    """
-    Returns:
-        fees_by_order: {real_order_id: {feeType: amount}}
-        item_id_index: {item_id: [(transaction_date_iso, real_order_id), ...]}
-        fee_types:      sorted list of all distinct feeType strings seen
-    """
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-    }
-
-    # Widen the window — Finances API "transactionDate" can lag well behind
-    # the order creation date Trading API uses (e.g. Promoted Listings fees
-    # often post days after the sale), so a tight window risks missing
-    # matches. Harmless to over-fetch since merging happens by key/item+date,
-    # not by date range.
-    pad_start = start_dt - timedelta(days=15)
-    pad_end = end_dt + timedelta(days=15)
-    date_filter = (
-        f"transactionDate:[{pad_start.strftime('%Y-%m-%dT%H:%M:%S.000Z')}.."
-        f"{pad_end.strftime('%Y-%m-%dT%H:%M:%S.000Z')}]"
-    )
-
-    fees_by_order: dict = {}
-    item_id_index: dict = {}
-    pending_item_fees: dict = {}  # item_id -> [(feeType, value, date)] for fees with no ORDER_ID ref
-    fee_types: set = set()
-
-    url = FINANCE_URL
-    params = {"filter": date_filter, "limit": 200}
-    page = 1
-
-    while url:
-        resp = requests.get(url, headers=headers, params=params if page == 1 else None, timeout=30)
-        if resp.status_code != 200:
-            print(f"Finances API error ({resp.status_code}): {resp.text[:500]}")
-            sys.exit(1)
-
-        data = resp.json()
-
-        if debug and page == 1:
-            print("\n--- DEBUG: full Finances API transaction samples ---")
-            sale_sample = next((t for t in data.get("transactions", []) if t.get("transactionType") == "SALE"), None)
-            other_sample = next((t for t in data.get("transactions", []) if t.get("transactionType") != "SALE"), None)
-            print("\n[SALE-type transaction, full]:")
-            print(json.dumps(sale_sample, indent=2) if sale_sample else "  (none found on page 1)")
-            print("\n[Non-SALE-type transaction, full]:")
-            print(json.dumps(other_sample, indent=2) if other_sample else "  (none found on page 1)")
-            print("--- end debug ---\n")
-
-        transactions = data.get("transactions", [])
-
-        for txn in transactions:
-            tdate = txn.get("transactionDate", "")
-
-            if txn.get("transactionType") == "SALE":
-                order_id = txn.get("orderId", "")
-                for li in txn.get("orderLineItems", []):
-                    iid = li.get("legacyItemId") or li.get("itemId")
-                    liid = li.get("lineItemId", "")
-                    if not iid and liid:
-                        iid = liid
-                    if iid and order_id:
-                        item_id_index.setdefault(iid, []).append((tdate, order_id))
-                    if liid and liid != iid and order_id:
-                        item_id_index.setdefault(liid, []).append((tdate, order_id))
-
-                    for fee in li.get("marketplaceFees", []):
-                        fee_type = fee.get("feeType", "UNKNOWN_FEE")
-                        try:
-                            value = abs(float(fee.get("amount", {}).get("value", 0.0)))
-                        except (TypeError, ValueError):
-                            value = 0.0
-                        fee_types.add(fee_type)
-                        bucket = fees_by_order.setdefault(order_id, {})
-                        bucket[fee_type] = bucket.get(fee_type, 0.0) + value
-
-            elif txn.get("feeType"):
-                fee_type = txn.get("feeType", "UNKNOWN_FEE")
-                try:
-                    value = abs(float(txn.get("amount", {}).get("value", 0.0)))
-                except (TypeError, ValueError):
-                    value = 0.0
-                refs = txn.get("references", [])
-                order_ref = next((r.get("referenceId") for r in refs if r.get("referenceType") == "ORDER_ID"), None)
-                item_ref = next((r.get("referenceId") for r in refs if r.get("referenceType") == "ITEM_ID"), None)
-
-                fee_types.add(fee_type)
-                if order_ref:
-                    bucket = fees_by_order.setdefault(order_ref, {})
-                    bucket[fee_type] = bucket.get(fee_type, 0.0) + value
-                elif item_ref:
-                    pending_item_fees.setdefault(item_ref, []).append((fee_type, value, tdate))
-
-        url = data.get("next")
-        params = None  # "next" already contains the query string
-        page += 1
-        if page > 100:  # sanity guard against unexpected infinite pagination
-            print("WARNING: stopped fee pagination after 100 pages — check filter/limit.")
-            break
-
-    # Resolve any item-only-referenced fees (no ORDER_ID ref) against the
-    # item_id_index built from SALE transactions, picking the closest date.
-    for item_id, entries in pending_item_fees.items():
-        candidates = item_id_index.get(item_id, [])
-        if not candidates:
-            continue
-        for fee_type, value, fee_date in entries:
-            real_order_id = _closest_by_date(candidates, fee_date)
-            if real_order_id:
-                bucket = fees_by_order.setdefault(real_order_id, {})
-                bucket[fee_type] = bucket.get(fee_type, 0.0) + value
-
-    return fees_by_order, item_id_index
-
-
-def _closest_by_date(candidates: list, target_date_str: str):
-    """candidates: list of (date_iso_str, real_order_id). Returns the
-    real_order_id whose date is closest to target_date_str, or the only
-    candidate if there's just one."""
-    if len(candidates) == 1:
-        return candidates[0][1]
-    try:
-        target = datetime.fromisoformat(target_date_str.replace("Z", "+00:00"))
-    except (ValueError, AttributeError):
-        return candidates[0][1]
-
-    best_id, best_diff = None, None
-    for date_str, order_id in candidates:
-        try:
-            d = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            continue
-        diff = abs((d - target).total_seconds())
-        if best_diff is None or diff < best_diff:
-            best_diff, best_id = diff, order_id
-    return best_id or candidates[0][1]
-
-
-def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: dict) -> None:
-    if not fees_by_order:
-        for row in rows:
-            row["Total eBay Fees"] = None
-            row["Order Earnings"] = None
-        return
-
-    groups: dict = {}
-    for row in rows:
-        groups.setdefault(row["Order ID"], []).append(row)
-
-    for trading_order_id, group in groups.items():
-        real_order_id = trading_order_id if trading_order_id in fees_by_order else None
-
-        if real_order_id is None:
-            for row in group:
-                iid = row.get("Item ID")
-                sale_date = row.get("Sale Date")
-
-                if iid and sale_date and iid in item_id_index:
-                    candidates = item_id_index[iid]
-                    real_order_id = _closest_by_date(candidates, sale_date)
-                    if real_order_id:
-                        break
-
-                oid = row.get("Order ID", "")
-                if "-" in oid and sale_date:
-                    liid = oid.split("-", 1)[1]
-                    if liid in item_id_index:
-                        candidates = item_id_index[liid]
-                        real_order_id = _closest_by_date(candidates, sale_date)
-                        if real_order_id:
-                            break
-
-        fees = fees_by_order.get(real_order_id) if real_order_id else None
-        total_fees = round(sum(fees.values()), 2) if fees else None
-
-        deducted = False
-        for row in group:
-            row["Total eBay Fees"] = total_fees
-            order_total = row.get("Order Total") or 0.0
-            shipping = row.get("Shipping") or 0.0
-            if total_fees is not None:
-                earnings = order_total - total_fees
-                if shipping == 0.0 and not deducted:
-                    earnings -= 0.74
-                    deducted = True
-                elif 0.74 < shipping < 5.00:
-                    earnings -= 1.32
-                else:
-                    earnings -= shipping
-                row["Order Earnings"] = round(earnings, 2)
-            else:
-                row["Order Earnings"] = None
-
-
-# ── Combine Orders ───────────────────────────────────────────────────────────
 
 def combine_orders(rows: list[dict]) -> list[dict]:
-    """Group rows by Order ID, combining multi-item orders into one row."""
     groups: dict = {}
     order = []
     for row in rows:
@@ -335,11 +131,9 @@ def combine_orders(rows: list[dict]) -> list[dict]:
     return combined
 
 
-# ── Excel ─────────────────────────────────────────────────────────────────────
-
 def write_excel(rows: list[dict], filename: str) -> str:
     wb = Workbook()
-    ws: Worksheet = wb.active  # type: ignore[assignment]
+    ws: Worksheet = wb.active
     ws.title = "Sold Orders"
 
     headers = list(rows[0].keys()) if rows else []
@@ -348,18 +142,18 @@ def write_excel(rows: list[dict], filename: str) -> str:
     header_font = Font(bold=True, color="FFFFFF", name="Arial", size=10)
 
     for col_idx, h in enumerate(headers, 1):
-        cell: Cell = ws.cell(row=1, column=col_idx, value=h)  # type: ignore[assignment]
+        cell: Cell = ws.cell(row=1, column=col_idx, value=h)
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    data_font    = Font(name="Arial", size=10)
+    data_font = Font(name="Arial", size=10)
     currency_cols = {"Item Price", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
-    int_cols      = {"Quantity"}
+    int_cols = {"Quantity"}
 
     for row_idx, row in enumerate(rows, 2):
         for col_idx, h in enumerate(headers, 1):
-            cell: Cell = ws.cell(row=row_idx, column=col_idx, value=row[h])  # type: ignore[assignment]
+            cell: Cell = ws.cell(row=row_idx, column=col_idx, value=row[h])
             cell.font = data_font
             cell.alignment = Alignment(vertical="center")
             if h in currency_cols and row[h] is not None:
@@ -369,10 +163,9 @@ def write_excel(rows: list[dict], filename: str) -> str:
 
         if row_idx % 2 == 0:
             for col_idx in range(1, len(headers) + 1):
-                shade: Cell = ws.cell(row=row_idx, column=col_idx)  # type: ignore[assignment]
+                shade: Cell = ws.cell(row=row_idx, column=col_idx)
                 shade.fill = PatternFill("solid", fgColor="EBF3FB")
 
-    # Summary sheet
     ws_sum = wb.create_sheet("Summary")
     n = len(rows)
     ws_sum["A1"] = "Summary"
@@ -437,7 +230,6 @@ def write_excel(rows: list[dict], filename: str) -> str:
         ws_sum[f"A{note_row}"].font = Font(name="Arial", size=9, italic=True, color="808080")
         note_row += 1
 
-    assert ws is not None
     for col_idx, h in enumerate(headers, 1):
         col_letter_w = get_column_letter(col_idx)
         max_len = max(
@@ -451,15 +243,13 @@ def write_excel(rows: list[dict], filename: str) -> str:
     return filename
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Export eBay sold orders to Excel via Trading API")
     parser.add_argument("--csv",    type=str,                                help="Read orders from CSV instead of Trading API")
     parser.add_argument("--days",   type=int, default=30,                    help="Past days to fetch (default: 30)")
     parser.add_argument("--start",  type=str,                                help="Start date YYYY-MM-DD (overrides --days)")
     parser.add_argument("--end",    type=str,                                help="End date YYYY-MM-DD (default: today)")
-    parser.add_argument("--output", type=str, default=r"H:\My Drive\ebay\ebay_sold_orders.xlsx", help="Output filename")
+    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT, help="Output filename")
     parser.add_argument("--skip-fees", action="store_true", help="Skip the Finances API fee/earnings lookup entirely")
     parser.add_argument("--debug-fees", action="store_true", help="Print raw Finances API JSON samples for verifying field names")
     return parser.parse_args()

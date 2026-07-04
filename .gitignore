@@ -4,5 +4,10 @@
 __pycache__/
 data/*
 !data/.gitkeep
-*.xml
+db/*
+!db/.gitkeep
+*.xmlrem
 *.csv
+active_listing_debug.xml
+*.db
+src/*.egg-info/

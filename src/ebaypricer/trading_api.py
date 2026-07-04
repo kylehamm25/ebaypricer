@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 import sys
@@ -6,19 +5,9 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 import requests
-from dotenv import load_dotenv, set_key
-
-_env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
-load_dotenv(dotenv_path=_env_path)
 
 NS = "urn:ebay:apis:eBLBaseComponents"
 TRADING_URL = "https://api.ebay.com/ws/api.dll"
-
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _write_env_key(env_path: str, key: str, value: str) -> None:
-    set_key(env_path, key, value)
 
 
 def _t(el, tag: str) -> str:
@@ -35,68 +24,6 @@ def _f(el, path: str, default: float = 0.0) -> float:
             return default
     return default
 
-
-def _parse_usd(val: str) -> float:
-    val = val.strip().lstrip("$").replace(",", "")
-    try:
-        return float(val) if val else 0.0
-    except ValueError:
-        return 0.0
-
-
-def _parse_csv_date(date_str: str) -> str:
-    months = {
-        "Jan": "01", "Feb": "02", "Mar": "03", "Apr": "04",
-        "May": "05", "Jun": "06", "Jul": "07", "Aug": "08",
-        "Sep": "09", "Oct": "10", "Nov": "11", "Dec": "12",
-    }
-    try:
-        parts = date_str.strip().replace(".", "").split("-")
-        if len(parts) == 3:
-            mon = months.get(parts[0].title(), "01")
-            day = parts[1].zfill(2)
-            yr = ("20" + parts[2]) if len(parts[2]) == 2 else parts[2]
-            return f"{yr}-{mon}-{day}"
-    except (IndexError, KeyError):
-        pass
-    return date_str
-
-
-# ── Auth ──────────────────────────────────────────────────────────────────────
-
-def get_access_token() -> str:
-    app_id = os.getenv("EBAY_APP_ID")
-    secret = os.getenv("EBAY_SECRET")
-    refresh = os.getenv("REFRESH_TOKEN")
-    dev_id = os.getenv("EBAY_DEV_ID")
-    if not app_id or not secret or not dev_id or not refresh:
-        print("ERROR: EBAY_APP_ID, EBAY_DEV_ID, EBAY_SECRET, and REFRESH_TOKEN must all be set in .env")
-        sys.exit(1)
-
-    credentials = base64.b64encode(f"{app_id}:{secret}".encode()).decode()
-    resp = requests.post(
-        "https://api.ebay.com/identity/v1/oauth2/token",
-        headers={
-            "Authorization": f"Basic {credentials}",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-        },
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        print(f"Token refresh failed ({resp.status_code}): {resp.text}")
-        sys.exit(1)
-
-    access_token = resp.json()["access_token"]
-    _write_env_key(_env_path, "ACCESS_TOKEN", access_token)
-    print("Access token refreshed and saved to .env")
-    return access_token
-
-
-# ── Trading API ───────────────────────────────────────────────────────────────
 
 def _build_xml(page: int, start_dt: datetime, end_dt: datetime, access_token: str) -> str:
     start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -190,11 +117,6 @@ def _parse_order(order_el, rows: list) -> None:
             shipping = calc
 
     for txn in order_el.findall(f".//{{{NS}}}Transaction"):
-        # <Order>/<CreatedTime> and <Order>/<BuyerUserID> are not always present
-        # (e.g. orders that only carry a <TransactionArray>). Fall back to the
-        # per-transaction <CreatedDate> / <Buyer><UserID> so rows never end up
-        # with an empty Sale Date, which silently fails the cutoff-date filter
-        # in append_sold_orders.py and drops the whole order.
         txn_created = created or _t(txn, "CreatedDate")[:10]
         txn_buyer = buyer or (txn.findtext(f".//{{{NS}}}Buyer/{{{NS}}}UserID") or "")
 
@@ -302,7 +224,19 @@ def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -
     return rows
 
 
-# ── Active Listings ──────────────────────────────────────────────────────────
+_DURATION_RE = re.compile(
+    r"P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?"
+)
+
+
+def _parse_iso_duration(duration: str) -> timedelta:
+    m = _DURATION_RE.match(duration or "")
+    if not m:
+        return timedelta()
+    parts = {k: int(v) if v else 0 for k, v in m.groupdict().items()}
+    return timedelta(days=parts["days"], hours=parts["hours"],
+                      minutes=parts["minutes"], seconds=parts["seconds"])
+
 
 def _build_active_xml(page: int, access_token: str) -> str:
     return f"""<?xml version="1.0" encoding="utf-8"?>
@@ -322,33 +256,18 @@ def _build_active_xml(page: int, access_token: str) -> str:
 </GetMyeBaySellingRequest>"""
 
 
-_DURATION_RE = re.compile(
-    r"P(?:(?P<days>\d+)D)?T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?"
-)
-
-
-def _parse_iso_duration(duration: str) -> timedelta:
-    """Parse eBay's TimeLeft duration format, e.g. 'P2DT23H31M51S'."""
-    m = _DURATION_RE.match(duration or "")
-    if not m:
-        return timedelta()
-    parts = {k: int(v) if v else 0 for k, v in m.groupdict().items()}
-    return timedelta(days=parts["days"], hours=parts["hours"],
-                      minutes=parts["minutes"], seconds=parts["seconds"])
-
-
 def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     item_id = _t(item_el, "ItemID")
     title = _t(item_el, "Title")
     sku = _t(item_el, "SKU")
     link = item_el.findtext(f"{{{NS}}}ListingDetails/{{{NS}}}ViewItemURL") or ""
- 
+
     price_el = item_el.find(f"{{{NS}}}SellingStatus/{{{NS}}}CurrentPrice")
     current_price = float(price_el.text) if price_el is not None and price_el.text else 0.0
- 
+
     qty_avail_el = item_el.find(f"{{{NS}}}QuantityAvailable")
     qty_available = int(qty_avail_el.text) if qty_avail_el is not None and qty_avail_el.text else 0
- 
+
     start_el = item_el.find(f"{{{NS}}}ListingDetails/{{{NS}}}StartTime")
     start_date = ""
     days_listed = 0
@@ -356,7 +275,7 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
         start_dt = datetime.strptime(start_el.text[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
         start_date = start_dt.strftime("%Y-%m-%d")
         days_listed = (now - start_dt).days
- 
+
     watch_el = item_el.find(f"{{{NS}}}WatchCount")
     watch_count = int(watch_el.text) if watch_el is not None and watch_el.text else 0
 

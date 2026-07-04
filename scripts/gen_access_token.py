@@ -14,9 +14,14 @@ auth_url = "https://auth.ebay.com/oauth2/authorize?" + urllib.parse.urlencode({
     "client_id":     CLIENT_ID,
     "redirect_uri":  RUNAME,
     "response_type": "code",
-    "scope":         SCOPE
+    "scope":         SCOPE,
+    "prompt":        "consent",
 })
 
+print("Requesting OAuth scopes:")
+for s in SCOPE.split():
+    print(f"  {s}")
+print()
 print("Opening eBay login in your browser...")
 webbrowser.open(auth_url)
 print(f"\nIf the browser doesn't open, copy this URL:\n{auth_url}\n")

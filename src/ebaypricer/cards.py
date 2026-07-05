@@ -10,7 +10,6 @@ from typing import Any
 import requests
 from rapidfuzz import fuzz, process as fuzz_process
 
-from .api_counter import track
 from .paths import CACHE_FILE, PRICING_CACHE, TCGDEX_SET_MAP
 
 GITHUB_BASE = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
@@ -149,7 +148,6 @@ def _fetch_tcg_set_map() -> dict[str, str]:
         return _load_json(path)
     print("  Fetching TCGdex set map for pricing ...")
     resp = requests.get(f"{TCGDEX_API}/sets", timeout=30)
-    track("tcgdex")
     resp.raise_for_status()
     mapping: dict[str, str] = {}
     for s in resp.json():
@@ -185,7 +183,6 @@ def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> f
         url = f"{TCGDEX_API}/cards/{card_id}"
         try:
             resp = requests.get(url, timeout=10)
-            track("tcgdex")
             if resp.status_code != 200:
                 cache[card_id] = None
                 _save_json(PRICING_CACHE, cache)
@@ -274,13 +271,11 @@ class CardDatabase:
 
     def _fetch_sets(self) -> list[dict]:
         resp = requests.get(f"{GITHUB_BASE}/sets/en.json", timeout=30)
-        track("tcgdex")
         resp.raise_for_status()
         return resp.json()
 
     def _fetch_set_cards(self, set_id: str) -> list[dict]:
         resp = requests.get(f"{GITHUB_BASE}/cards/en/{set_id}.json", timeout=30)
-        track("tcgdex")
         resp.raise_for_status()
         return resp.json()
 

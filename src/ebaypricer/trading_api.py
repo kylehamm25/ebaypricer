@@ -6,8 +6,6 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-from .api_counter import track
-
 NS = "urn:ebay:apis:eBLBaseComponents"
 TRADING_URL = "https://api.ebay.com/ws/api.dll"
 
@@ -184,7 +182,6 @@ def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -
             data=_build_xml(page, start_dt, end_dt, access_token),
             timeout=30,
         )
-        track("ebay_trading")
         resp.raise_for_status()
 
         root = ET.fromstring(resp.text)
@@ -308,7 +305,6 @@ def fetch_active_listings(access_token: str) -> list[dict]:
             data=_build_active_xml(page, access_token),
             timeout=30,
         )
-        track("ebay_trading")
         resp.raise_for_status()
 
         with open("active_listing_debug.xml", "w", encoding="utf-8") as f:

@@ -7,7 +7,6 @@ import sys
 
 import requests
 
-from .api_counter import track
 from .auth import get_access_token
 
 log = logging.getLogger(__name__)
@@ -46,7 +45,6 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
         params={"limit": 200, "offset": 0},
         timeout=15,
     )
-    track("ebay_marketing")
     if resp.status_code == 404:
         return []
     if resp.status_code == 401:
@@ -97,7 +95,6 @@ def get_ads(token: str, campaign_id: str) -> list[dict]:
             params={"limit": limit, "offset": offset},
             timeout=15,
         )
-        track("ebay_marketing")
         if resp.status_code == 404:
             # No ads in this campaign yet - not an error.
             break
@@ -131,7 +128,6 @@ def bulk_update_bids(token: str, campaign_id: str, requests_list: list[dict]) ->
         json={"requests": requests_list},
         timeout=30,
     )
-    track("ebay_marketing")
     if resp.status_code != 200:
         log.error("Bulk bid update failed (%s): %s", resp.status_code, resp.text[:1000])
         result["errors"].append({"status": resp.status_code, "body": resp.text[:1000]})
@@ -154,7 +150,6 @@ def create_ad(token: str, campaign_id: str, listing_id: str, bid_pct: float) -> 
         },
         timeout=15,
     )
-    track("ebay_marketing")
     if resp.status_code not in (200, 201):
         try:
             body = resp.json()

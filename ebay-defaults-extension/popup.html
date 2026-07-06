@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>eBay Defaults</title>
+</head>
+<body>
+  <div class="container">
+    <h1>eBay Listing Defaults</h1>
+
+    <button id="applyBtn" class="btn-primary">Apply Defaults</button>
+
+    <details>
+      <summary>Edit defaults</summary>
+      <div class="field">
+        <label for="condition">Condition</label>
+        <input type="text" id="condition" />
+      </div>
+      <div class="field">
+        <label for="descriptionTemplate">Description template</label>
+        <input type="text" id="descriptionTemplate" placeholder="reg" />
+      </div>
+      <div class="field">
+        <label for="itemPrice">Item price ($)</label>
+        <input type="text" id="itemPrice" />
+      </div>
+      <div class="field">
+        <label for="shippingPolicy">Shipping policy</label>
+        <input type="text" id="shippingPolicy" />
+      </div>
+      <div class="field">
+        <label for="paymentPolicy">Payment policy</label>
+        <input type="text" id="paymentPolicy" />
+      </div>
+      <div class="field">
+        <label for="promotedRate">Promoted rate (%)</label>
+        <input type="number" id="promotedRate" min="1" max="100" />
+      </div>
+      <button id="saveBtn" class="btn-secondary">Save</button>
+    </details>
+
+    <p class="status" id="status"></p>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

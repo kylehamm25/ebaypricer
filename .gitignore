@@ -11,5 +11,4 @@ db/*
 active_listing_debug.xml
 *.db
 src/*.egg-info/
-/ebay-defaults-extension
 *.log

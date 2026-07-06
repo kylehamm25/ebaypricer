@@ -58,20 +58,22 @@ Options:
 | `--output` | Output xlsx path (default: `H:\My Drive\ebay\ebay_sold_orders.xlsx`) |
 | `--days` | Fetch last N days (default `0` = use hardcoded cutoff `2026-06-29`) |
 
-### Daily automation (Linux / WSL)
+### Hourly automation (Linux / WSL)
 
-A bash wrapper is included for anacron/cron:
+A bash wrapper is included for anacron/cron. It calls `scripts/main.py` which
+runs all pipeline steps (append sold orders, refresh active listings, update
+pricing, auto-boost promotions) in sequence.
 
 ```bash
 # Install anacron (Ubuntu/Debian)
 sudo apt install anacron
 
-# Copy the wrapper
-sudo cp scripts/run_daily.sh /etc/cron.daily/ebay_sold
-sudo chmod 755 /etc/cron.daily/ebay_sold
+# Copy the wrapper to cron.hourly
+sudo cp scripts/run_hourly.sh /etc/cron.hourly/ebay_pipeline
+sudo chmod 755 /etc/cron.hourly/ebay_pipeline
 ```
 
-Anacron runs all daily jobs shortly after boot, even on machines that aren't on 24/7.
+Anacron runs all hourly jobs periodically and catches up after downtime.
 
 ## Project Layout
 
@@ -93,6 +95,7 @@ Anacron runs all daily jobs shortly after boot, even on machines that aren't on 
 │   ├── csv_report.py
 │   ├── gen_access_token.py
 │   ├── check_pricing.py
+│   ├── run_hourly.sh
 │   └── run_daily.sh
 ├── data/                    # JSON cache files (Pokemon card DB, pricing)
 ├── db/                      # SQLite database (sold listings + price snapshots)

@@ -10,7 +10,10 @@ from .paths import ENV_PATH
 
 
 def _write_env_key(key: str, value: str) -> None:
-    set_key(ENV_PATH, key, value)
+    try:
+        set_key(ENV_PATH, key, value)
+    except PermissionError:
+        print(f"Warning: could not write {key} to {ENV_PATH} (file may be read-only)")
 
 
 def _parse_usd(val: str) -> float:

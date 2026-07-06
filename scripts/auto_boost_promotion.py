@@ -134,6 +134,13 @@ def main():
 
         current_str = f"{current_bid:.0f}%" if current_bid is not None else "N/A"
 
+        # Listings without any promotion get one at 2%
+        if ad is None:
+            to_create.append((item_id, 2.0))
+            boosts += 1
+            print(f"  {days:>5}  {current_str:>7}      2%  (new)  {title[:60]}")
+            continue
+
         if days < args.min_days:
             skipped_days += 1
             continue
@@ -143,13 +150,10 @@ def main():
             at_cap += 1
             continue
 
-        if ad:
-            to_update.append({
-                "listingId": item_id,
-                "bidPercentage": f"{target:.1f}",
-            })
-        else:
-            to_create.append((item_id, target))
+        to_update.append({
+            "listingId": item_id,
+            "bidPercentage": f"{target:.1f}",
+        })
 
         target_str = f"{target:.0f}%"
         boosts += 1

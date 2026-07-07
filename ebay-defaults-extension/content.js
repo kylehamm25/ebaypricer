@@ -256,6 +256,13 @@ async function setCondition() {
         return false;
     }
 
+    // If the trigger button already shows a selected condition (not a
+    // placeholder like "Select …"), leave it alone.
+    const cur = trigger.textContent.trim().toLowerCase();
+    if (!cur.includes("select") && !cur.includes("choose")) {
+        return true; // already has a selection — do not overwrite
+    }
+
     trigger.click();
     await wait(1000);
 
@@ -385,6 +392,67 @@ async function setBestOfferAmounts() {
     if (acceptInput) { console.log(`[eBay] setBestOfferAmounts: accept ${elSummary(acceptInput)}`); setValue(acceptInput, offerAmount); }
 }
 
+async function setShippingSettings() {
+    const editBtn = document.querySelector('button[aria-label="Your settings - edit"]');
+    if (!editBtn) return false;
+
+    editBtn.click();
+    await wait(1500);
+
+    const modal = document.querySelector('.se-panel-container.details__shipping-settings');
+    if (!modal) return false;
+
+    const zipInput = modal.querySelector('input[name="itemLocation"]');
+    if (zipInput && DEFAULTS.itemLocationZip) {
+        setValue(zipInput, DEFAULTS.itemLocationZip);
+        await wait(200);
+    }
+
+    const csInput = modal.querySelector('input[name="itemLocationCityState"]');
+    if (csInput && DEFAULTS.itemLocationCityState) {
+        setValue(csInput, DEFAULTS.itemLocationCityState);
+        await wait(200);
+    }
+
+    if (DEFAULTS.returnPolicy) {
+        const rpInput = modal.querySelector('input[name="returnsPolicyId"]');
+        if (rpInput) {
+            rpInput.focus();
+            fire(rpInput, "focus");
+            await wait(200);
+            rpInput.click();
+            await wait(1000);
+
+            const controlsId = rpInput.getAttribute("aria-controls");
+            const listbox = controlsId ? document.getElementById(controlsId) : null;
+            const scope = listbox || modal;
+
+            let selected = false;
+            for (let retry = 0; retry < 2 && !selected; retry++) {
+                const options = scope.querySelectorAll('[role="option"]');
+                for (const opt of options) {
+                    if (textsMatch(opt.textContent, DEFAULTS.returnPolicy)) {
+                        opt.click();
+                        await wait(300);
+                        selected = true;
+                        break;
+                    }
+                }
+                if (!selected) await wait(800);
+            }
+        }
+    }
+
+    const doneBtn = modal.querySelector('.se-panel-container__header-suffix button');
+    if (doneBtn) {
+        doneBtn.click();
+        await wait(500);
+        return true;
+    }
+
+    return false;
+}
+
 async function setPromoted() {
     const wrapper = $(".promoted-listing-program-wrapper");
     if (!wrapper) {
@@ -431,6 +499,9 @@ async function applyDefaults() {
             if (stored.paymentPolicy) DEFAULTS.paymentPolicy = stored.paymentPolicy;
             if (stored.promotedRate != null) DEFAULTS.promotedRate = stored.promotedRate;
             if (stored.customLabel != null) DEFAULTS.customLabel = stored.customLabel;
+            if (stored.itemLocationZip != null) DEFAULTS.itemLocationZip = stored.itemLocationZip;
+            if (stored.itemLocationCityState != null) DEFAULTS.itemLocationCityState = stored.itemLocationCityState;
+            if (stored.returnPolicy != null) DEFAULTS.returnPolicy = stored.returnPolicy;
         }
     } catch (_) {}
 
@@ -447,6 +518,7 @@ async function applyDefaults() {
 
     steps.push(
         { name: "Shipping policy",      fn: setShipping },
+        { name: "Shipping settings",    fn: setShippingSettings },
         { name: "Payment policy",       fn: setPayment },
         { name: "Weight",               fn: setWeight },
         { name: "Dimensions",           fn: setDimensions },
@@ -591,6 +663,9 @@ async function loadSettingsIntoForm() {
     formFields.shippingPolicy.value = d.shippingPolicy || "Free ebay standard";
     formFields.paymentPolicy.value = d.paymentPolicy || "Immediate payment";
     formFields.promotedRate.value = d.promotedRate ?? 2;
+    formFields.itemLocationZip.value = d.itemLocationZip ?? "";
+    formFields.itemLocationCityState.value = d.itemLocationCityState ?? "";
+    formFields.returnPolicy.value = d.returnPolicy ?? "No Return Accepted";
 }
 
 async function saveSettings() {
@@ -603,6 +678,9 @@ async function saveSettings() {
             shippingPolicy: formFields.shippingPolicy.value.trim(),
             paymentPolicy: formFields.paymentPolicy.value.trim(),
             promotedRate: parseFloat(formFields.promotedRate.value) || 2,
+            itemLocationZip: formFields.itemLocationZip.value.trim(),
+            itemLocationCityState: formFields.itemLocationCityState.value.trim(),
+            returnPolicy: formFields.returnPolicy.value.trim(),
         },
     });
 }
@@ -749,17 +827,22 @@ function createPanel() {
         ["Shipping", "ebay-dflt-shipping", "text", "", "shippingPolicy"],
         ["Payment", "ebay-dflt-payment", "text", "", "paymentPolicy"],
         ["Rate (%)", "ebay-dflt-rate", "text"],
+        ["ZIP", "ebay-dflt-zip", "text"],
+        ["City,St", "ebay-dflt-citystate", "text"],
+        ["Returns", "ebay-dflt-returns", "text"],
     ];
 
     formFields = {
         condition: null, descTmpl: null, customLabel: null,
         itemPrice: null, shippingPolicy: null, paymentPolicy: null,
         promotedRate: null,
+        itemLocationZip: null, itemLocationCityState: null, returnPolicy: null,
     };
 
     const idMap = [
         "condition", "itemPrice", "customLabel", "descTmpl",
         "shippingPolicy", "paymentPolicy", "promotedRate",
+        "itemLocationZip", "itemLocationCityState", "returnPolicy",
     ];
 
     fields.forEach(([label, id, type, placeholder, presetKey], i) => {

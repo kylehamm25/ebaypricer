@@ -66,4 +66,7 @@ const DEFAULTS = {
         height: 1,
     },
     promotedRate: 2,
+    itemLocationZip: "",
+    itemLocationCityState: "",
+    returnPolicy: "No Return Accepted",
 };

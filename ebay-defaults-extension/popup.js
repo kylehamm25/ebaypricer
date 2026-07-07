@@ -14,6 +14,9 @@ async function loadDefaults() {
     $("shippingPolicy").value = d.shippingPolicy || "Free ebay standard";
     $("paymentPolicy").value = d.paymentPolicy || "Immediate payment";
     $("promotedRate").value = d.promotedRate ?? 2;
+    $("itemLocationZip").value = d.itemLocationZip ?? "";
+    $("itemLocationCityState").value = d.itemLocationCityState ?? "";
+    $("returnPolicy").value = d.returnPolicy ?? "No Return Accepted";
 }
 
 /* --- Save edited defaults --- */
@@ -25,6 +28,9 @@ async function saveDefaults() {
         shippingPolicy: $("shippingPolicy").value.trim(),
         paymentPolicy: $("paymentPolicy").value.trim(),
         promotedRate: parseFloat($("promotedRate").value) || 2,
+        itemLocationZip: $("itemLocationZip").value.trim(),
+        itemLocationCityState: $("itemLocationCityState").value.trim(),
+        returnPolicy: $("returnPolicy").value.trim(),
     };
     await chrome.storage.sync.set({ defaults });
     $("status").textContent = "Defaults saved.";

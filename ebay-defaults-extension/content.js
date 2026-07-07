@@ -190,9 +190,15 @@ async function setFormat() {
 }
 
 async function setItemPrice() {
-    const inp = $(`input[name="price"][aria-label="Item price"]`);
-    if (inp && DEFAULTS.itemPrice) {
+    if (!DEFAULTS.itemPrice) return;
+    let inp = $(`input[name="price"][aria-label="Item price"]`);
+    if (!inp) inp = $(`input[name="price"]`);
+    if (!inp) inp = $(`input[aria-label*="price" i]`);
+    if (inp) {
+        console.log(`[eBay] setItemPrice: found ${elSummary(inp)}`);
         setValue(inp, DEFAULTS.itemPrice);
+    } else {
+        console.log(`[eBay] setItemPrice: no price input found`);
     }
 }
 
@@ -381,15 +387,14 @@ async function enableOffers() {
 }
 
 async function setBestOfferAmounts() {
-    const priceInput = $(`input[name="price"][aria-label="Item price"]`);
-    if (!priceInput) return;
-    const price = parseFloat(priceInput.value);
+    const price = parseFloat(DEFAULTS.itemPrice);
     if (isNaN(price) || price <= 0) return;
     const offerAmount = (price * 0.9).toFixed(2);
     const declineInput = $(`input[name="autoDeclineAmount"]`);
     const acceptInput = $(`input[name="autoAcceptAmount"]`);
     if (declineInput) { console.log(`[eBay] setBestOfferAmounts: decline ${elSummary(declineInput)}`); setValue(declineInput, offerAmount); }
     if (acceptInput) { console.log(`[eBay] setBestOfferAmounts: accept ${elSummary(acceptInput)}`); setValue(acceptInput, offerAmount); }
+    if (!declineInput && !acceptInput) console.log(`[eBay] setBestOfferAmounts: no auto-decline/accept inputs found`);
 }
 
 async function setShippingSettings() {

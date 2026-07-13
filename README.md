@@ -4,15 +4,15 @@ Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, 
 
 ## Capabilities
 
-**Sold Order Tracking** — Pulls completed orders from the Trading API, calculates eBay fees via the Finances API, deduplicates, and appends to an Excel workbook for bookkeeping.
+**Sold Order Tracking**: Pulls completed orders from the Trading API, calculates eBay fees via the Finances API, deduplicates, and appends to an Excel workbook for bookkeeping.
 
-**Active Listing Management** — Refreshes current listings with card name enrichment (via fuzzy matching), shipping profile extraction, promoted listing ad rates, and price analytics columns.
+**Active Listing Management**: Refreshes active listings with card name enrichment (via fuzzy matching), shipping profile extraction, promoted listing ad rates, and price analytics columns.
 
-**Market Price Analytics** — Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count directly into the Active Listings sheet.
+**Market Price Analytics**: Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count directly into the Active Listings sheet.
 
-**Automated Promotion Bidding** — Adjusts promoted listing ad rates based on configurable pricing rules (see `check_pricing.py`).
+**Automated Promotion Adjustment**: Adjusts promoted listing ad rates based on configurable pricing rules (see `check_pricing.py`).
 
-**Listing Defaults Extension** — Chrome extension that fills eBay listing form defaults with one click, with customizable presets using popup UI.
+**Listing Defaults Extension**: Chrome extension that fills eBay listing form defaults with one click, with customizable presets using popup UI.
 
 ## Pipeline
 

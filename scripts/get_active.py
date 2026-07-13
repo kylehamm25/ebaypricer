@@ -123,6 +123,17 @@ def main():
         print("No active listings returned — leaving existing sheet untouched.")
         return
 
+    SHIPPING_PRICE_MAP = {
+        "free ebay standard": 0,
+        "ebay standard envelope": 0.78,
+        "ground advantage": 5,
+        "free ground advantage": 0,
+    }
+
+    for row in rows:
+        profile = (row.get("Shipping Profile") or "").strip().lower()
+        row["Shipping Price"] = SHIPPING_PRICE_MAP.get(profile, 0)
+
     print("  Enriching with Pokémon card data ...")
     enrich_rows(rows, title_key="Title")
 
@@ -159,6 +170,13 @@ def main():
         pass
     except Exception as e:
         print(f"  Skipped ad rates: {e}")
+
+    COLUMN_ORDER = [
+        "Item ID", "Title", "Card", "SKU", "Link", "Price",
+        "Shipping Price", "Ad Rate", "Watchers", "Days Listed",
+        "Start Date", "Quantity", "Shipping Profile",
+    ]
+    rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 
     rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)
     headers = list(rows[0].keys())

@@ -279,16 +279,22 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     watch_el = item_el.find(f"{{{NS}}}WatchCount")
     watch_count = int(watch_el.text) if watch_el is not None and watch_el.text else 0
 
+    shipping_profile_el = item_el.find(
+        f"{{{NS}}}SellerProfiles/{{{NS}}}SellerShippingProfile/{{{NS}}}ShippingProfileName"
+    )
+    shipping_profile = shipping_profile_el.text if shipping_profile_el is not None and shipping_profile_el.text else ""
+
     rows.append({
         "Item ID":            item_id,
         "Title":              title,
         "SKU":                sku,
-        "Price":              current_price,
-        "Quantity":           qty_available,
-        "Start Date":         start_date,
-        "Days Listed":        days_listed,
-        "Watchers":           watch_count,
         "Link":               link,
+        "Price":              current_price,
+        "Watchers":           watch_count,
+        "Days Listed":        days_listed,
+        "Start Date":         start_date,
+        "Quantity":           qty_available,
+        "Shipping Profile":   shipping_profile,
     })
 
 

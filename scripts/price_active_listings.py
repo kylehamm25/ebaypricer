@@ -24,7 +24,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 SHEET_NAME = "Active Listings"
-LOOKBACK_DAYS = 150
+LOOKBACK_DAYS = 30
+MAX_LISTINGS = 9999
+MAX_SOLD_MATCHES = 10
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
 PRICE_COLUMNS = [
@@ -45,6 +47,8 @@ def parse_args():
                         help="Skip if any price snapshots already exist for today")
     parser.add_argument("--db", type=str, default=DEFAULT_DB_PATH,
                         help="Path to SQLite database")
+    parser.add_argument("--max-listings", type=int, default=MAX_LISTINGS,
+                        help="Max number of listings to process")
     return parser.parse_args()
 
 
@@ -57,7 +61,6 @@ def read_active_listings(ws) -> tuple[list[dict], list[str], dict[str, int]]:
 
     card_col = col_map.get("Card")
     if card_col is None:
-        print("No 'Card' column found in Active Listings sheet.")
         sys.exit(0)
 
     rows = []
@@ -87,14 +90,19 @@ def fetch_price_for_card(conn, card_name: str) -> dict | None:
     if snapshot:
         return snapshot
 
-    print(f"  Searching eBay for: {card_name}")
+    print(".", end="", flush=True)
     try:
         items = search_sold_listings(card_name, LOOKBACK_DAYS)
     except requests.HTTPError as e:
         log.error("eBay API error for '%s': %s", card_name, e)
         return None
 
-    inserted = 0
+    items.sort(
+        key=lambda i: i.get("itemEndDate") or i.get("itemCreationDate") or "",
+        reverse=True,
+    )
+    items = items[:MAX_SOLD_MATCHES]
+
     for raw in items:
         parsed = parse_item(raw, card_name)
         if not parsed:
@@ -111,14 +119,10 @@ def fetch_price_for_card(conn, card_name: str) -> dict | None:
                 """,
                 parsed,
             )
-            inserted += 1
         except Exception:
             pass
     conn.commit()
-
-    if inserted:
-        print(f"    Inserted {inserted} sold listing(s)")
-        time.sleep(1)
+    time.sleep(1)
 
     snapshot = compute_snapshot(conn, card_name, LOOKBACK_DAYS)
     return snapshot
@@ -163,7 +167,6 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
 
 def write_price_data(ws, ws_rows: list[dict], headers: list[str],
                      price_col_map: dict[str, int], card_prices: dict[str, dict | None]) -> None:
-    avg_col_idx = price_col_map.get("Recent Sold Avg")
     for row_idx, row in enumerate(ws_rows, 2):
         card = row.get("Card")
         if not card or not str(card).strip():
@@ -171,18 +174,9 @@ def write_price_data(ws, ws_rows: list[dict], headers: list[str],
         card = str(card).strip()
         snapshot = card_prices.get(card)
 
-        already_enriched = False
-        if avg_col_idx is not None:
-            existing = ws.cell(row=row_idx, column=avg_col_idx + 1).value
-            if existing is not None:
-                already_enriched = True
-
         for col_name, fmt in PRICE_COLUMNS:
             col_idx = price_col_map.get(col_name)
             if col_idx is None:
-                continue
-
-            if already_enriched and col_name != "Price vs Sold Avg":
                 continue
 
             cell = ws.cell(row=row_idx, column=col_idx + 1)
@@ -190,8 +184,7 @@ def write_price_data(ws, ws_rows: list[dict], headers: list[str],
             cell.alignment = Alignment(vertical="center")
 
             if not snapshot:
-                if col_name != "Price vs Sold Avg":
-                    cell.value = None
+                cell.value = None
                 continue
 
             if col_name == "Recent Sold Avg":
@@ -238,45 +231,45 @@ def main():
     xlsx_path = args.output
 
     if not os.path.exists(xlsx_path):
-        print(f"Workbook not found: {xlsx_path}")
         sys.exit(1)
 
     wb = load_workbook(xlsx_path)
     if SHEET_NAME not in wb.sheetnames:
-        print(f"No '{SHEET_NAME}' sheet found in workbook.")
         sys.exit(1)
 
     ws = wb[SHEET_NAME]
     ws_rows, headers, col_map = read_active_listings(ws)
     headers = remove_orphan_columns(ws, headers)
 
+    if len(ws_rows) > args.max_listings:
+        print(f"Limiting to {args.max_listings} of {len(ws_rows)} rows")
+        ws_rows = ws_rows[:args.max_listings]
+
     if not ws_rows:
-        print("No data rows in Active Listings sheet.")
         sys.exit(0)
 
     unique_cards = collect_unique_cards(ws_rows, col_map.get("Card", -1), headers)
-    print(f"Found {len(unique_cards)} unique card(s) in Active Listings")
+    print(f"Found {len(unique_cards)} cards — searching", end="", flush=True)
 
     if not unique_cards:
-        print("No cards found in 'Card' column.")
         sys.exit(0)
 
     conn = init_db(db_path)
     try:
         card_prices: dict[str, dict | None] = {}
+        found = 0
         for card in unique_cards:
             snapshot = fetch_price_for_card(conn, card)
             card_prices[card] = snapshot
             if snapshot:
-                print(f"    -> {snapshot['sample_size']} sold, avg ${snapshot['weighted_avg']:.2f}")
-            else:
-                print(f"    -> No sold data found")
+                found += 1
 
         price_col_map = ensure_price_columns(ws, headers)
         write_price_data(ws, ws_rows, headers, price_col_map, card_prices)
 
         wb.save(xlsx_path)
-        print(f"\nPrice columns added and saved to {xlsx_path}")
+        print(f"\n  {found}/{len(unique_cards)} cards had sold data")
+        print(f"Price columns saved to {xlsx_path}")
     finally:
         conn.close()
 

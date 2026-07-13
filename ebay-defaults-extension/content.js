@@ -1,8 +1,3 @@
-/* ============================================================
-   eBay Listing Defaults — Content Script (v4)
-   Unified dropdown strategy: find by label, click trigger, pick option.
-   ============================================================ */
-
 const $ = document.querySelector.bind(document);
 const $$ = document.querySelectorAll.bind(document);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,6 +41,19 @@ function textsMatch(optionText, targetText) {
     if (stripSuffix(a) === b || a === stripSuffix(b)) return true;
     if (a.startsWith(b) || b.startsWith(a)) return true;
     return false;
+}
+
+// Polls for an element instead of giving up after a single query — needed
+// for fields (like the Best Offer amount inputs) that only mount into the
+// DOM a moment after a preceding step (e.g. enableOffers) triggers a
+// panel re-render.
+async function waitForElement(selector, { retries = 6, delay = 400 } = {}) {
+    for (let i = 0; i < retries; i++) {
+        const el = $(selector);
+        if (el) return el;
+        await wait(delay);
+    }
+    return null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -155,6 +163,37 @@ async function setDropdown(labelText, valueText, clickFirst) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Step tracking — skip steps whose tracked values haven't changed   */
+/* ------------------------------------------------------------------ */
+
+const STEP_KEYS = {
+    "Format":               ["format"],
+    "Condition":            ["condition"],
+    "Template":             ["descriptionTemplate"],
+    "Description":          null,
+    "Shipping policy":      ["shippingPolicy"],
+    "Shipping settings":    ["itemLocationZip", "itemLocationCityState", "returnPolicy"],
+    "Payment policy":       ["paymentPolicy"],
+    "Weight":               null,
+    "Dimensions":           null,
+    "Offers (enable)":      null,
+    "Promoted & ad rate":   ["promotedRate"],
+    "SKU":                  ["customLabel"],
+    "Item Price":           ["itemPrice"],
+    "Best Offer Amounts":   ["itemPrice"],
+};
+
+function hasChanged(keys, snapshot) {
+    if (!keys) return true;
+    for (const k of keys) {
+        if (JSON.stringify(DEFAULTS[k]) !== JSON.stringify(snapshot[k])) return true;
+    }
+    return false;
+}
+
+let lastSnapshot = null;
+
+/* ------------------------------------------------------------------ */
 /*  Field setters                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -191,14 +230,32 @@ async function setFormat() {
 
 async function setItemPrice() {
     if (!DEFAULTS.itemPrice) return;
-    let inp = $(`input[name="price"][aria-label="Item price"]`);
-    if (!inp) inp = $(`input[name="price"]`);
-    if (!inp) inp = $(`input[aria-label*="price" i]`);
+    const selectors = [
+        `input[name="price"][aria-label="Item price"]`,
+        `input[name="price"]`,
+        `input[aria-label*="price" i]:not([name="autoAcceptAmount"]):not([name="autoDeclineAmount"])`,
+    ];
+
+    // Helper: poll for a visible element matching any selector
+    const waitForVisible = async (sels, maxWait = 6000) => {
+        const start = Date.now();
+        while (Date.now() - start < maxWait) {
+            for (const sel of sels) {
+                const el = $(sel);
+                if (el && isVisible(el)) return el;
+            }
+            await wait(300);
+        }
+        return null;
+    };
+
+    const inp = await waitForVisible(selectors);
     if (inp) {
-        console.log(`[eBay] setItemPrice: found ${elSummary(inp)}`);
+        console.log(`[eBay] setItemPrice: found visible ${elSummary(inp)}`);
+        inp.scrollIntoView({ block: "center" });
         setValue(inp, DEFAULTS.itemPrice);
     } else {
-        console.log(`[eBay] setItemPrice: no price input found`);
+        console.log(`[eBay] setItemPrice: no visible price input found`);
     }
 }
 
@@ -390,11 +447,46 @@ async function setBestOfferAmounts() {
     const price = parseFloat(DEFAULTS.itemPrice);
     if (isNaN(price) || price <= 0) return;
     const offerAmount = (price * 0.9).toFixed(2);
-    const declineInput = $(`input[name="autoDeclineAmount"]`);
-    const acceptInput = $(`input[name="autoAcceptAmount"]`);
-    if (declineInput) { console.log(`[eBay] setBestOfferAmounts: decline ${elSummary(declineInput)}`); setValue(declineInput, offerAmount); }
-    if (acceptInput) { console.log(`[eBay] setBestOfferAmounts: accept ${elSummary(acceptInput)}`); setValue(acceptInput, offerAmount); }
-    if (!declineInput && !acceptInput) console.log(`[eBay] setBestOfferAmounts: no auto-decline/accept inputs found`);
+
+    // Wait for visible decline input
+    const declineInput = await new Promise(resolve => {
+        const start = Date.now();
+        const check = async () => {
+            const el = $(`input[name="autoDeclineAmount"]`);
+            if (el && isVisible(el)) return resolve(el);
+            if (Date.now() - start > 5000) return resolve(null);
+            await wait(300);
+            check();
+        };
+        check();
+    });
+    if (declineInput) {
+        console.log(`[eBay] setBestOfferAmounts: decline ${elSummary(declineInput)}`);
+        declineInput.scrollIntoView({ block: "center" });
+        setValue(declineInput, offerAmount);
+    } else {
+        console.log(`[eBay] setBestOfferAmounts: no visible auto-decline input`);
+    }
+
+    // Wait for visible accept input
+    const acceptInput = await new Promise(resolve => {
+        const start = Date.now();
+        const check = async () => {
+            const el = $(`input[name="autoAcceptAmount"]`);
+            if (el && isVisible(el)) return resolve(el);
+            if (Date.now() - start > 5000) return resolve(null);
+            await wait(300);
+            check();
+        };
+        check();
+    });
+    if (acceptInput) {
+        console.log(`[eBay] setBestOfferAmounts: accept ${elSummary(acceptInput)}`);
+        acceptInput.scrollIntoView({ block: "center" });
+        setValue(acceptInput, offerAmount);
+    } else {
+        console.log(`[eBay] setBestOfferAmounts: no visible auto-accept input`);
+    }
 }
 
 async function setShippingSettings() {
@@ -510,6 +602,8 @@ async function applyDefaults() {
         }
     } catch (_) {}
 
+    const snapshot = lastSnapshot || {};
+
     const steps = [
         { name: "Format",               fn: setFormat },
         { name: "Condition",            fn: setCondition },
@@ -537,6 +631,11 @@ async function applyDefaults() {
     const total = steps.length;
     for (let i = 0; i < total; i++) {
         const step = steps[i];
+        const keys = STEP_KEYS[step.name];
+        if (!hasChanged(keys, snapshot)) {
+            setStatus("\u23ED " + step.name + " (no change)", ((i + 1) / total) * 100);
+            continue;
+        }
         setStatus("\u25B6 " + step.name, (i / total) * 100);
         try {
             await step.fn();
@@ -546,6 +645,17 @@ async function applyDefaults() {
         }
         await wait(400);
     }
+
+    lastSnapshot = {};
+    for (const name of Object.keys(STEP_KEYS)) {
+        const keys = STEP_KEYS[name];
+        if (keys) {
+            for (const k of keys) {
+                lastSnapshot[k] = DEFAULTS[k];
+            }
+        }
+    }
+
     setStatus("\u2713 Done", 100);
 }
 

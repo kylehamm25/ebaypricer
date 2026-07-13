@@ -13,3 +13,4 @@ active_listing_debug.xml
 src/*.egg-info/
 *.log
 *.html
+/.opencode

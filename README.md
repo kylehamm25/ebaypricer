@@ -1,6 +1,6 @@
 # eBay Price
 
-Automated eBay selling pipeline for Pokemon card listings — fetches sold orders, refreshes active listings, computes market prices, and manages promoted listing bids.
+Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, refreshes active listings, computes market prices, and manages promoted listing bids.
 
 ## Capabilities
 

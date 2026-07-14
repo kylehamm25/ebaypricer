@@ -4,14 +4,15 @@ import os
 import sqlite3
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from statistics import mean, stdev
 
 import requests
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 
 from ebaypricer.browse_api import (
-    compute_snapshot,
+    OUTLIER_SIGMA,
     get_today_snapshot,
     init_db,
     parse_item,
@@ -106,10 +107,12 @@ def fetch_price_for_card(conn, card_name: str) -> dict | None:
     )
     items = items[:MAX_SOLD_MATCHES]
 
+    parsed_items = []
     for raw in items:
         parsed = parse_item(raw, card_name)
         if not parsed:
             continue
+        parsed_items.append(parsed)
         try:
             conn.execute(
                 """
@@ -127,7 +130,56 @@ def fetch_price_for_card(conn, card_name: str) -> dict | None:
     conn.commit()
     time.sleep(1)
 
-    snapshot = compute_snapshot(conn, card_name, LOOKBACK_DAYS)
+    pairs = [(p["price"], p["sold_date"]) for p in parsed_items if p.get("currency") == "USD"]
+    if not pairs:
+        return None
+
+    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+
+    if len(pairs) >= 4:
+        raw_prices = [p for p, _ in pairs]
+        m, s = mean(raw_prices), stdev(raw_prices)
+        pairs = [(p, d) for p, d in pairs if abs(p - m) <= OUTLIER_SIGMA * s]
+
+    if not pairs:
+        return None
+
+    prices = [p for p, _ in pairs]
+    weighted_sum = 0.0
+    weight_total = 0
+    for p, sold_date in pairs:
+        w = 2 if sold_date >= recent_cutoff else 1
+        weighted_sum += p * w
+        weight_total += w
+
+    sorted_p = sorted(prices)
+    n = len(sorted_p)
+    median = sorted_p[n // 2] if n % 2 else (sorted_p[n // 2 - 1] + sorted_p[n // 2]) / 2
+
+    snapshot = {
+        "card_query":    card_name,
+        "snapshot_date": datetime.now(timezone.utc).date().isoformat(),
+        "sample_size":   n,
+        "avg_price":     round(mean(prices), 2),
+        "median_price":  round(median, 2),
+        "min_price":     round(min(prices), 2),
+        "max_price":     round(max(prices), 2),
+        "std_dev":       round(stdev(prices), 2) if n > 1 else 0.0,
+        "weighted_avg":  round(weighted_sum / weight_total, 2),
+    }
+
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO price_snapshots
+            (card_query, snapshot_date, sample_size, avg_price, median_price,
+             min_price, max_price, std_dev, weighted_avg)
+        VALUES
+            (:card_query, :snapshot_date, :sample_size, :avg_price, :median_price,
+             :min_price, :max_price, :std_dev, :weighted_avg)
+        """,
+        snapshot,
+    )
+    conn.commit()
     return snapshot
 
 

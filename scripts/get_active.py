@@ -16,6 +16,7 @@ from ebaypricer.excel import (
     ACTIVE_CURRENCY_COLS, ACTIVE_INT_COLS, write_headers,
 )
 
+SHEET_NAME = "Active Listings"
 SHIPPING_LABEL_COST = 0.74
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"

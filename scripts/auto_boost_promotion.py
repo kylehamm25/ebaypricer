@@ -119,7 +119,13 @@ def main():
     for item in listings:
         days = item.get("Days Listed", 0)
         item_id = item.get("Item ID", "")
-        title = item.get("Title", "")
+
+        price = 0.0
+        try:
+            price = float(item.get("Price") or 0)
+        except (TypeError, ValueError):
+            pass
+        max_bid = 3.0 if price > 50 else args.max_bid
 
         current_bid = None
         ad = ads_by_listing.get(item_id)
@@ -135,7 +141,7 @@ def main():
             skipped_days += 1
             continue
 
-        target = compute_target_bid(days, current_bid, args.max_bid)
+        target = compute_target_bid(days, current_bid, max_bid)
         if target is None:
             at_cap += 1
             continue

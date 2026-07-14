@@ -42,6 +42,8 @@ def write_data_rows(ws: Worksheet, rows: list[dict], headers: list[str], start_r
                 cell.number_format = '#,##0.00'
             elif h in ACTIVE_INT_COLS:
                 cell.number_format = '0'
+            elif h == "Net Return %" and row.get(h) is not None:
+                cell.number_format = '0.00%'
         if row_idx % 2 == 0:
             for col_idx in range(1, len(headers) + 1):
                 ws.cell(row=row_idx, column=col_idx).fill = SHADE_FILL
@@ -161,8 +163,36 @@ def main():
     COLUMN_ORDER = [
         "Item ID", "Title", "Card", "SKU", "Price",
         "Shipping Price", "Ad Rate", "Watchers", "Days Listed",
-        "Start Date", "Quantity",
+        "Start Date", "Quantity", "Estimated Fees",
+        "Estimated Net", "Net Return %",
     ]
+
+    for row in rows:
+        price = 0.0
+        try:
+            price = float(row.get("Price") or 0)
+        except (TypeError, ValueError):
+            pass
+
+        ebay_fee = price * 0.1325
+
+        ad_rate = 0.0
+        ad_raw = row.get("Ad Rate")
+        if ad_raw and isinstance(ad_raw, str) and ad_raw.endswith("%"):
+            try:
+                ad_rate = float(ad_raw.rstrip("%"))
+            except (TypeError, ValueError):
+                pass
+        promo_fee = price * (ad_rate / 100)
+
+        shipping = 0.69
+        estimated_fees = round(ebay_fee + promo_fee + shipping, 2)
+        estimated_net = round(price - estimated_fees, 2)
+
+        row["Estimated Fees"] = estimated_fees
+        row["Estimated Net"] = estimated_net
+        row["Net Return %"] = round(estimated_net / price, 4) if price > 0 else 0.0
+
     rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 
     rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)

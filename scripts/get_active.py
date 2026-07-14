@@ -17,7 +17,6 @@ from ebaypricer.excel import (
 )
 
 SHEET_NAME = "Active Listings"
-SHIPPING_LABEL_COST = 0.74
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
@@ -165,7 +164,7 @@ def main():
         "Item ID", "Title", "Card", "SKU", "Price",
         "Shipping Charge", "Ad Rate", "Watchers", "Days Listed",
         "Start Date", "Quantity", "Estimated Fees",
-        "Estimated Net", "Net Return %",
+        "Estimated Net",
     ]
 
     for row in rows:
@@ -175,25 +174,18 @@ def main():
         except (TypeError, ValueError):
             pass
 
-        buyer_shipping = float(row.get("Shipping Charge") or 0)
-        gross = price + buyer_shipping
-        ebay_fee = gross * 0.1325
+        if price <= 2:
+            multiplier = 0.65
+        elif price <= 5:
+            multiplier = 0.70
+        else:
+            multiplier = 0.73
 
-        ad_rate = 0.0
-        ad_raw = row.get("Ad Rate")
-        if ad_raw and isinstance(ad_raw, str) and ad_raw.endswith("%"):
-            try:
-                ad_rate = float(ad_raw.rstrip("%"))
-            except (TypeError, ValueError):
-                pass
-        promo_fee = price * (ad_rate / 100)
-
-        estimated_fees = round(ebay_fee + promo_fee + SHIPPING_LABEL_COST, 2)
-        estimated_net = round(gross - estimated_fees, 2)
+        estimated_net = round(price * multiplier, 2)
+        estimated_fees = round(price - estimated_net, 2)
 
         row["Estimated Fees"] = estimated_fees
         row["Estimated Net"] = estimated_net
-        row["Net Return %"] = round(estimated_net / price, 4) if price > 0 else None
 
     rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 

@@ -7,7 +7,7 @@ SHADE_FILL = PatternFill("solid", fgColor="EBF3FB")
 
 CURRENCY_COLS = {"Item Price", "Shipping", "Order Total", "Total eBay Fees", "Order Earnings"}
 INT_COLS = {"Quantity"}
-ACTIVE_CURRENCY_COLS = {"Price", "Shipping Price", "Estimated Fees", "Estimated Net"}
+ACTIVE_CURRENCY_COLS = {"Price", "Shipping Charge", "Estimated Fees", "Estimated Net"}
 ACTIVE_INT_COLS = {"Quantity", "Days Listed", "Watchers"}
 
 

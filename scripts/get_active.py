@@ -16,7 +16,7 @@ from ebaypricer.excel import (
     ACTIVE_CURRENCY_COLS, ACTIVE_INT_COLS, write_headers,
 )
 
-SHEET_NAME = "Active Listings"
+SHIPPING_LABEL_COST = 0.74
 
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
@@ -128,7 +128,7 @@ def main():
 
     for row in rows:
         profile = (row.get("Shipping Profile") or "").strip().lower()
-        row["Shipping Price"] = SHIPPING_PRICE_MAP.get(profile, 0)
+        row["Shipping Charge"] = SHIPPING_PRICE_MAP.get(profile, 0)
 
     enrich_rows(rows, title_key="Title")
 
@@ -162,7 +162,7 @@ def main():
 
     COLUMN_ORDER = [
         "Item ID", "Title", "Card", "SKU", "Price",
-        "Shipping Price", "Ad Rate", "Watchers", "Days Listed",
+        "Shipping Charge", "Ad Rate", "Watchers", "Days Listed",
         "Start Date", "Quantity", "Estimated Fees",
         "Estimated Net", "Net Return %",
     ]
@@ -174,8 +174,9 @@ def main():
         except (TypeError, ValueError):
             pass
 
-        shipping = float(row.get("Shipping Price") or 0)
-        ebay_fee = (price + shipping) * 0.1325
+        buyer_shipping = float(row.get("Shipping Charge") or 0)
+        gross = price + buyer_shipping
+        ebay_fee = gross * 0.1325
 
         ad_rate = 0.0
         ad_raw = row.get("Ad Rate")
@@ -186,8 +187,8 @@ def main():
                 pass
         promo_fee = price * (ad_rate / 100)
 
-        estimated_fees = round(ebay_fee + promo_fee + shipping, 2)
-        estimated_net = round(price - estimated_fees, 2)
+        estimated_fees = round(ebay_fee + promo_fee + SHIPPING_LABEL_COST, 2)
+        estimated_net = round(gross - estimated_fees, 2)
 
         row["Estimated Fees"] = estimated_fees
         row["Estimated Net"] = estimated_net

@@ -35,12 +35,9 @@ def _clear_sheet(ws: Worksheet) -> None:
 def write_data_rows(ws: Worksheet, rows: list[dict], headers: list[str], start_row: int = 2) -> None:
     for row_idx, row in enumerate(rows, start_row):
         for col_idx, h in enumerate(headers, 1):
-            val = row.get(h)
-            if h == "Link" and val:
-                val = f'=HYPERLINK("{val}", "link")'
-            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell = ws.cell(row=row_idx, column=col_idx, value=row.get(h))
             cell.font = DATA_FONT
-            cell.alignment = Alignment(vertical="center")
+            cell.alignment = Alignment(horizontal="left", vertical="center")
             if h in ACTIVE_CURRENCY_COLS and row.get(h) is not None:
                 cell.number_format = '#,##0.00'
             elif h in ACTIVE_INT_COLS:
@@ -162,9 +159,9 @@ def main():
         print(f"  Ads: {e}")
 
     COLUMN_ORDER = [
-        "Item ID", "Title", "Card", "SKU", "Link", "Price",
+        "Item ID", "Title", "Card", "SKU", "Price",
         "Shipping Price", "Ad Rate", "Watchers", "Days Listed",
-        "Start Date", "Quantity", "Shipping Profile",
+        "Start Date", "Quantity",
     ]
     rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 

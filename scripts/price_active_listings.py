@@ -48,6 +48,8 @@ def parse_args():
                         help="Path to SQLite database")
     parser.add_argument("--max-listings", type=int, default=MAX_LISTINGS,
                         help="Max number of listings to process")
+    parser.add_argument("--force", action="store_true",
+                        help="Run even if snapshots already exist for today")
     return parser.parse_args()
 
 
@@ -63,10 +65,12 @@ def read_active_listings(ws) -> tuple[list[dict], list[str], dict[str, int]]:
         sys.exit(0)
 
     rows = []
-    for row in ws.iter_rows(min_row=2, values_only=True):
+    for excel_row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         if len(row) == 0 or row[0] is None:
             continue
-        rows.append({headers[i] if i < len(headers) else None: row[i] for i in range(len(row))})
+        row_dict = {headers[i] if i < len(headers) else None: row[i] for i in range(len(row))}
+        row_dict["_row"] = excel_row_num
+        rows.append(row_dict)
 
     return rows, headers, col_map
 
@@ -156,7 +160,7 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
             cell = ws.cell(row=1, column=next_col, value=col_name)
             cell.fill = HEADER_FILL
             cell.font = HEADER_FONT
-            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.alignment = Alignment(horizontal="left", vertical="center")
             col_map[col_name] = next_col - 1
             price_col_map[col_name] = next_col - 1
             next_col += 1
@@ -166,7 +170,8 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
 
 def write_price_data(ws, ws_rows: list[dict], headers: list[str],
                      price_col_map: dict[str, int], card_prices: dict[str, dict | None]) -> None:
-    for row_idx, row in enumerate(ws_rows, 2):
+    for row in ws_rows:
+        row_idx = row["_row"]
         card = row.get("Card")
         if not card or not str(card).strip():
             continue
@@ -180,7 +185,7 @@ def write_price_data(ws, ws_rows: list[dict], headers: list[str],
 
             cell = ws.cell(row=row_idx, column=col_idx + 1)
             cell.font = DATA_FONT
-            cell.alignment = Alignment(vertical="center")
+            cell.alignment = Alignment(horizontal="left", vertical="center")
 
             if not snapshot:
                 cell.value = None
@@ -212,7 +217,7 @@ def main():
     db_path = args.db
 
     today = datetime.now(timezone.utc).date().isoformat()
-    if os.path.exists(db_path):
+    if not args.force and os.path.exists(db_path):
         try:
             conn = sqlite3.connect(db_path)
             count = conn.execute(

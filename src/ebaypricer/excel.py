@@ -16,7 +16,7 @@ def write_headers(ws, headers):
         cell = ws.cell(row=1, column=col_idx, value=h)
         cell.fill = HEADER_FILL
         cell.font = HEADER_FONT
-        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.alignment = Alignment(horizontal="left", vertical="center")
 
 
 def write_data_rows(ws, rows, headers, start_row=2, currency_cols=None, int_cols=None):

@@ -48,6 +48,10 @@ def run_script(log, script_path: Path, description: str, extra_args: list[str] |
         cmd.extend(extra_args)
     log.info("--- %s ---", description)
     log.info("Running: %s", " ".join(str(c) for c in cmd))
+    sep = "─" * 50
+    print(f"\n{sep}")
+    print(f"  {description}")
+    print(sep)
     result = subprocess.run(cmd, capture_output=False)
     log.info("Exit code: %s", result.returncode)
     return result.returncode

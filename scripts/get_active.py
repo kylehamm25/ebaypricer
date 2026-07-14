@@ -74,7 +74,6 @@ def main():
     PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked"]
 
     ws = None
-    existing_widths: dict[str, float] = {}
     existing_cards: dict[str, str] = {}
     existing_prices: dict[str, dict[str, object]] = {}
     if os.path.exists(xlsx_path):
@@ -106,9 +105,7 @@ def main():
                             prices[name] = row[idx]
                     if any(v is not None for v in prices.values()):
                         existing_prices[item_id] = prices
-            for col_letter, dim in ws.column_dimensions.items():
-                if dim.width is not None:
-                    existing_widths[col_letter] = dim.width
+
     else:
         wb = Workbook()
         default_ws = wb.active
@@ -134,21 +131,14 @@ def main():
         profile = (row.get("Shipping Profile") or "").strip().lower()
         row["Shipping Price"] = SHIPPING_PRICE_MAP.get(profile, 0)
 
-    print("  Enriching with Pokémon card data ...")
     enrich_rows(rows, title_key="Title")
 
     if existing_cards:
-        preserved = 0
         for row in rows:
-            item_id = row.get("Item ID", "")
-            card = existing_cards.get(item_id)
+            card = existing_cards.get(row.get("Item ID", ""))
             if card:
                 row["Card"] = card
-                preserved += 1
-        if preserved:
-            print(f"  Preserved {preserved} existing Card value(s)")
 
-    print("  Fetching promoted listing ad rates ...")
     try:
         campaigns = get_campaigns(token)
         ad_rate_by_listing: dict[str, float] = {}
@@ -161,15 +151,15 @@ def main():
                 except (ValueError, TypeError):
                     pass
         for row in rows:
-            lid = row.get("Item ID", "")
-            rate = ad_rate_by_listing.get(lid)
+            rate = ad_rate_by_listing.get(row.get("Item ID", ""))
             if rate is not None:
                 row["Ad Rate"] = f"{rate:.0f}%"
-        print(f"  Found {len(ad_rate_by_listing)} promoted listing(s) with ad rates")
+        if ad_rate_by_listing:
+            print(f"  {len(ad_rate_by_listing)} promoted")
     except SystemExit:
         pass
     except Exception as e:
-        print(f"  Skipped ad rates: {e}")
+        print(f"  Ads: {e}")
 
     COLUMN_ORDER = [
         "Item ID", "Title", "Card", "SKU", "Link", "Price",
@@ -209,21 +199,16 @@ def main():
                 if val is not None:
                     ws.cell(row=row_idx, column=col_offset, value=val)  # type: ignore
                 col_offset += 1
-        print(f"  Restored price data for {len(existing_prices)} listing(s)")
+        print(f"  Restored {len(existing_prices)} price rows")
 
-    if existing_widths:
-        for col_idx, h in enumerate(headers, 1):
-            col_letter = get_column_letter(col_idx)
-            if col_letter in existing_widths:
-                ws.column_dimensions[col_letter].width = existing_widths[col_letter]
-            else:
-                max_len = max(
-                    len(str(h)),
-                    max((len(str(row.get(h, ""))) for row in rows), default=0),
-                )
-                ws.column_dimensions[col_letter].width = min(max_len + 4, 45)
-    else:
-        auto_column_widths(ws, headers, rows)
+    auto_column_widths(ws, headers, rows)
+    if existing_prices:
+        for col_idx, h in enumerate(PRICE_COLS_TO_SAVE, len(headers) + 1):
+            max_len = max(
+                len(str(h)),
+                max((len(str(v.get(h, ""))) for v in existing_prices.values()), default=0),
+            )
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max_len + 4, 20)
 
     write_last_updated(ws, now)
 

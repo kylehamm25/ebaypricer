@@ -43,8 +43,7 @@ def parse_args():
     )
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT,
                         help="Path to the Excel workbook")
-    parser.add_argument("--once-per-day", action="store_true",
-                        help="Skip if any price snapshots already exist for today")
+
     parser.add_argument("--db", type=str, default=DEFAULT_DB_PATH,
                         help="Path to SQLite database")
     parser.add_argument("--max-listings", type=int, default=MAX_LISTINGS,
@@ -212,21 +211,20 @@ def main():
     args = parse_args()
     db_path = args.db
 
-    if args.once_per_day:
-        today = datetime.now(timezone.utc).date().isoformat()
-        if os.path.exists(db_path):
-            try:
-                conn = sqlite3.connect(db_path)
-                count = conn.execute(
-                    "SELECT COUNT(*) FROM price_snapshots WHERE snapshot_date = ?",
-                    (today,),
-                ).fetchone()[0]
-                conn.close()
-                if count > 0:
-                    print(f"Snapshots already exist for {today} — skipping (--once-per-day)")
-                    return
-            except Exception:
-                pass
+    today = datetime.now(timezone.utc).date().isoformat()
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            count = conn.execute(
+                "SELECT COUNT(*) FROM price_snapshots WHERE snapshot_date = ?",
+                (today,),
+            ).fetchone()[0]
+            conn.close()
+            if count > 0:
+                print(f"Snapshots exist for {today} — skipping")
+                return
+        except Exception:
+            pass
 
     xlsx_path = args.output
 

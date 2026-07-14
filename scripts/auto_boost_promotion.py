@@ -76,9 +76,8 @@ def main():
         else:
             campaign = campaigns[0]
         campaign_id = campaign["campaignId"]
-        print(f"Using campaign: {campaign.get('campaignName', campaign_id)} ({campaign_id})")
         if args.debug:
-            print(f"  Full campaign data: {json.dumps(campaign, indent=2)}")
+            print(f"  Campaign data: {json.dumps(campaign, indent=2)}")
 
         funding_model = campaign.get("fundingStrategy", {}).get("fundingModel")
         if funding_model and funding_model != "COST_PER_SALE":
@@ -92,23 +91,18 @@ def main():
             sys.exit(1)
 
     # ── Get active listings ─────────────────────────────────────────────
-    print("\nFetching active listings ...")
     listings = fetch_active_listings(token)
     if not listings:
         print("No active listings found.")
         return
 
-    print(f"  {len(listings)} total active listings")
-
     # ── Get existing ads in the campaign ────────────────────────────────
-    print("\nFetching current ads in campaign ...")
     ads = get_ads(token, campaign_id)
     ads_by_listing: dict[str, dict] = {}
     for ad in ads:
         lid = ad.get("listingId", "")
         if lid:
             ads_by_listing[lid] = ad
-    print(f"  {len(ads)} existing promoted listings")
 
     if args.debug and ads:
         print(f"  Sample ad: {json.dumps(ads[0], indent=2)}")
@@ -132,13 +126,9 @@ def main():
         if ad:
             current_bid = float(ad.get("bidPercentage") or 0)
 
-        current_str = f"{current_bid:.0f}%" if current_bid is not None else "N/A"
-
-        # Listings without any promotion get one at 2%
         if ad is None:
             to_create.append((item_id, 2.0))
             boosts += 1
-            print(f"  {days:>5}  {current_str:>7}      2%  (new)  {title[:60]}")
             continue
 
         if days < args.min_days:
@@ -154,20 +144,10 @@ def main():
             "listingId": item_id,
             "bidPercentage": f"{target:.1f}",
         })
-
-        target_str = f"{target:.0f}%"
         boosts += 1
-        print(f"  {days:>5}  {current_str:>7}  {target_str:>7}  {title[:60]}")
-
-    print(f"\nSummary:")
-    print(f"  Skipped (under {args.min_days} days):  {skipped_days}")
-    print(f"  Already at cap / no boost needed:      {at_cap}")
-    print(f"  To update (bid increase):              {len(to_update)}")
-    print(f"  To create (add to campaign):           {len(to_create)}")
-    print(f"  Total boosts:                          {boosts}")
 
     if args.dry_run:
-        print("\nDry-run mode — no changes made.")
+        print(f"Would boost {boosts} listings ({len(to_create)} new, {len(to_update)} updates)")
         return
 
     if not to_update and not to_create:
@@ -175,28 +155,25 @@ def main():
 
     # ── Create new ads ──────────────────────────────────────────────────
     if to_create:
-        print(f"\nCreating {len(to_create)} new promoted listing(s) ...")
         ok = 0
         for listing_id, bid_pct in to_create:
             result = create_ad(token, campaign_id, listing_id, bid_pct)
             if result["ok"]:
                 ok += 1
             elif args.debug:
-                print(f"  FAILED listing {listing_id}: {json.dumps(result['response'], indent=2)[:300]}")
-        print(f"  {ok}/{len(to_create)} created")
+                print(f"  FAILED {listing_id}: {json.dumps(result['response'], indent=2)[:300]}")
+        print(f"  Created {ok}/{len(to_create)} new ads")
 
     # ── Execute bulk updates ────────────────────────────────────────────
     if to_update:
-        print(f"\nUpdating {len(to_update)} bid(s) in batches of {BATCH_SIZE} ...")
         total_sent = 0
         for i in range(0, len(to_update), BATCH_SIZE):
             batch = to_update[i:i + BATCH_SIZE]
             result = bulk_update_bids(token, campaign_id, batch)
             total_sent += result["sent"]
             if result["errors"] and args.debug:
-                print(f"  batch {i // BATCH_SIZE + 1} errors: {json.dumps(result['errors'], indent=2)[:500]}")
-            print(f"  batch {i // BATCH_SIZE + 1}: {result['sent']} updates")
-        print(f"  Total: {total_sent} bid update(s) sent")
+                print(f"  batch errors: {json.dumps(result['errors'], indent=2)[:500]}")
+        print(f"  Updated {total_sent} bids")
 
 
 if __name__ == "__main__":

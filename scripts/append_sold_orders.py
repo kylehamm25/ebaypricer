@@ -124,8 +124,6 @@ def main():
         start_dt = CUTOFF
         label = f"{CUTOFF.date()} (hardcoded)"
 
-    print(f"Fetching orders after {label} -> {now.date()}")
-
     token = get_access_token()
 
     raw_rows = fetch_sold_orders(token, start_dt, now)
@@ -149,14 +147,13 @@ def main():
     raw_rows = deduped
 
     if not raw_rows:
-        print(f"No orders found after {label}.")
+        print("No orders found")
         sys.exit(0)
 
     fee_start = start_dt - timedelta(days=15)
     fees_by_order, item_id_index = fetch_finance_fees(token, fee_start, now)
     merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
 
-    print("  Enriching with Pokémon card data ...")
     enrich_rows(raw_rows)
 
     raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
@@ -189,10 +186,9 @@ def main():
     skipped = len(raw_rows) - len(new_orders)
 
     if not new_orders:
-        print(f"No new orders to append ({skipped} already in file).")
         if new_cols:
             wb.save(xlsx_path)
-            print(f"  Added {len(new_cols)} new column(s): {', '.join(new_cols)}")
+        print(f"No new orders ({skipped} existing)")
         sys.exit(0)
 
     blank_order_level_continuation_rows(new_orders)
@@ -216,7 +212,7 @@ def main():
                 cell.number_format = '0'
 
     wb.save(xlsx_path)
-    print(f"Appended {len(new_orders)} sold order(s) ({skipped} duplicates skipped)")
+    print(f"Appended {len(new_orders)} ({skipped} dupes)\n")
 
 
 if __name__ == "__main__":

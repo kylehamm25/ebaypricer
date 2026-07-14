@@ -72,7 +72,7 @@ def main():
         sys.exit(rc)
 
     rc = run_script(log, scripts_dir / "price_active_listings.py",
-                    "price_active_listings.py (once per day)", ["--once-per-day"])
+                    "price_active_listings.py")
     if rc != 0:
         log.error("price_active_listings.py failed (exit %s)", rc)
         log.info("=== Pipeline finished with errors ===")

@@ -174,7 +174,8 @@ def main():
         except (TypeError, ValueError):
             pass
 
-        ebay_fee = price * 0.1325
+        shipping = float(row.get("Shipping Price") or 0)
+        ebay_fee = (price + shipping) * 0.1325
 
         ad_rate = 0.0
         ad_raw = row.get("Ad Rate")
@@ -185,13 +186,12 @@ def main():
                 pass
         promo_fee = price * (ad_rate / 100)
 
-        shipping = 0.69
         estimated_fees = round(ebay_fee + promo_fee + shipping, 2)
         estimated_net = round(price - estimated_fees, 2)
 
         row["Estimated Fees"] = estimated_fees
         row["Estimated Net"] = estimated_net
-        row["Net Return %"] = round(estimated_net / price, 4) if price > 0 else 0.0
+        row["Net Return %"] = round(estimated_net / price, 4) if price > 0 else None
 
     rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 

@@ -37,7 +37,9 @@ def read_header_cols(ws: Worksheet) -> dict[str, int]:
     col: dict[str, int] = {}
     for cell in ws[1]:
         if cell.value is not None:
-            col[str(cell.value).strip()] = cell.column - 1
+            name = str(cell.value).strip()
+            if name not in col:
+                col[name] = cell.column - 1
     return col
 
 
@@ -97,6 +99,20 @@ def _strip_deprecated_cols(ws: Worksheet) -> None:
     )
     for idx in to_del:
         ws.delete_cols(idx + 1)
+
+
+def _deduplicate_headers(ws: Worksheet) -> None:
+    seen: set[str] = set()
+    to_del: list[int] = []
+    for cell in ws[1]:
+        if cell.value is not None:
+            name = str(cell.value).strip()
+            if name in seen:
+                to_del.append(cell.column)
+            else:
+                seen.add(name)
+    for col in reversed(to_del):
+        ws.delete_cols(col)
 
 
 def blank_order_level_continuation_rows(rows: list[dict]) -> None:
@@ -168,6 +184,7 @@ def main():
         wb = load_workbook(xlsx_path)
         ws = wb["Sold Orders"]
         _strip_deprecated_cols(ws)
+        _deduplicate_headers(ws)
         existing_cols = read_header_cols(ws)
         new_cols = [h for h in headers if h not in existing_cols]
         if new_cols:

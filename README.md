@@ -10,6 +10,8 @@ Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, 
 
 **Market Price Analytics**: Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count directly into the Active Listings sheet.
 
+**Active Price Comparison**: For each card in the Active Listings sheet, searches eBay's marketplace for the top 5 best-match active listings and computes a market average, writing Active Avg (Top 5) and Active Count columns for direct comparison against sold-price data.
+
 **Automated Promotion Adjustment**: Adjusts promoted listing ad rates based on configurable pricing rules (see `check_pricing.py`).
 
 **Listing Defaults Extension**: Chrome extension that fills eBay listing form defaults with one click, with customizable presets using popup UI.
@@ -19,7 +21,7 @@ Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, 
 All steps run sequentially via `scripts/main.py`:
 
 ```
-append_sold_orders → get_active → price_active_listings → check_pricing
+append_sold_orders → get_active → price_active_listings → avg_active_price → auto_boost_promotion
 ```
 
 Hourly execution is supported through `scripts/run_hourly.sh` (anacron/cron).
@@ -40,11 +42,14 @@ scripts/                 entry points
 ├── main.py              pipeline orchestrator
 ├── append_sold_orders.py
 ├── get_active.py
+├── avg_active_price.py
 ├── price_active_listings.py
+├── auto_boost_promotion.py
 ├── check_pricing.py
 ├── get_prices.py
 ├── csv_report.py
 ├── gen_access_token.py
+├── run_hourly.ps1
 ├── run_hourly.sh
 └── run_daily.sh
 ebay-defaults-extension/  Chrome extension for listing form defaults

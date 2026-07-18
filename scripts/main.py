@@ -4,8 +4,8 @@ Usage:
     python main.py --dry-run     # preview without making changes
 
 Runs append_sold_orders.py, get_active.py, price_active_listings.py,
-and auto_boost_promotion.py in sequence. price_active_listings.py
-runs at most once per day.
+avg_active_price.py, and auto_boost_promotion.py in sequence.
+price_active_listings.py and avg_active_price.py run at most once per day.
 
 Each run is logged to ebayprice/logs/main.log with timestamps.
 """
@@ -48,7 +48,7 @@ def run_script(log, script_path: Path, description: str, extra_args: list[str] |
         cmd.extend(extra_args)
     log.info("--- %s ---", description)
     log.info("Running: %s", " ".join(str(c) for c in cmd))
-    sep = "─" * 50
+    sep = "-" * 50
     print(f"\n{sep}")
     print(f"  {description}")
     print(sep)
@@ -79,6 +79,13 @@ def main():
                     "price_active_listings.py")
     if rc != 0:
         log.error("price_active_listings.py failed (exit %s)", rc)
+        log.info("=== Pipeline finished with errors ===")
+        sys.exit(rc)
+
+    rc = run_script(log, scripts_dir / "avg_active_price.py",
+                    "avg_active_price.py")
+    if rc != 0:
+        log.error("avg_active_price.py failed (exit %s)", rc)
         log.info("=== Pipeline finished with errors ===")
         sys.exit(rc)
 

@@ -24,7 +24,6 @@ from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_active_listings
 from ebaypricer.marketing_api import (
     compute_target_bid,
-    create_ad,
     get_ads,
     get_campaigns,
     bulk_update_bids,
@@ -110,7 +109,6 @@ def main():
 
     # ── Build update list ───────────────────────────────────────────────
     to_update: list[dict] = []
-    to_create: list[tuple[str, float]] = []
     boosts = 0
     at_cap = 0
     skipped_days = 0
@@ -133,8 +131,7 @@ def main():
             current_bid = float(ad.get("bidPercentage") or 0)
 
         if ad is None:
-            to_create.append((item_id, 2.0))
-            boosts += 1
+            no_ad_found += 1
             continue
 
         if days < args.min_days:
@@ -153,22 +150,11 @@ def main():
         boosts += 1
 
     if args.dry_run:
-        print(f"Would boost {boosts} listings ({len(to_create)} new, {len(to_update)} updates)")
+        print(f"Would boost {boosts} listings")
         return
 
-    if not to_update and not to_create:
+    if not to_update:
         return
-
-    # ── Create new ads ──────────────────────────────────────────────────
-    if to_create:
-        ok = 0
-        for listing_id, bid_pct in to_create:
-            result = create_ad(token, campaign_id, listing_id, bid_pct)
-            if result["ok"]:
-                ok += 1
-            elif args.debug:
-                print(f"  FAILED {listing_id}: {json.dumps(result['response'], indent=2)[:300]}")
-        print(f"  Created {ok}/{len(to_create)} new ads")
 
     # ── Execute bulk updates ────────────────────────────────────────────
     if to_update:

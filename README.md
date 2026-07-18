@@ -8,12 +8,12 @@ Managing a high-volume Pokemon card inventory manually became increasingly time-
 
 ## Features
 
-- **Sold Order Tracking** - Pulls completed orders from the Trading API, calculates eBay fees via the Finances API, deduplicates, and appends to an Excel workbook for bookkeeping.
-- **Active Listing Management** - Refreshes active listings with card name enrichment (fuzzy matching), shipping profiles, promoted listing ad rates, and price analytics columns.
-- **Market Price Analytics** - Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count into the Active Listings sheet.
-- **Active Price Comparison** - For each card, searches eBay for the top 5 best-match active listings and computes a market average, writing Active Avg (Top 5) and Active Count columns.
-- **Automated Promotion Adjustment** - Adjusts promoted listing ad rates based on configurable pricing rules.
-- **Listing Defaults Extension** - Chrome extension that fills eBay listing form defaults with one click, with customizable presets.
+- **Sold Order Tracking** 
+- **Active Listing Management** 
+- **Market Price Analytics** 
+- **Active Price Comparison**
+- **Automated Promotion Adjustment**
+- **Listing Defaults Extension** 
 
 ## Scale
 

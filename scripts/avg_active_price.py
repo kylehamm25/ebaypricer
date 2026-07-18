@@ -95,7 +95,7 @@ def fetch_active_price_for_card(conn, card_name: str) -> dict | None:
     print(".", end="", flush=True)
     try:
         items = search_active_listings(card_name)
-    except requests.HTTPError as e:
+    except requests.RequestException as e:
         log.error("eBay API error for '%s': %s", card_name, e)
         return None
 
@@ -219,7 +219,11 @@ def main():
         card_prices: dict[str, dict | None] = {}
         found = 0
         for card in unique_cards:
-            snapshot = fetch_active_price_for_card(conn, card)
+            try:
+                snapshot = fetch_active_price_for_card(conn, card)
+            except Exception as e:
+                log.error("Unexpected error for '%s': %s", card, e)
+                snapshot = None
             card_prices[card] = snapshot
             if snapshot:
                 found += 1

@@ -211,7 +211,10 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
         if col_name in col_map:
             price_col_map[col_name] = col_map[col_name]
         else:
-            ws.cell(row=1, column=next_col, value=col_name)
+            cell = ws.cell(row=1, column=next_col, value=col_name)
+            cell.fill = HEADER_FILL
+            cell.font = HEADER_FONT
+            cell.alignment = Alignment(horizontal="left", vertical="center")
             price_col_map[col_name] = next_col - 1
             next_col += 1
 

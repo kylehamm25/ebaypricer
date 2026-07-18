@@ -198,10 +198,12 @@ def remove_orphan_columns(ws, headers: list[str]) -> list[str]:
 def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
     col_map = {}
     last_data_col = 0
-    for i, h in enumerate(headers):
-        if h is not None:
-            col_map[str(h).strip()] = i
-            last_data_col = i + 1
+    for cell in ws[1]:
+        if cell.value is not None:
+            name = str(cell.value).strip()
+            col_map[name] = cell.column - 1
+            if not name.startswith("Last updated"):
+                last_data_col = cell.column
 
     next_col = last_data_col + 1
     price_col_map = {}
@@ -209,11 +211,7 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
         if col_name in col_map:
             price_col_map[col_name] = col_map[col_name]
         else:
-            cell = ws.cell(row=1, column=next_col, value=col_name)
-            cell.fill = HEADER_FILL
-            cell.font = HEADER_FONT
-            cell.alignment = Alignment(horizontal="left", vertical="center")
-            col_map[col_name] = next_col - 1
+            ws.cell(row=1, column=next_col, value=col_name)
             price_col_map[col_name] = next_col - 1
             next_col += 1
 

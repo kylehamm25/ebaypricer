@@ -70,7 +70,7 @@ Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scr
 
 ## Scripts Reference
 
-### `main.py` - Pipeline Orchestrator
+### `main.py` 
 
 The entry point for the full automation pipeline. Runs five sub-scripts sequentially, stopping on failure (except `auto_boost_promotion` which is best-effort). Supports `--dry-run` to preview promotion changes without applying them. All output is logged to `logs/main.log` with timestamps.
 
@@ -86,7 +86,7 @@ python scripts/main.py --dry-run
 4. `avg_active_price.py` - active-market comparison
 5. `auto_boost_promotion.py` - adjust ad rates
 
-### `append_sold_orders.py` - Sold Order Importer
+### `append_sold_orders.py`
 
 Pulls completed orders via the Trading API within a date range, enriches each sale with eBay fee data from the Finances API, deduplicates against existing rows, and appends new orders to the Sold Orders sheet in the Excel workbook.
 
@@ -103,7 +103,7 @@ python scripts/append_sold_orders.py --days 7
 python scripts/append_sold_orders.py --output "\path\to\sheet.xlsx"
 ```
 
-### `get_active.py` - Active Listing Refresher
+### `get_active.py`
 
 Fetches all current active listings from the Trading API, enriches them with card names, shipping cost estimates, and promoted listing ad rates from the Marketing API, then rewrites the Active Listings sheet in Excel.
 
@@ -119,7 +119,7 @@ python scripts/get_active.py
 python scripts/get_active.py --output "\path\to\sheet.xlsx"
 ```
 
-### `price_active_listings.py` - Sold Price Research
+### `price_active_listings.py`
 
 For each unique card in the Active Listings sheet, searches eBay completed/sold listings via the Browse API, computes a weighted-average sold price, and writes analytics columns back to the sheet.
 
@@ -138,7 +138,7 @@ python scripts/price_active_listings.py --max-listings 100
 python scripts/price_active_listings.py --db "C:\path\to\custom.db"
 ```
 
-### `avg_active_price.py` - Active Market Comparison
+### `avg_active_price.py`
 
 For each unique card, searches currently active eBay listings via the Browse API, takes the 5 "Best Match" listing prices, averages them, and writes `Active Avg` to the sheet.
 
@@ -155,7 +155,7 @@ python scripts/avg_active_price.py --force
 python scripts/avg_active_price.py --max-listings 100
 ```
 
-### `auto_boost_promotion.py` - Promotion Rate Optimizer
+### `auto_boost_promotion.py`
 
 Automatically increases promoted listing ad rates for stale inventory. Every 10 days an item has been listed without selling, its ad rate is bumped by 1% (computed via `marketing_api.compute_target_bid`), up to a configurable cap.
 
@@ -173,7 +173,7 @@ python scripts/auto_boost_promotion.py --campaign-name "Example Campaign" --max-
 python scripts/auto_boost_promotion.py --min-days 5 --debug
 ```
 
-### `gen_access_token.py` - OAuth Token Setup
+### `gen_access_token.py`
 
 One-time setup script that walks through the eBay OAuth 2.0 authorization code flow. Opens the eBay consent page in a browser, captures the redirect URL, exchanges the authorization code for access and refresh tokens, then saves them to `.env`.
 
@@ -187,7 +187,7 @@ One-time setup script that walks through the eBay OAuth 2.0 authorization code f
 python scripts/gen_access_token.py
 ```
 
-### `run_hourly.ps1` - Scheduled Task Wrapper
+### `run_hourly.ps1`
 
 PowerShell script designed for Windows Task Scheduler. Activates the project's virtual environment, runs `main.py`, and appends stdout/stderr to `%USERPROFILE%\ebay_exports\run_hourly.log` with timestamps.
 

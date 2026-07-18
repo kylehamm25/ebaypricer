@@ -2,19 +2,31 @@
 
 Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, refreshes active listings, computes market prices, and manages promoted listing bids.
 
-## Capabilities
+## Motivation
 
-**Sold Order Tracking**: Pulls completed orders from the Trading API, calculates eBay fees via the Finances API, deduplicates, and appends to an Excel workbook for bookkeeping.
+Managing a high-volume Pokemon card inventory manually became increasingly time-consuming. This project automates pricing research, bookkeeping, listing management, and promoted listing optimization, allowing inventory to stay competitively priced while reducing repetitive seller tasks.
 
-**Active Listing Management**: Refreshes active listings with card name enrichment (via fuzzy matching), shipping profile extraction, promoted listing ad rates, and price analytics columns.
+## Features
 
-**Market Price Analytics**: Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count directly into the Active Listings sheet.
+- **Sold Order Tracking** — Pulls completed orders from the Trading API, calculates eBay fees via the Finances API, deduplicates, and appends to an Excel workbook for bookkeeping.
+- **Active Listing Management** — Refreshes active listings with card name enrichment (fuzzy matching), shipping profiles, promoted listing ad rates, and price analytics columns.
+- **Market Price Analytics** — Searches eBay sold listings per card, computes weighted-average prices with recency bias and outlier removal, and writes Recent Sold Avg / Price vs Sold Avg / Recent Sold Count into the Active Listings sheet.
+- **Active Price Comparison** — For each card, searches eBay for the top 5 best-match active listings and computes a market average, writing Active Avg (Top 5) and Active Count columns.
+- **Automated Promotion Adjustment** — Adjusts promoted listing ad rates based on configurable pricing rules.
+- **Listing Defaults Extension** — Chrome extension that fills eBay listing form defaults with one click, with customizable presets.
 
-**Active Price Comparison**: For each card in the Active Listings sheet, searches eBay's marketplace for the top 5 best-match active listings and computes a market average, writing Active Avg (Top 5) and Active Count columns for direct comparison against sold-price data.
+## Tech Stack
 
-**Automated Promotion Adjustment**: Adjusts promoted listing ad rates based on configurable pricing rules (see `check_pricing.py`).
-
-**Listing Defaults Extension**: Chrome extension that fills eBay listing form defaults with one click, with customizable presets using popup UI.
+- Python
+- SQLite
+- openpyxl
+- eBay Trading API
+- eBay Browse API
+- eBay Marketing API
+- eBay Finances API
+- OAuth 2.0
+- Chrome Extension (JavaScript)
+- PowerShell / Bash
 
 ## Pipeline
 
@@ -24,7 +36,45 @@ All steps run sequentially via `scripts/main.py`:
 append_sold_orders → get_active → price_active_listings → avg_active_price → auto_boost_promotion
 ```
 
-Hourly execution is supported through `scripts/run_hourly.sh` (anacron/cron).
+Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scripts/run_hourly.sh` (anacron/cron).
+
+## Performance
+
+- Incremental updates avoid reprocessing historical orders.
+- SQLite caches sold-listing snapshots to reduce API usage.
+- Duplicate sold listings are automatically filtered across daily runs.
+- Weighted averages prioritize recent market activity.
+- Outlier filtering removes anomalous sale prices before averaging.
+- Automatic OAuth token refresh minimizes authentication interruptions.
+
+## Configuration
+
+Promotion thresholds and pricing rules are configured in `scripts/check_pricing.py`, allowing different ad-rate strategies based on:
+
+- Listing age
+- Current item price
+- Maximum promotion cap
+- Increment percentage
+
+## Data Storage
+
+Excel is used as the primary bookkeeping interface (easy to open, edit, and share), while SQLite stores historical pricing snapshots and cached marketplace data, enabling incremental updates without repeatedly querying eBay.
+
+## Reliability
+
+- Automatic OAuth token refresh with persistent refresh-token workflow.
+- Retry logic for transient API failures.
+- Duplicate prevention for sold orders.
+- Graceful handling of missing listing metadata.
+- Logging for all pipeline stages.
+
+## Scale
+
+- Supports hundreds of active listings
+- Tracks thousands of sold price snapshots
+- Processes hundreds of completed sales
+- Integrates four eBay APIs
+- Executes automatically on an hourly schedule
 
 ## Project Layout
 
@@ -63,7 +113,7 @@ db/                      SQLite (sold listings, price snapshots)
 pip install -r requirements.txt
 pip install -e .
 cp .env.example .env   # fill in EBAY_APP_ID, EBAY_SECRET, EBAY_DEV_ID
-python scripts/gen_access_token.py   # OAuth consent → refresh token saved to .env
+python scripts/gen_access_token.py   # OAuth consent -> refresh token saved to .env
 ```
 
 Requires eBay Developer API credentials from [developer.ebay.com](https://developer.ebay.com).

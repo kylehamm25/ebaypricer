@@ -81,6 +81,7 @@ The entry point for the full automation pipeline. Runs five sub-scripts sequenti
 4. `avg_active_price.py` - active-market comparison
 5. `auto_boost_promotion.py` - adjust ad rates
 
+
 ### `append_sold_orders.py`
 
 Pulls completed orders via the Trading API within a date range, enriches each sale with eBay fee data from the Finances API, deduplicates against existing rows, and appends new orders to the Sold Orders sheet in the Excel workbook.
@@ -92,6 +93,7 @@ Pulls completed orders via the Trading API within a date range, enriches each sa
 - For multi-item orders, order-level values (Shipping, Total, Fees, Earnings) appear only on the first/highest-priced item row; continuation rows leave those fields blank.
 - Enriches each row with card metadata via fuzzy matching against the Pokemon card database.
 
+
 ### `get_active.py`
 
 Fetches all current active listings from the Trading API, enriches them with card names, shipping cost estimates, and promoted listing ad rates from the Marketing API, then rewrites the Active Listings sheet in Excel.
@@ -102,6 +104,7 @@ Fetches all current active listings from the Trading API, enriches them with car
 - Pulls ad-rate percentages for each listing
 - Restores existing price analytics columns (Recent Sold Avg, Price vs Sold Avg, etc.) so they aren't lost on refresh.
 - Preserves cached card names across runs to maintain consistency.
+
 
 ### `price_active_listings.py`
 
@@ -115,6 +118,7 @@ For each unique card in the Active Listings sheet, searches eBay completed/sold 
 - Writes columns: `Recent Sold Avg`, `Price vs Sold Avg`, `Recent Sold Count`, `Last Checked`.
 - Each sold listing is also saved to the `sold_listings` table for debugging.
 
+
 ### `avg_active_price.py`
 
 For each unique card, searches currently active eBay listings via the Browse API, takes the 5 "Best Match" listing prices, averages them, and writes `Active Avg` to the sheet.
@@ -125,6 +129,7 @@ For each unique card, searches currently active eBay listings via the Browse API
 - Prints a summary table with per-card averages and a grand average across all cards.
 - Respects `--force` to bypass daily cache.
 - Rate-limited with a 0.5s sleep between calls.
+
 
 ### `auto_boost_promotion.py`
 
@@ -137,6 +142,7 @@ Automatically increases promoted listing ad rates for stale inventory. Every 10 
 - Processes updates in batches of 500 via the Marketing API's `bulk_update_bids` endpoint.
 - `--dry-run` prints what would be changed without applying.
 
+
 ### `gen_access_token.py`
 
 One-time setup script that walks through the eBay OAuth 2.0 authorization code flow. Opens the eBay consent page in a browser, captures the redirect URL, exchanges the authorization code for access and refresh tokens, then saves them to `.env`.
@@ -147,9 +153,11 @@ One-time setup script that walks through the eBay OAuth 2.0 authorization code f
 - Persists both ACCESS_TOKEN and REFRESH_TOKEN to the `.env` file.
 - At runtime, `auth.py` automatically refreshes the access token using the stored refresh token.
 
+
 ### `run_hourly.ps1`
 
 PowerShell script designed for Windows Task Scheduler. Activates the project's virtual environment, runs `main.py`, and appends stdout/stderr to `%USERPROFILE%\ebay_exports\run_hourly.log` with timestamps.
+
 
 ## Project Layout
 

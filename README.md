@@ -15,9 +15,17 @@ Managing a high-volume Pokemon card inventory manually became increasingly time-
 - **Automated Promotion Adjustment** - Adjusts promoted listing ad rates based on configurable pricing rules.
 - **Listing Defaults Extension** - Chrome extension that fills eBay listing form defaults with one click, with customizable presets.
 
+## Scale
+
+- Supports hundreds of active listings
+- Tracks thousands of sold price snapshots
+- Processes hundreds of completed sales
+- Integrates four eBay APIs
+- Executes automatically on an hourly schedule
+
 ## Tech Stack
 
-- Python
+- Python 3.12
 - SQLite
 - openpyxl
 - eBay Trading API
@@ -59,14 +67,6 @@ Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scr
 - Duplicate prevention for sold orders.
 - Graceful handling of missing listing metadata.
 - Logging for all pipeline stages.
-
-## Scale
-
-- Supports hundreds of active listings
-- Tracks thousands of sold price snapshots
-- Processes hundreds of completed sales
-- Integrates four eBay APIs
-- Executes automatically on an hourly schedule
 
 ## Scripts Reference
 

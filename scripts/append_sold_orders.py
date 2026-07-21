@@ -205,7 +205,7 @@ def main():
     if not new_orders:
         if new_cols:
             wb.save(xlsx_path)
-        print(f"No new orders ({skipped} existing)")
+        print(f"No new orders")
         sys.exit(0)
 
     blank_order_level_continuation_rows(new_orders)

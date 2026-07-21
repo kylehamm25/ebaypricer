@@ -64,35 +64,23 @@ def main():
     if not campaign_id:
         campaigns = get_campaigns(token)
         if not campaigns:
-            print("No RUNNING campaigns found.")
             sys.exit(0)
         if args.campaign_name:
             matches = [c for c in campaigns if c.get("campaignName") == args.campaign_name]
             if not matches:
-                print(f"No campaign named '{args.campaign_name}' found.")
                 sys.exit(1)
             campaign = matches[0]
         else:
             campaign = campaigns[0]
         campaign_id = campaign["campaignId"]
-        if args.debug:
-            print(f"  Campaign data: {json.dumps(campaign, indent=2)}")
 
         funding_model = campaign.get("fundingStrategy", {}).get("fundingModel")
         if funding_model and funding_model != "COST_PER_SALE":
-            print(f"\nERROR: this campaign uses the {funding_model} funding model.")
-            print("  bidPercentage and bulk_update_ads_bid_by_listing_id only work for")
-            print("  Cost-Per-Sale (General strategy) campaigns - eBay rejects/ignores them")
-            print("  for Cost-Per-Click (Priority strategy) campaigns, which bid via")
-            print("  keywords and ad groups instead.")
-            print("  Point this script at a General strategy campaign, or pass its ID")
-            print("  explicitly with --campaign-id.")
             sys.exit(1)
 
     # ── Get active listings ─────────────────────────────────────────────
     listings = fetch_active_listings(token)
     if not listings:
-        print("No active listings found.")
         return
 
     # ── Get existing ads in the campaign ────────────────────────────────
@@ -103,16 +91,9 @@ def main():
         if lid:
             ads_by_listing[lid] = ad
 
-    if args.debug and ads:
-        print(f"  Sample ad: {json.dumps(ads[0], indent=2)}")
-        print(f"  Sample listing (Trading API ID): {json.dumps(listings[0].get('Item ID', ''))}")
-
     # ── Build update list ───────────────────────────────────────────────
     to_update: list[dict] = []
     boosts = 0
-    at_cap = 0
-    skipped_days = 0
-    no_ad_found = 0
 
     for item in listings:
         days = item.get("Days Listed", 0)
@@ -131,16 +112,13 @@ def main():
             current_bid = float(ad.get("bidPercentage") or 0)
 
         if ad is None:
-            no_ad_found += 1
             continue
 
         if days < args.min_days:
-            skipped_days += 1
             continue
 
         target = compute_target_bid(days, current_bid, max_bid)
         if target is None:
-            at_cap += 1
             continue
 
         to_update.append({
@@ -149,11 +127,7 @@ def main():
         })
         boosts += 1
 
-    if args.dry_run:
-        print(f"Would boost {boosts} listings")
-        return
-
-    if not to_update:
+    if args.dry_run or not to_update:
         return
 
     # ── Execute bulk updates ────────────────────────────────────────────
@@ -163,9 +137,6 @@ def main():
             batch = to_update[i:i + BATCH_SIZE]
             result = bulk_update_bids(token, campaign_id, batch)
             total_sent += result["sent"]
-            if result["errors"] and args.debug:
-                print(f"  batch errors: {json.dumps(result['errors'], indent=2)[:500]}")
-        print(f"  Updated {total_sent} bids")
 
 
 if __name__ == "__main__":

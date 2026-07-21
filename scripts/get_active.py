@@ -7,8 +7,31 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+import re
+
 from ebaypricer.auth import get_access_token
-from ebaypricer.trading_api import fetch_active_listings
+from ebaypricer.trading_api import fetch_active_listings, _get_item_condition
+
+TITLE_CONDITION_MAP = {
+    r'\bNM\b': 'Near Mint',
+    r'\bNear Mint\b': 'Near Mint',
+    r'\bMint\b': 'Near Mint',
+    r'\bLP\b': 'Lightly Played',
+    r'\bLightly Played\b': 'Lightly Played',
+    r'\bMP\b': 'Moderately Played',
+    r'\bModerately Played\b': 'Moderately Played',
+    r'\bHP\b': 'Heavily Played',
+    r'\bHeavily Played\b': 'Heavily Played',
+    r'\bDMG\b': 'Damaged',
+    r'\bDamaged\b': 'Damaged',
+}
+
+
+def parse_condition_from_title(title: str) -> str:
+    for pattern, condition in TITLE_CONDITION_MAP.items():
+        if re.search(pattern, title, re.IGNORECASE):
+            return condition
+    return ""
 from ebaypricer.cards import enrich_rows
 from ebaypricer.marketing_api import get_campaigns, get_ads
 from ebaypricer.excel import (
@@ -70,30 +93,22 @@ def main():
 
     xlsx_path = args.output
 
-    PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked"]
+    PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked", "Active Avg (Top 5)", "Price Accuracy"]
 
     ws = None
-    existing_cards: dict[str, str] = {}
     existing_prices: dict[str, dict[str, object]] = {}
     if os.path.exists(xlsx_path):
         wb = load_workbook(xlsx_path)
         if SHEET_NAME in wb.sheetnames:
             ws = wb[SHEET_NAME]
             col_to_idx = {str(cell.value): i for i, cell in enumerate(ws[1]) if cell.value}
-            card_col = col_to_idx.get("Card", -1)
             itemid_col = col_to_idx.get("Item ID", -1)
-            if card_col >= 0 and itemid_col >= 0:
-                for row in ws.iter_rows(min_row=2, values_only=True):
-                    item_id = str(row[itemid_col]).strip() if len(row) > itemid_col and row[itemid_col] else ""
-                    card_val = str(row[card_col]).strip() if len(row) > card_col and row[card_col] else ""
-                    if item_id and card_val:
-                        existing_cards[item_id] = card_val
             price_cols_map: dict[str, int] = {}
             for name in PRICE_COLS_TO_SAVE:
                 idx = col_to_idx.get(name)
                 if idx is not None:
                     price_cols_map[name] = idx
-            if price_cols_map and itemid_col is not None:
+            if price_cols_map and itemid_col >= 0:
                 for row in ws.iter_rows(min_row=2, values_only=True):
                     item_id = str(row[itemid_col]).strip() if len(row) > itemid_col and row[itemid_col] else ""
                     if not item_id:
@@ -115,6 +130,15 @@ def main():
 
     rows = fetch_active_listings(token)
 
+    for row in rows:
+        cond = parse_condition_from_title(row.get("Title", ""))
+        if not cond:
+            api_cond = _get_item_condition(row["Item ID"], token)
+            if api_cond and api_cond != "Ungraded":
+                cond = api_cond
+        row["Condition"] = cond or ""
+    print(f"  Found {sum(1 for r in rows if r.get('Condition'))}/{len(rows)} conditions")
+
     if not rows:
         print("No active listings returned — leaving existing sheet untouched.")
         return
@@ -132,11 +156,10 @@ def main():
 
     enrich_rows(rows, title_key="Title")
 
-    if existing_cards:
-        for row in rows:
-            card = existing_cards.get(row.get("Item ID", ""))
-            if card:
-                row["Card"] = card
+    before = len(rows)
+    rows = [r for r in rows if (r.get("SKU") or "").strip().lower() != "nontcg"]
+    if len(rows) != before:
+        print(f"  Filtered {before - len(rows)} non-TCG items")
 
     try:
         campaigns = get_campaigns(token)
@@ -154,14 +177,14 @@ def main():
             if rate is not None:
                 row["Ad Rate"] = f"{rate:.0f}%"
         if ad_rate_by_listing:
-            print(f"  {len(ad_rate_by_listing)} promoted")
+            print(f"Promoted {len(ad_rate_by_listing)} listings")
     except SystemExit:
         pass
     except Exception as e:
         print(f"  Ads: {e}")
 
     COLUMN_ORDER = [
-        "Item ID", "Title", "Card", "SKU", "Price",
+        "Item ID", "Title", "Card", "Condition", "SKU", "Price",
         "Shipping Charge", "Ad Rate", "Watchers", "Days Listed",
         "Start Date", "Quantity", "Estimated Fees",
         "Estimated Net",
@@ -209,6 +232,13 @@ def main():
             cell.font = HEADER_FONT
             cell.alignment = Alignment(horizontal="center", vertical="center")
             price_start_col += 1
+        RESTORE_FORMATS = {
+            "Recent Sold Avg": '#,##0.00',
+            "Price vs Sold Avg": '#,##0.00',
+            "Active Avg (Top 5)": '#,##0.00',
+            "Recent Sold Count": '0',
+            "Price Accuracy": '0.0%',
+        }
         for row_idx, row in enumerate(rows, 2):
             item_id = row.get("Item ID", "")
             saved = existing_prices.get(item_id)
@@ -218,7 +248,10 @@ def main():
             for col_name in PRICE_COLS_TO_SAVE:
                 val = saved.get(col_name)
                 if val is not None:
-                    ws.cell(row=row_idx, column=col_offset, value=val)  # type: ignore
+                    cell = ws.cell(row=row_idx, column=col_offset, value=val)  # type: ignore
+                    fmt = RESTORE_FORMATS.get(col_name)
+                    if fmt:
+                        cell.number_format = fmt
                 col_offset += 1
         print(f"  Restored {len(existing_prices)} price rows")
 
@@ -234,7 +267,7 @@ def main():
     write_last_updated(ws, now)
 
     wb.save(xlsx_path)
-    print(f"Active Listings refreshed — {len(rows)} listings")
+    print(f"{len(rows)} Active Listings refreshed")
 
 
 if __name__ == "__main__":

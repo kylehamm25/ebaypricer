@@ -220,7 +220,7 @@ def fetch_sold_orders(access_token: str, start_dt: datetime, end_dt: datetime) -
             break
         page += 1
 
-    print(f"  Fetched {len(rows)} sold line items ({total_pages} page(s))")
+    print(f"  Fetched {len(rows)} sold line items")
     return rows
 
 
@@ -298,6 +298,40 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     })
 
 
+def _build_item_xml(item_id: str, access_token: str) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<GetItemRequest xmlns="{NS}">
+  <RequesterCredentials>
+    <eBayAuthToken>{access_token}</eBayAuthToken>
+  </RequesterCredentials>
+  <ItemID>{item_id}</ItemID>
+  <DetailLevel>ReturnAll</DetailLevel>
+</GetItemRequest>"""
+
+
+def _get_item_condition(item_id: str, access_token: str) -> str:
+    headers = _trading_headers(access_token)
+    headers["X-EBAY-API-CALL-NAME"] = "GetItem"
+    try:
+        resp = requests.post(
+            TRADING_URL,
+            headers=headers,
+            data=_build_item_xml(item_id, access_token),
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return ""
+        root = ET.fromstring(resp.text)
+        ack = _t(root, "Ack")
+        if ack not in ("Success", "Warning"):
+            return ""
+        display_el = root.find(f".//{{{NS}}}Item/{{{NS}}}ConditionDisplayName")
+        return display_el.text.strip() if display_el is not None and display_el.text else ""
+    except Exception:
+        pass
+    return ""
+
+
 def fetch_active_listings(access_token: str) -> list[dict]:
     headers = _trading_headers(access_token)
     rows: list[dict] = []
@@ -344,5 +378,4 @@ def fetch_active_listings(access_token: str) -> list[dict]:
             break
         page += 1
 
-    print(f"  Fetched {len(rows)} active listings ({total_pages} page(s))")
     return rows

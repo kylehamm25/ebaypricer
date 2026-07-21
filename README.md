@@ -41,7 +41,7 @@ Managing a high-volume Pokemon card inventory manually became increasingly time-
 All steps run sequentially via `scripts/main.py`:
 
 ```
-append_sold_orders → get_active → price_active_listings → avg_active_price → auto_boost_promotion
+append_sold_orders → get_active → price_active_listings (sold avg) → avg_active_price (active avg + price accuracy) → auto_boost_promotion
 ```
 
 Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scripts/run_hourly.sh` (anacron/cron).
@@ -121,10 +121,11 @@ For each unique card in the Active Listings sheet, searches eBay completed/sold 
 
 ### `avg_active_price.py`
 
-For each unique card, searches currently active eBay listings via the Browse API, takes the 5 "Best Match" listing prices, averages them, and writes `Active Avg` to the sheet.
+For each unique card, searches currently active eBay listings via the Browse API, takes the 5 cheapest listings, averages them, and writes `Active Avg (Top 5)` to the sheet. Also computes a `Price Accuracy` column: the difference between the listed price and the midpoint of the sold and active market averages.
 
 **Key behaviors:**
-- Targets highest placing listings
+- Targets the 5 lowest prices for a conservative competitive benchmark.
+- Price Accuracy = Listed Price − AVG(Recent Sold Avg, Active Avg (Top 5)), using whichever benchmark data is available.
 - Caches results in SQLite (`active_snapshots` table) to avoid redundant API calls.
 - Prints a summary table with per-card averages and a grand average across all cards.
 - Respects `--force` to bypass daily cache.

@@ -16,7 +16,7 @@ GITHUB_BASE = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/mas
 TCGDEX_API = "https://api.tcgdex.net/v2/en"
 
 POKEMON_NOISE = {
-    "pokemon", "pokemon", "tcg", "card", "cards", "nm", "lp", "mp", "hp",
+    "pokemon", "tcg", "card", "cards", "nm", "lp", "mp", "hp",
     "near", "mint", "lightly", "played", "damaged", "rare", "ultra", "holo",
     "holofoil", "reverse", "reverseholofoil", "full", "art",
     "tag", "team", "prism", "star", "break", "trainer",
@@ -68,7 +68,7 @@ SET_ABBREV = {
     "drm": "dragon majesty",
 }
 
-SET_PREFIX_RE = re.compile(r"\b(s[vv]\d{2}|swsh\d{2?}|bw\d{2?}|xy\d{2?}|sm\d{2?})\b", re.IGNORECASE)
+SET_PREFIX_RE = re.compile(r"\b(sv\d{2}|swsh\d{1,2}|bw\d{1,2}|xy\d{1,2}|sm\d{1,2})\b", re.IGNORECASE)
 CARD_NUM_RE = re.compile(r"\b(\d{1,4}/\d{2,4})\b")
 
 PROMO_NUM_RE = re.compile(r"\b(SVP|MEP|SWSH|BW|SM|XY|DP|HGSS|POP)\s*(\d{1,4})\b", re.IGNORECASE)
@@ -96,14 +96,97 @@ RARITY_ABBREV = {
     "special illustration rare": "SIR",
 }
 
+# Keywords found in listing titles that signal a particular rarity, used to
+# disambiguate between multiple prints of the same card name/number.
+RARITY_SIGNALS: dict[str, str] = {
+    "special illustration rare": "Special Illustration Rare",
+    "sir": "Special Illustration Rare",
+    "illustration rare": "Illustration Rare",
+    "art rare": "Illustration Rare",
+    "ir": "Illustration Rare",
+    "ar": "Illustration Rare",
+    "hyper rare": "Hyper Rare",
+    "secret rare": "Secret Rare",
+    "double rare": "Double Rare",
+    "ultra rare": "Ultra Rare",
+    "shiny rare": "Rare Shiny",
+    "vmax": "Rare Holo VMAX",
+    "vstar": "Rare Holo VSTAR",
+}
+
+# Words that indicate a title is plausibly describing a Pokemon TCG card.
+# Used to guard the fuzzy-match fallback against unrelated listings (e.g.
+# shoes, apparel) that would otherwise get force-matched to a random card.
+_SIGNAL_RE = re.compile(
+    r"\b(pokemon|pok[eé]mon|tcg|holo|holofoil|promo|reverse|vmax|vstar|gx|ex|"
+    r"illustration|rare|common|uncommon|secret|trainer|energy|basic|stage|"
+    r"radiant|amazing|shiny|edition|unlimited|nm|lp|mp|hp|mint|played)\b",
+    re.IGNORECASE,
+)
 
 _STOPWORDS = {"with", "and", "the", "for", "from", "in", "of", "to", "a", "an", "its"}
 
 _REVERSE_RE = re.compile(r'\breverse\b', re.IGNORECASE)
 
+# Digit run not glued to other digits, allowing letter prefixes/suffixes,
+# e.g. matches "010" inside "SV010" or "45" inside "XY45".
+_BARE_NUM_RE = re.compile(r"(?<!\d)0*(\d{1,4})(?!\d)")
+
 
 def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9\s]", "", s.lower()).strip()
+
+
+def _norm_name(s: str) -> str:
+    """Normalize a card name/title fragment for loose comparison: lowercase,
+    treat hyphens the same as spaces (handles 'Tyranitar-EX' vs 'Tyranitar EX'),
+    and collapse whitespace."""
+    s = re.sub(r"[-\u2013\u2014]", " ", s.lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _name_in_title(name: str, title: str) -> bool:
+    """Check whether a card name appears in a listing title, tolerant of
+    hyphen/space differences (e.g. DB name 'Tyranitar-EX' should match a
+    title written as 'Tyranitar EX')."""
+    name_n = _norm_name(name)
+    title_n = _norm_name(title)
+    if not name_n:
+        return False
+    return re.search(r"\b" + re.escape(name_n) + r"\b", title_n) is not None
+
+
+def _numeric_suffix(num_str: str) -> str:
+    """Extract the trailing digit run of a card number field (e.g. 'SV010' ->
+    '10', '042' -> '42'), stripped of leading zeros."""
+    m = re.search(r"(\d+)$", num_str or "")
+    if not m:
+        return ""
+    return m.group(1).lstrip("0") or "0"
+
+
+def _extract_bare_numbers(title: str) -> set[str]:
+    """Pull standalone-ish digit runs out of a title (leading zeros stripped),
+    tolerant of letter prefixes like 'SV010' or 'ME012'."""
+    nums = set()
+    for m in _BARE_NUM_RE.finditer(title):
+        n = m.group(1).lstrip("0") or "0"
+        nums.add(n)
+    return nums
+
+
+def _rarity_signal(title: str) -> str | None:
+    """Look for a rarity-indicating keyword/abbreviation in the title (as a
+    standalone word), returning the canonical rarity string it implies."""
+    title_l = title.lower()
+    # Check longer/more specific phrases first so e.g. "special illustration
+    # rare" wins over "illustration rare".
+    for phrase in sorted(RARITY_SIGNALS, key=len, reverse=True):
+        if re.search(r"\b" + re.escape(phrase) + r"\b", title_l):
+            return RARITY_SIGNALS[phrase]
+    return None
+
 
 
 def _significant_tokens(s: str) -> list[str]:
@@ -223,6 +306,7 @@ class CardDatabase:
     by_number: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     name_list: list[str] = field(default_factory=list)
     name_to_card: dict[str, dict[str, Any]] = field(default_factory=dict)
+    name_to_cards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     name_list_by_len: list[str] = field(default_factory=list)
     _loaded: bool = False
 
@@ -297,6 +381,7 @@ class CardDatabase:
             snum = f"{c['set_id']}-{num}"
             self.by_number.setdefault(snum, []).append(c)
             self.name_to_card[c["name"]] = c
+            self.name_to_cards.setdefault(c["name"], []).append(c)
 
         seen = set()
         for c in self.cards:
@@ -324,20 +409,72 @@ class CardDatabase:
         if not set_name:
             return False
         sn = set_name.lower()
-        if sn in title_norm:
+        # Word-boundary phrase match, not naive substring -- otherwise a set
+        # named "Dragon" would incorrectly "match" inside "Dragons Exalted".
+        if re.search(r'\b' + re.escape(sn) + r'\b', title_norm):
             return True
         expanded = _expand_set_abbrevs(title_norm)
-        if expanded != title_norm and sn in expanded:
+        if expanded != title_norm and re.search(r'\b' + re.escape(sn) + r'\b', expanded):
             return True
         tokens = _significant_tokens(set_name)
         if len(tokens) >= 2:
-            return sum(t in title_norm for t in tokens) >= 2
-        return bool(tokens) and tokens[0] in title_norm
+            return sum(bool(re.search(r'\b' + re.escape(t) + r'\b', title_norm)) for t in tokens) >= 2
+        return bool(tokens) and bool(re.search(r'\b' + re.escape(tokens[0]) + r'\b', title_norm))
+
+    def _disambiguate(self, candidates: list[dict], title: str) -> dict | None:
+        """Narrow a list of same-name/same-number candidate cards down to one,
+        using set name, series, an explicit bare number, or a rarity keyword
+        found in the listing title. Returns None if it can't confidently
+        settle on a single candidate (better to admit uncertainty than to
+        silently guess the wrong print)."""
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return dict(candidates[0])
+
+        desc = _norm(title)
+
+        by_set = [c for c in candidates if self._title_matches_set(desc, c.get("set_name", ""))]
+        if len(by_set) == 1:
+            return dict(by_set[0])
+
+        pool = by_set if by_set else candidates
+
+        by_series = [c for c in pool if self._title_matches_set(desc, c.get("set_series", ""))]
+        if len(by_series) == 1:
+            return dict(by_series[0])
+
+        pool = by_series if by_series else pool
+
+        bare_nums = _extract_bare_numbers(title)
+        by_num = [c for c in pool if _numeric_suffix(c.get("number", "")) in bare_nums]
+        if len(by_num) == 1:
+            return dict(by_num[0])
+        if by_num:
+            pool = by_num
+
+        rarity = _rarity_signal(title)
+        if rarity:
+            by_rarity = [c for c in pool if c.get("rarity", "") == rarity]
+            if len(by_rarity) == 1:
+                return dict(by_rarity[0])
+            if by_rarity:
+                pool = by_rarity
+
+        if len(pool) == 1:
+            return dict(pool[0])
+        return None
 
     def _match_exact(self, title: str) -> dict | None:
         for name in self.name_list_by_len:
-            if re.search(r'\b' + re.escape(name) + r'\b', title, re.IGNORECASE):
-                return dict(self.name_to_card[name])
+            if _name_in_title(name, title):
+                candidates = self.name_to_cards.get(name, [])
+                result = self._disambiguate(candidates, title)
+                if result:
+                    return result
+                # Ambiguous with no disambiguating signal in the title --
+                # don't silently return an arbitrary print.
+                return None
         return None
 
     @staticmethod
@@ -361,27 +498,27 @@ class CardDatabase:
             return None
         if len(candidates) == 1:
             return dict(candidates[0])
-        desc = _norm(title)
-        matched_by_set = [c for c in candidates if self._title_matches_set(desc, c["set_name"])]
-        if matched_by_set:
-            if len(matched_by_set) == 1:
-                return dict(matched_by_set[0])
-            for c in matched_by_set:
-                if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
-                    return dict(c)
-            return dict(matched_by_set[0])
-        matched_by_series = [c for c in candidates if self._title_matches_set(desc, c["set_series"])]
-        if matched_by_series:
-            if len(matched_by_series) == 1:
-                return dict(matched_by_series[0])
-            for c in matched_by_series:
-                if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
-                    return dict(c)
-            return dict(matched_by_series[0])
-        for c in candidates:
-            if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
-                return dict(c)
-        return None
+
+        # Priority 1: the card's actual name literally appears in the title.
+        # This is the strongest signal and should win over set-name guessing
+        # (a listing can mention several set/series words that only weakly
+        # imply the right print, but if "Deino" is in the title, the card is
+        # Deino -- not some unrelated same-numbered card from a set whose
+        # name happens to overlap).
+        name_matches = [c for c in candidates if _name_in_title(c["name"], title)]
+        if name_matches:
+            result = self._disambiguate(name_matches, title)
+            if result:
+                return result
+            # Species is confirmed even if we can't pin the exact print --
+            # that's still far better than guessing a different species.
+            return dict(name_matches[0])
+
+        # Priority 2: no literal name match. Only trust a set/series match
+        # here if it's unambiguous; otherwise we risk returning a
+        # completely different Pokemon that happens to share a card number
+        # and coincidentally-matching set text.
+        return self._disambiguate(candidates, title)
 
     def _match_by_promo_number(self, title: str) -> dict | None:
         m = PROMO_NUM_RE.search(title)
@@ -398,17 +535,14 @@ class CardDatabase:
             padded = digits_str.zfill(zfill)
             full_num = f"{m.group(1).upper()}{padded}"
             candidates = self.by_number.get(full_num, [])
-            if len(candidates) == 1:
-                return dict(candidates[0])
-            if candidates:
-                desc = _norm(title)
-                for c in candidates:
-                    if self._title_matches_set(desc, c["set_name"]):
-                        return dict(c)
-                for c in candidates:
-                    if re.search(r'\b' + re.escape(c["name"]) + r'\b', title, re.IGNORECASE):
-                        return dict(c)
-                return dict(candidates[0])
+            if not candidates:
+                return None
+            name_matches = [c for c in candidates if _name_in_title(c["name"], title)]
+            pool = name_matches if name_matches else candidates
+            result = self._disambiguate(pool, title)
+            if result:
+                return result
+            return dict(pool[0]) if name_matches else None
 
         stripped = digits_str.lstrip("0")
         compound = f"{set_id}-{stripped}"
@@ -418,6 +552,14 @@ class CardDatabase:
         return None
 
     def _match_fuzzy(self, title: str) -> dict | None:
+        # Fuzzy matching is the last resort and the riskiest stage -- only
+        # attempt it if the title actually looks like it's describing a
+        # Pokemon TCG card. Otherwise unrelated listings (shoes, apparel,
+        # etc.) can end up force-matched to some random card purely because
+        # a couple of words happen to overlap.
+        if not _SIGNAL_RE.search(title) and not CARD_NUM_RE.search(title):
+            return None
+
         clean = _norm(title)
         for noise in POKEMON_NOISE:
             clean = clean.replace(noise, " ")
@@ -428,9 +570,14 @@ class CardDatabase:
             clean, self.name_list, score_cutoff=80, limit=5,
         )
         for candidate_name, score, _ in results:
-            card = self.name_to_card[candidate_name]
-            if self._subtypes_match(title, card.get("subtypes", [])):
-                return dict(card)
+            cards = self.name_to_cards.get(candidate_name, [self.name_to_card[candidate_name]])
+            cards = [c for c in cards if self._subtypes_match(title, c.get("subtypes", []))]
+            if not cards:
+                continue
+            result = self._disambiguate(cards, title)
+            if result:
+                return result
+            return dict(cards[0])
         return None
 
 

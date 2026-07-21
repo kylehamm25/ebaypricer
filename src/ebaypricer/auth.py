@@ -72,10 +72,6 @@ def get_access_token() -> str:
     body = resp.json()
     access_token = body["access_token"]
     granted_scopes = body.get("scope")
-    if granted_scopes is None:
-        print("Access token refreshed (scope field omitted — all scopes granted per OAuth 2.0 spec)")
-    else:
-        print(f"Access token refreshed (scopes: {granted_scopes})")
     _write_env_key("ACCESS_TOKEN", access_token)
     return access_token
 

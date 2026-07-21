@@ -30,7 +30,16 @@ DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
 ACTIVE_PRICE_COLUMNS = [
     ("Active Avg (Top 5)", '#,##0.00'),
+    ("Price Accuracy",     '0.0%'),
 ]
+
+CONDITION_MULTIPLIER = {
+    "Near Mint":            1.00,
+    "Lightly Played":       0.80,
+    "Moderately Played":    0.60,
+    "Heavily Played":       0.50,
+    "Damaged":              0.35,
+}
 
 
 def parse_args():
@@ -181,10 +190,58 @@ def write_price_data(ws, ws_rows: list[dict], headers: list[str],
                 if fmt:
                     cell.number_format = fmt
 
+            elif col_name == "Price Accuracy":
+                listed = row.get("Price")
+                if listed is None:
+                    cell.value = None
+                    continue
+                try:
+                    listed = float(listed)
+                except (TypeError, ValueError):
+                    cell.value = None
+                    continue
+
+                sold_avg = row.get("Recent Sold Avg")
+                active_avg = snapshot.get("avg_price")
+                benchmarks = []
+                if sold_avg is not None:
+                    try:
+                        benchmarks.append(float(sold_avg))
+                    except (TypeError, ValueError):
+                        pass
+                if active_avg is not None:
+                    try:
+                        benchmarks.append(float(active_avg))
+                    except (TypeError, ValueError):
+                        pass
+                if not benchmarks:
+                    cell.value = None
+                    continue
+
+                target = sum(benchmarks) / len(benchmarks)
+                pct = (listed - target) / target if target != 0 else None
+                cell.value = round(pct, 3) if pct is not None else None
+                cell.number_format = '0.0%'
+
 
 def main():
     args = parse_args()
     db_path = args.db
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    if not args.force and os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            count = conn.execute(
+                "SELECT COUNT(*) FROM active_price_snapshots WHERE snapshot_date = ?",
+                (today,),
+            ).fetchone()[0]
+            conn.close()
+            if count > 0:
+                print(f"Active snapshots exist for {today} — skipping")
+                return
+        except Exception:
+            pass
 
     xlsx_path = args.output
     if not os.path.exists(xlsx_path):

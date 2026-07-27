@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
+import { KpiCard } from '../components/shared/KpiCard'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { PaginatedResponse, SoldSummary, SoldTrend } from '../types'
 
@@ -62,34 +63,19 @@ export function SoldOrdersPage() {
       <h1 className="text-2xl font-bold text-slate-900">Sold Orders</h1>
 
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Total Items Sold</p>
-            <p className="text-lg font-bold">{formatInt(summary.total_items)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Total Revenue</p>
-            <p className="text-lg font-bold">{formatCurrency(summary.total_revenue)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Shipping Collected</p>
-            <p className="text-lg font-bold">{formatCurrency(summary.total_shipping)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">eBay Fees</p>
-            <p className="text-lg font-bold">{formatCurrency(summary.total_fees)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Order Earnings</p>
-            <p className="text-lg font-bold">{formatCurrency(summary.total_earnings)}</p>
-          </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          <KpiCard title="Total Items Sold" value={formatInt(summary.total_items)} />
+          <KpiCard title="Total Revenue" value={formatCurrency(summary.total_revenue)} />
+          <KpiCard title="Shipping Collected" value={formatCurrency(summary.total_shipping)} />
+          <KpiCard title="eBay Fees" value={formatCurrency(summary.total_fees)} />
+          <KpiCard title="Order Earnings" value={formatCurrency(summary.total_earnings)} />
         </div>
       )}
 
       {trends && trends.length > 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
           <h2 className="text-sm font-semibold text-slate-700 mb-3">Daily Revenue Trend</h2>
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={240}>
             <BarChart data={trendData}>
               <XAxis
                 dataKey="date"
@@ -127,7 +113,7 @@ export function SoldOrdersPage() {
         <>
           <DataTable<SoldOrderItem>
             columns={[
-              { key: 'sprite_url', header: '', render: (r) => r.sprite_url ? <img src={r.sprite_url as string} alt="" width={40} height={40} style={{ imageRendering: 'pixelated' }} /> : null, className: 'w-12' },
+              { key: 'sprite_url', header: '', render: (r) => r.sprite_url ? <img src={r.sprite_url as string} alt="" width={64} height={64} style={{ imageRendering: 'pixelated' }} /> : null, className: 'w-30' },
               { key: 'Sale Date', header: 'Date' },
               { key: 'Item Title', header: 'Title', className: 'max-w-sm truncate' },
               { key: 'Item Price', header: 'Price', render: (r) => formatCurrency(r['Item Price'] as string) },

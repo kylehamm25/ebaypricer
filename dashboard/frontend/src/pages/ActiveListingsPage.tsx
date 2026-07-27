@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
-  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
+import { KpiCard } from '../components/shared/KpiCard'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { ActiveSummary, PriceComparison, CardPriceDetail } from '../types'
 
@@ -33,7 +34,7 @@ function ExpandedRowContent({ item }: { item: ListingItem }) {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-2">
-      <div className="bg-white rounded border border-slate-200 p-3">
+      <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-sm">
         <p className="text-xs text-slate-500 mb-2">Sold Price History</p>
         <ResponsiveContainer width="100%" height={160}>
           <LineChart data={soldSnaps}>
@@ -45,7 +46,7 @@ function ExpandedRowContent({ item }: { item: ListingItem }) {
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <div className="bg-white rounded border border-slate-200 p-3">
+      <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-sm">
         <p className="text-xs text-slate-500 mb-2">Active Price History</p>
         <ResponsiveContainer width="100%" height={160}>
           <LineChart data={activeSnaps}>
@@ -78,6 +79,16 @@ export function ActiveListingsPage() {
     queryKey: ['pricing-comparisons'],
     queryFn: () => api('/pricing/comparisons'),
     refetchInterval: 120_000,
+  })
+
+  const { data: cardValues } = useQuery<{ card: string; count: number; total_value: number }[]>({
+    queryKey: ['active-by-card-value'],
+    queryFn: () => api('/active/by-card-value'),
+  })
+
+  const { data: valueTrend } = useQuery<{ date: string; total_value: number; total_listings: number }[]>({
+    queryKey: ['active-value-trend'],
+    queryFn: () => api('/active/value-trend'),
   })
 
   const listData = rawList as { items: ListingItem[]; total: number; page: number; per_page: number } | undefined
@@ -121,21 +132,41 @@ export function ActiveListingsPage() {
       <h1 className="text-2xl font-bold text-slate-900">Active Listings</h1>
 
       {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Total Listings</p>
-            <p className="text-lg font-bold">{formatInt(summary.total_listings)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Total Value</p>
-            <p className="text-lg font-bold">{formatCurrency(summary.total_value)}</p>
-          </div>
-          <div className="bg-white rounded-lg border border-slate-200 p-3">
-            <p className="text-xs text-slate-500">Avg Days Listed</p>
-            <p className="text-lg font-bold">{Math.round(summary.avg_days_listed)}d</p>
-          </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <KpiCard title="Total Listings" value={formatInt(summary.total_listings)} />
+          <KpiCard title="Total Value" value={formatCurrency(summary.total_value)} />
+          <KpiCard title="Avg Days Listed" value={`${Math.round(summary.avg_days_listed)}d`} />
         </div>
       )}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {cardValues && cardValues.length > 0 && (
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+            <h2 className="text-sm font-semibold text-slate-700 mb-3">Inventory Value by Card</h2>
+            <ResponsiveContainer width="100%" height={320}>
+              <BarChart data={cardValues.slice(0, 15)} layout="vertical" margin={{ left: 120, right: 20 }}>
+                <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1).toFixed(0)}`} />
+                <YAxis type="category" dataKey="card" tick={{ fontSize: 11 }} width={120} />
+                <Tooltip formatter={(v) => formatCurrency(Number(v))} />
+                <Bar dataKey="total_value" fill="#3b82f6" radius={[0, 2, 2, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        {valueTrend && valueTrend.length > 0 && (
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+            <h2 className="text-sm font-semibold text-slate-700 mb-3">Total Inventory Value Over Time</h2>
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart data={valueTrend}>
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `$${(v / 1).toFixed(0)}`} />
+                <Tooltip formatter={(v) => formatCurrency(Number(v))} />
+                <Line type="monotone" dataKey="total_value" stroke="#3b82f6" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
 
       {listLoading ? (
         <div className="text-sm text-slate-400">Loading...</div>

@@ -111,6 +111,40 @@ def get_active_by_condition():
     return [dict(r) for r in rows]
 
 
+@router.get("/by-card-value")
+def get_active_by_card_value():
+    with get_db() as db:
+        if not _exists(db):
+            return []
+        rows = db.execute(
+            f"""SELECT {_C} AS card, COUNT(*) AS count,
+                       COALESCE(SUM(CAST({_P} AS REAL)), 0) AS total_value
+                FROM staging_active_listings
+                WHERE {_C} IS NOT NULL AND {_C} != ''
+                GROUP BY {_C} ORDER BY total_value DESC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.get("/value-trend")
+def get_active_value_trend():
+    with get_db() as db:
+        table = "active_price_snapshots"
+        if not db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", [table]
+        ).fetchone():
+            return []
+        rows = db.execute(
+            """SELECT snapshot_date AS date,
+                      SUM(CAST(sample_size AS REAL) * CAST(avg_price AS REAL)) AS total_value,
+                      SUM(CAST(sample_size AS INTEGER)) AS total_listings
+               FROM active_price_snapshots
+               GROUP BY snapshot_date
+               ORDER BY snapshot_date ASC"""
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 @router.get("/days-distribution")
 def get_active_days_distribution():
     with get_db() as db:

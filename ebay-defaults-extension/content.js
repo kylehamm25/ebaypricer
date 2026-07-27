@@ -56,6 +56,19 @@ async function waitForElement(selector, { retries = 6, delay = 400 } = {}) {
     return null;
 }
 
+function waitForCondition(checkFn, { timeout = 3000, root = document.body } = {}) {
+    return new Promise((resolve) => {
+        const existing = checkFn();
+        if (existing) return resolve(existing);
+        const obs = new MutationObserver(() => {
+            const result = checkFn();
+            if (result) { obs.disconnect(); resolve(result); }
+        });
+        obs.observe(root, { childList: true, subtree: true, attributes: true });
+        setTimeout(() => { obs.disconnect(); resolve(checkFn()); }, timeout);
+    });
+}
+
 /* ------------------------------------------------------------------ */
 /*  findLabelAndControl — resolve a label text to its real DOM control */
 /*  Pattern 1: <label for="id"> pointing at a real control id         */
@@ -111,9 +124,7 @@ function findLabelAndControl(labelText) {
 
 async function setDropdown(labelText, valueText, clickFirst) {
     const found = findLabelAndControl(labelText);
-    if (!found) {
-        return false;
-    }
+    if (!found) return false;
     let trigger = found.control;
 
     if (trigger.tagName === "INPUT") {
@@ -125,39 +136,31 @@ async function setDropdown(labelText, valueText, clickFirst) {
         trigger = parent || trigger;
     }
     trigger.click();
-    await wait(1000);
 
-    const controlsId = trigger.getAttribute && trigger.getAttribute("aria-controls");
-    let scope = (controlsId && document.getElementById(controlsId)) || document;
-    if (controlsId) console.log(`[eBay] setDropdown "${labelText}": aria-controls="${controlsId}" → scope ${elSummary(scope)}`);
-    else console.log(`[eBay] setDropdown "${labelText}": no aria-controls, scope = document`);
-
-    for (let retry = 0; retry < 3; retry++) {
+    const getOptions = () => {
+        const controlsId = trigger.getAttribute && trigger.getAttribute("aria-controls");
+        const scope = (controlsId && document.getElementById(controlsId)) || document;
         const all = scope.querySelectorAll(
             '[role="option"], [role="menuitemradio"], [role="menuitem"], .combobox__option, .listbox__option'
         );
         const items = [...all].filter(isVisible);
+        return items.length ? { items, all } : null;
+    };
 
-        // If scoped search found nothing after 2 tries, fall back to document
-        if (retry === 2 && scope !== document) {
-            scope = document;
-        }
+    const result = await waitForCondition(getOptions);
+    if (!result) return false;
+    const { items, all } = result;
 
-        if (clickFirst) {
-            const target = items.length ? items : [...all];
-            if (target.length) {
-                target[0].click(); await wait(300); return true;
-            }
-        } else {
-            for (const item of items) {
-                if (textsMatch(item.textContent, valueText)) {
-                    item.click();
-                    await wait(300);
-                    return true;
-                }
+    if (clickFirst) {
+        const target = items.length ? items : [...all];
+        if (target.length) { target[0].click(); return true; }
+    } else {
+        for (const item of items) {
+            if (textsMatch(item.textContent, valueText)) {
+                item.click();
+                return true;
             }
         }
-        await wait(800);
     }
     return false;
 }
@@ -168,15 +171,15 @@ async function setDropdown(labelText, valueText, clickFirst) {
 
 const STEP_KEYS = {
     "Format":               ["format"],
-    "Condition":            ["condition"],
+    "Condition type":       ["condition"],
+    "Card Condition":       ["condition"],
     "Template":             ["descriptionTemplate"],
     "Description":          null,
     "Shipping policy":      ["shippingPolicy"],
-    "Shipping settings":    ["itemLocationZip", "itemLocationCityState", "returnPolicy"],
-    "Payment policy":       ["paymentPolicy"],
-    "Weight":               null,
-    "Dimensions":           null,
-    "Offers (enable)":      null,
+
+    "Weight":               ["packageWeight"],
+    "Dimensions":           ["dimensions"],
+    "Offers (enable)":      ["itemPrice"],
     "Promoted & ad rate":   ["promotedRate"],
     "SKU":                  ["customLabel"],
     "Item Price":           ["itemPrice"],
@@ -198,32 +201,30 @@ let lastSnapshot = null;
 /* ------------------------------------------------------------------ */
 
 async function setFormat() {
-    // Format uses a span with @PRICE in its ID
     const spans = $$('span[id*="@PRICE"]');
     let btn = null;
     for (const s of spans) {
         btn = s.closest("button");
-        if (btn) {
-            break;
-        }
+        if (btn) break;
     }
-    if (btn) {
-        btn.click();
-        await wait(1000);
+    if (!btn) return;
+    btn.click();
+
+    const items = await waitForCondition(() => {
         const controlsId = btn.getAttribute && btn.getAttribute("aria-controls");
         const scope = (controlsId && document.getElementById(controlsId)) || document;
-        if (controlsId) console.log(`[eBay] setFormat: aria-controls="${controlsId}" → ${elSummary(scope)}`);
-        for (let retry = 0; retry < 2; retry++) {
-            const all = scope.querySelectorAll(
-                '[role="option"], [role="menuitemradio"], [role="menuitem"], .combobox__option, .listbox__option'
-            );
-            for (const item of all) {
-                if (textsMatch(item.textContent, DEFAULTS.format)) {
-                    item.click();
-                    return;
-                }
+        const all = scope.querySelectorAll(
+            '[role="option"], [role="menuitemradio"], [role="menuitem"], .combobox__option, .listbox__option'
+        );
+        return all.length ? [...all] : null;
+    });
+
+    if (items) {
+        for (const item of items) {
+            if (textsMatch(item.textContent, DEFAULTS.format)) {
+                item.click();
+                return;
             }
-            await wait(800);
         }
     }
 }
@@ -259,93 +260,63 @@ async function setItemPrice() {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/*  setCondition — FIXED, self-contained (does not use               */
-/*  findLabelAndControl / setDropdown, so Shipping/Payment/Country    */
-/*  are completely unaffected by this change).                        */
-/*                                                                     */
-/*  Root cause: the real "Card Condition" trigger's own visible text  */
-/*  is the current/placeholder value (e.g. "Select ungraded           */
-/*  condition"), NOT the string "Card Condition" — so matching a      */
-/*  button's text against the label text can never find it. Meanwhile*/
-/*  the nearby help text "Need help? Take a closer look at card       */
-/*  conditions." DOES contain "card condition" as a substring         */
-/*  ("conditions" starts with "condition"), so the old text-based     */
-/*  fallback was reliably grabbing that link instead.                 */
-/*                                                                     */
-/*  Fix: locate the "Card Condition" label by exact text, then look   */
-/*  for a real trigger only within its own nearby field container     */
-/*  (not the whole document), explicitly skipping anything that       */
-/*  looks like a help/info link.                                      */
-/* ------------------------------------------------------------------ */
-
 async function setCondition() {
-    const isHelpish = (el) => {
-        const t = el.textContent.trim().toLowerCase();
-        const cls = (el.className || "").toString().toLowerCase();
-        return t.includes("help") || t.includes("take a closer look") ||
-               t.includes("learn more") || t.includes("guide") ||
-               cls.includes("infotip") || cls.includes("tooltip");
-    };
-
-    // Find the "Card Condition" label by exact text (avoids matching
-    // "Condition type" or other nearby, differently-scoped labels).
-    const labelCandidates = $$("label.field_label, label, .field_label, span, div");
-    let label = null;
-    for (const el of labelCandidates) {
-        if (el.children.length > 1) continue; // skip big wrapper blocks
-        if (el.textContent.trim().toLowerCase() === "card condition") {
-            label = el;
-            break;
-        }
-    }
-    if (!label) {
-        return false;
-    }
-
-    // Walk a few ancestors up from the label, looking only within each
-    // container's own subtree for a plausible (non-help) trigger.
-    let container = label.parentElement;
-    let trigger = null;
-    for (let i = 0; i < 5 && container && !trigger; i++) {
-        const candidates = [...container.querySelectorAll(
-            'button, [role="button"], [role="combobox"], input[role="combobox"]'
-        )];
-        trigger = candidates.find((el) => !isHelpish(el)) || null;
-        if (!trigger) container = container.parentElement;
-    }
-
-    if (!trigger) {
-        return false;
-    }
-
-    // If the trigger button already shows a selected condition (not a
-    // placeholder like "Select …"), leave it alone.
-    const cur = trigger.textContent.trim().toLowerCase();
-    if (!cur.includes("select") && !cur.includes("choose")) {
-        return true; // already has a selection — do not overwrite
-    }
-
+    const trigger = [...document.querySelectorAll('button')].find(b =>
+        b.textContent.trim().toLowerCase().includes("select condition type")
+    );
+    if (!trigger) return false;
     trigger.click();
-    await wait(1000);
 
-    const controlsId = trigger.getAttribute && trigger.getAttribute("aria-controls");
-    const scope = (controlsId && document.getElementById(controlsId)) || document;
-    if (controlsId) console.log(`[eBay] setCondition: aria-controls="${controlsId}" → ${elSummary(scope)}`);
+    const options = await waitForCondition(() => {
+        const controlsId = trigger.getAttribute("aria-controls");
+        const scope = (controlsId && document.getElementById(controlsId)) || document;
+        const opts = scope.querySelectorAll('[role="option"]');
+        return opts.length ? [...opts] : null;
+    });
 
-    for (let retry = 0; retry < 2; retry++) {
-        const all = scope.querySelectorAll(
-            '[role="option"], [role="menuitemradio"], [role="menuitem"], .combobox__option, .listbox__option'
-        );
-        const items = [...all].filter(isVisible);
-        for (const item of items) {
-            if (textsMatch(item.textContent, DEFAULTS.condition)) {
-                item.click();
-                await wait(300);
+    if (options) {
+        for (const opt of options) {
+            if (opt.textContent.toLowerCase().includes("ungraded")) {
+                opt.click();
                 return true;
             }
         }
-        await wait(800);
+    }
+    return false;
+}
+
+async function setCardCondition() {
+    const trigger = await waitForCondition(() => {
+        const label = [...document.querySelectorAll('label, span, div')].find(
+            el => el.textContent.trim().toLowerCase() === "card condition"
+        );
+        if (!label) return null;
+        let container = label.parentElement;
+        for (let i = 0; i < 5 && container; i++) {
+            const buttons = [...container.querySelectorAll('button')].filter(isVisible);
+            if (buttons.length >= 2) return buttons[1];
+            container = container.parentElement;
+        }
+        return null;
+    }, { timeout: 8000 });
+    if (!trigger) return false;
+
+    trigger.click();
+
+    const options = await waitForCondition(() => {
+        const controlsId = trigger.getAttribute("aria-controls");
+        const scope = (controlsId && document.getElementById(controlsId)) || document;
+        const opts = scope.querySelectorAll('[role="option"]');
+        return opts.length ? [...opts] : null;
+    });
+
+    if (options) {
+        for (const opt of options) {
+            if (textsMatch(opt.textContent, DEFAULTS.condition)) {
+                opt.click();
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -405,10 +376,6 @@ async function setShipping() {
     await setDropdown("Shipping policy", null, true);
 }
 
-async function setPayment() {
-    await setDropdown("Payment policy", DEFAULTS.paymentPolicy);
-}
-
 async function setWeight() {
     const { pounds, ounces } = DEFAULTS.packageWeight;
     const lb = $(`input[name="majorWeight"]`);
@@ -448,106 +415,25 @@ async function setBestOfferAmounts() {
     if (isNaN(price) || price <= 0) return;
     const offerAmount = (price * 0.9).toFixed(2);
 
-    // Wait for visible decline input
-    const declineInput = await new Promise(resolve => {
-        const start = Date.now();
-        const check = async () => {
-            const el = $(`input[name="autoDeclineAmount"]`);
-            if (el && isVisible(el)) return resolve(el);
-            if (Date.now() - start > 5000) return resolve(null);
-            await wait(300);
-            check();
-        };
-        check();
-    });
+    const [declineInput, acceptInput] = await Promise.all([
+        waitForCondition(() => {
+            const el = document.querySelector(`input[name="autoDeclineAmount"]`);
+            return el && isVisible(el) ? el : null;
+        }, { timeout: 5000 }),
+        waitForCondition(() => {
+            const el = document.querySelector(`input[name="autoAcceptAmount"]`);
+            return el && isVisible(el) ? el : null;
+        }, { timeout: 5000 }),
+    ]);
+
     if (declineInput) {
-        console.log(`[eBay] setBestOfferAmounts: decline ${elSummary(declineInput)}`);
         declineInput.scrollIntoView({ block: "center" });
         setValue(declineInput, offerAmount);
-    } else {
-        console.log(`[eBay] setBestOfferAmounts: no visible auto-decline input`);
     }
-
-    // Wait for visible accept input
-    const acceptInput = await new Promise(resolve => {
-        const start = Date.now();
-        const check = async () => {
-            const el = $(`input[name="autoAcceptAmount"]`);
-            if (el && isVisible(el)) return resolve(el);
-            if (Date.now() - start > 5000) return resolve(null);
-            await wait(300);
-            check();
-        };
-        check();
-    });
     if (acceptInput) {
-        console.log(`[eBay] setBestOfferAmounts: accept ${elSummary(acceptInput)}`);
         acceptInput.scrollIntoView({ block: "center" });
         setValue(acceptInput, offerAmount);
-    } else {
-        console.log(`[eBay] setBestOfferAmounts: no visible auto-accept input`);
     }
-}
-
-async function setShippingSettings() {
-    const editBtn = document.querySelector('button[aria-label="Your settings - edit"]');
-    if (!editBtn) return false;
-
-    editBtn.click();
-    await wait(1500);
-
-    const modal = document.querySelector('.se-panel-container.details__shipping-settings');
-    if (!modal) return false;
-
-    const zipInput = modal.querySelector('input[name="itemLocation"]');
-    if (zipInput && DEFAULTS.itemLocationZip) {
-        setValue(zipInput, DEFAULTS.itemLocationZip);
-        await wait(200);
-    }
-
-    const csInput = modal.querySelector('input[name="itemLocationCityState"]');
-    if (csInput && DEFAULTS.itemLocationCityState) {
-        setValue(csInput, DEFAULTS.itemLocationCityState);
-        await wait(200);
-    }
-
-    if (DEFAULTS.returnPolicy) {
-        const rpInput = modal.querySelector('input[name="returnsPolicyId"]');
-        if (rpInput) {
-            rpInput.focus();
-            fire(rpInput, "focus");
-            await wait(200);
-            rpInput.click();
-            await wait(1000);
-
-            const controlsId = rpInput.getAttribute("aria-controls");
-            const listbox = controlsId ? document.getElementById(controlsId) : null;
-            const scope = listbox || modal;
-
-            let selected = false;
-            for (let retry = 0; retry < 2 && !selected; retry++) {
-                const options = scope.querySelectorAll('[role="option"]');
-                for (const opt of options) {
-                    if (textsMatch(opt.textContent, DEFAULTS.returnPolicy)) {
-                        opt.click();
-                        await wait(300);
-                        selected = true;
-                        break;
-                    }
-                }
-                if (!selected) await wait(800);
-            }
-        }
-    }
-
-    const doneBtn = modal.querySelector('.se-panel-container__header-suffix button');
-    if (doneBtn) {
-        doneBtn.click();
-        await wait(500);
-        return true;
-    }
-
-    return false;
 }
 
 async function setPromoted() {
@@ -593,58 +479,69 @@ async function applyDefaults() {
             if (stored.descriptionTemplate != null) DEFAULTS.descriptionTemplate = stored.descriptionTemplate;
             if (stored.itemPrice != null) DEFAULTS.itemPrice = stored.itemPrice;
             if (stored.shippingPolicy) DEFAULTS.shippingPolicy = stored.shippingPolicy;
-            if (stored.paymentPolicy) DEFAULTS.paymentPolicy = stored.paymentPolicy;
             if (stored.promotedRate != null) DEFAULTS.promotedRate = stored.promotedRate;
             if (stored.customLabel != null) DEFAULTS.customLabel = stored.customLabel;
-            if (stored.itemLocationZip != null) DEFAULTS.itemLocationZip = stored.itemLocationZip;
-            if (stored.itemLocationCityState != null) DEFAULTS.itemLocationCityState = stored.itemLocationCityState;
-            if (stored.returnPolicy != null) DEFAULTS.returnPolicy = stored.returnPolicy;
         }
     } catch (_) {}
 
     const snapshot = lastSnapshot || {};
 
-    const steps = [
-        { name: "Format",               fn: setFormat },
-        { name: "Condition",            fn: setCondition },
-    ];
-
-    if (DEFAULTS.descriptionTemplate) {
-        steps.push({ name: "Template", fn: setDescriptionTemplate });
-    } else {
-        steps.push({ name: "Description", fn: setDescription });
-    }
-
-    steps.push(
-        { name: "Shipping policy",      fn: setShipping },
-        { name: "Shipping settings",    fn: setShippingSettings },
-        { name: "Payment policy",       fn: setPayment },
-        { name: "Weight",               fn: setWeight },
-        { name: "Dimensions",           fn: setDimensions },
-        { name: "Offers (enable)",      fn: enableOffers },
-        { name: "Promoted & ad rate",   fn: setPromoted },
-        { name: "SKU",                  fn: setCustomLabel },
-        { name: "Item Price",           fn: setItemPrice },
-        { name: "Best Offer Amounts",   fn: setBestOfferAmounts },
-    );
-
-    const total = steps.length;
-    for (let i = 0; i < total; i++) {
-        const step = steps[i];
+    const runStep = async (step, index, total) => {
         const keys = STEP_KEYS[step.name];
         if (!hasChanged(keys, snapshot)) {
-            setStatus("\u23ED " + step.name + " (no change)", ((i + 1) / total) * 100);
-            continue;
+            setStatus("\u23ED " + step.name + " (no change)", ((index + 1) / total) * 100);
+            return;
         }
-        setStatus("\u25B6 " + step.name, (i / total) * 100);
+        setStatus("\u25B6 " + step.name, (index / total) * 100);
         try {
             await step.fn();
-            setStatus("\u2713 " + step.name, ((i + 1) / total) * 100);
+            setStatus("\u2713 " + step.name, ((index + 1) / total) * 100);
         } catch (err) {
-            setStatus("\u2717 " + step.name + " (" + err.message + ")", ((i + 1) / total) * 100);
+            setStatus("\u2717 " + step.name + " (" + err.message + ")", ((index + 1) / total) * 100);
         }
-        await wait(400);
+    };
+
+    const total = 8;
+    let idx = 0;
+    await runStep({ name: "Format", fn: setFormat }, idx++, total);
+    await runStep({ name: "Condition type", fn: setCondition }, idx++, total);
+    if (DEFAULTS.descriptionTemplate) {
+        await runStep({ name: "Template", fn: setDescriptionTemplate }, idx++, total);
+    } else {
+        await runStep({ name: "Description", fn: setDescription }, idx++, total);
     }
+    await runStep({ name: "Shipping policy", fn: setShipping }, idx++, total);
+
+    setStatus("\u25B6 Inputs & toggles", (idx / total) * 100);
+    const parallelFns = [
+        ["Weight", setWeight],
+        ["Dimensions", setDimensions],
+        ["SKU", setCustomLabel],
+        ["Item Price", setItemPrice],
+        ["Offers (enable)", enableOffers],
+        ["Promoted & ad rate", setPromoted],
+    ];
+    const parallelResults = await Promise.allSettled(
+        parallelFns.map(([name, fn]) =>
+            (async () => {
+                const keys = STEP_KEYS[name];
+                if (hasChanged(keys, snapshot)) {
+                    try { await fn(); return { name, ok: true }; }
+                    catch (err) { return { name, ok: false, err }; }
+                }
+                return { name, ok: true, skipped: true };
+            })()
+        )
+    );
+    for (const r of parallelResults) {
+        const v = r.status === "fulfilled" ? r.value : { name: "?", ok: false, err: r.reason };
+        const mark = v.skipped ? "\u23ED" : v.ok ? "\u2713" : "\u2717";
+        setStatus(mark + " " + v.name, ((idx + 1) / total) * 100);
+    }
+    idx++;
+
+    await runStep({ name: "Best Offer Amounts", fn: setBestOfferAmounts }, idx++, total);
+    await runStep({ name: "Card Condition", fn: setCardCondition }, idx++, total);
 
     lastSnapshot = {};
     for (const name of Object.keys(STEP_KEYS)) {
@@ -776,11 +673,7 @@ async function loadSettingsIntoForm() {
     formFields.customLabel.value = d.customLabel ?? "";
     formFields.itemPrice.value = d.itemPrice ?? "";
     formFields.shippingPolicy.value = d.shippingPolicy || "Free ebay standard";
-    formFields.paymentPolicy.value = d.paymentPolicy || "Immediate payment";
     formFields.promotedRate.value = d.promotedRate ?? 2;
-    formFields.itemLocationZip.value = d.itemLocationZip ?? "";
-    formFields.itemLocationCityState.value = d.itemLocationCityState ?? "";
-    formFields.returnPolicy.value = d.returnPolicy ?? "No Return Accepted";
 }
 
 async function saveSettings() {
@@ -791,11 +684,7 @@ async function saveSettings() {
             customLabel: formFields.customLabel.value.trim(),
             itemPrice: formFields.itemPrice.value.trim(),
             shippingPolicy: formFields.shippingPolicy.value.trim(),
-            paymentPolicy: formFields.paymentPolicy.value.trim(),
             promotedRate: parseFloat(formFields.promotedRate.value) || 2,
-            itemLocationZip: formFields.itemLocationZip.value.trim(),
-            itemLocationCityState: formFields.itemLocationCityState.value.trim(),
-            returnPolicy: formFields.returnPolicy.value.trim(),
         },
     });
 }
@@ -818,7 +707,6 @@ function makePresetEditor() {
         ["Template", "descTmpl"],
         ["SKU", "customLabel"],
         ["Shipping", "shippingPolicy"],
-        ["Payment", "paymentPolicy"],
     ];
 
     const textareas = {};
@@ -940,24 +828,18 @@ function createPanel() {
         ["SKU", "ebay-dflt-sku", "text", "", "customLabel"],
         ["Desc.", "ebay-dflt-tmpl", "text", "reg", "descTmpl"],
         ["Shipping", "ebay-dflt-shipping", "text", "", "shippingPolicy"],
-        ["Payment", "ebay-dflt-payment", "text", "", "paymentPolicy"],
         ["Rate (%)", "ebay-dflt-rate", "text"],
-        ["ZIP", "ebay-dflt-zip", "text"],
-        ["City,St", "ebay-dflt-citystate", "text"],
-        ["Returns", "ebay-dflt-returns", "text"],
     ];
 
     formFields = {
         condition: null, descTmpl: null, customLabel: null,
-        itemPrice: null, shippingPolicy: null, paymentPolicy: null,
+        itemPrice: null, shippingPolicy: null,
         promotedRate: null,
-        itemLocationZip: null, itemLocationCityState: null, returnPolicy: null,
     };
 
     const idMap = [
         "condition", "itemPrice", "customLabel", "descTmpl",
-        "shippingPolicy", "paymentPolicy", "promotedRate",
-        "itemLocationZip", "itemLocationCityState", "returnPolicy",
+        "shippingPolicy", "promotedRate",
     ];
 
     fields.forEach(([label, id, type, placeholder, presetKey], i) => {

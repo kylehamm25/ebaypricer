@@ -17,12 +17,7 @@ const PRESETS = {
         "Calculated: USPS Ground",
         "Calculated: USPS Priority",
     ],
-    paymentPolicy: [
-        "Immediate payment",
-        "Pay within 3 days",
-        "Pay within 5 days",
-        "Pay within 7 days",
-    ],
+
     customLabel: [
         "PSA 10",
         "PSA 9",
@@ -54,7 +49,6 @@ const DEFAULTS = {
     format: "Buy It Now",
     itemPrice: "",
     customLabel: "",
-    paymentPolicy: "Immediate payment",
     shippingPolicy: "Free ebay standard",
     packageWeight: {
         pounds: 0,
@@ -66,7 +60,4 @@ const DEFAULTS = {
         height: 1,
     },
     promotedRate: 2,
-    itemLocationZip: "",
-    itemLocationCityState: "",
-    returnPolicy: "No Return Accepted",
 };

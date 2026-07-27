@@ -39,6 +39,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run all daily eBay pipelines")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview auto_boost_promotion without making changes")
+    parser.add_argument("--force", action="store_true",
+                        help="Force price_active_listings and avg_active_price to run even if snapshots exist for today")
     return parser.parse_args()
 
 
@@ -76,15 +78,17 @@ def main():
         log.info("=== Pipeline finished with errors ===")
         sys.exit(rc)
 
+    price_extra = ["--force"] if args.force else None
     rc = run_script(log, scripts_dir / "price_active_listings.py",
-                    "price_active_listings.py")
+                    "price_active_listings.py", price_extra)
     if rc != 0:
         log.error("price_active_listings.py failed (exit %s)", rc)
         log.info("=== Pipeline finished with errors ===")
         sys.exit(rc)
 
+    avg_extra = ["--force"] if args.force else None
     rc = run_script(log, scripts_dir / "avg_active_price.py",
-                    "avg_active_price.py")
+                    "avg_active_price.py", avg_extra)
     if rc != 0:
         log.error("avg_active_price.py failed (exit %s)", rc)
         log.info("=== Pipeline finished with errors ===")

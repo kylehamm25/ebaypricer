@@ -13,6 +13,7 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
     Returns:
         fees_by_order: {real_order_id: {feeType: amount}}
         item_id_index: {item_id: [(transaction_date_iso, real_order_id), ...]}
+        earnings_by_order: {real_order_id: net_amount}
     """
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -28,6 +29,8 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
     )
 
     fees_by_order: dict = {}
+    debits_by_order: dict = {}
+    earnings_by_order: dict = {}
     item_id_index: dict = {}
     pending_item_fees: dict = {}
     fee_types: set = set()
@@ -81,6 +84,13 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
                         bucket = fees_by_order.setdefault(order_id, {})
                         bucket[fee_type] = bucket.get(fee_type, 0.0) + value
 
+                try:
+                    gross = float(txn.get("totalFeeBasisAmount", {}).get("value", 0.0))
+                except (TypeError, ValueError):
+                    gross = 0.0
+                if gross and order_id:
+                    earnings_by_order[order_id] = gross
+
             elif txn.get("feeType"):
                 fee_type = txn.get("feeType", "UNKNOWN_FEE")
                 try:
@@ -97,6 +107,16 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
                     bucket[fee_type] = bucket.get(fee_type, 0.0) + value
                 elif item_ref:
                     pending_item_fees.setdefault(item_ref, []).append((fee_type, value, tdate))
+
+            elif txn.get("bookingEntry") == "DEBIT":
+                try:
+                    value = abs(float(txn.get("amount", {}).get("value", 0.0)))
+                except (TypeError, ValueError):
+                    value = 0.0
+                refs = txn.get("references", [])
+                order_ref = next((r.get("referenceId") for r in refs if r.get("referenceType") == "ORDER_ID"), None)
+                if order_ref and value:
+                    debits_by_order[order_ref] = debits_by_order.get(order_ref, 0.0) + value
 
         url = data.get("next")
         params = None
@@ -115,7 +135,7 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
                 bucket = fees_by_order.setdefault(real_order_id, {})
                 bucket[fee_type] = bucket.get(fee_type, 0.0) + value
 
-    return fees_by_order, item_id_index
+    return fees_by_order, item_id_index, earnings_by_order, debits_by_order
 
 
 def _closest_by_date(candidates: list, target_date_str: str):
@@ -138,7 +158,7 @@ def _closest_by_date(candidates: list, target_date_str: str):
     return best_id or candidates[0][1]
 
 
-def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: dict) -> None:
+def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: dict, earnings_by_order: dict | None = None, debits_by_order: dict | None = None) -> None:
     if not fees_by_order:
         for row in rows:
             row["Total eBay Fees"] = None
@@ -172,23 +192,30 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
                         if real_order_id:
                             break
 
+        gross = round(earnings_by_order.get(real_order_id, 0.0), 2) if earnings_by_order and real_order_id else None
+
         fees = fees_by_order.get(real_order_id) if real_order_id else None
         total_fees = round(sum(fees.values()), 2) if fees else None
 
-        deducted = False
+        debit = round(debits_by_order.get(real_order_id, 0.0), 2) if debits_by_order and real_order_id else None
+
         for row in group:
             row["Total eBay Fees"] = total_fees
-            order_total = row.get("Order Total") or 0.0
-            shipping = row.get("Shipping") or 0.0
-            if total_fees is not None:
-                earnings = order_total - total_fees
-                if shipping == 0.0 and not deducted:
-                    earnings -= 0.74
-                    deducted = True
-                elif 0.74 < shipping < 5.00:
-                    earnings -= 1.32
-                else:
-                    earnings -= shipping
-                row["Order Earnings"] = round(earnings, 2)
+            if gross is not None:
+                expenses = (total_fees or 0.0) + (debit or 0.0)
+                row["Order Earnings"] = round(gross - expenses, 2)
             else:
-                row["Order Earnings"] = None
+                order_total = row.get("Order Total") or 0.0
+                shipping = row.get("Shipping") or 0.0
+                if total_fees is not None:
+                    expenses = total_fees + (debit or 0.0)
+                    earnings = order_total - expenses
+                    if shipping == 0.0:
+                        earnings -= 0.74
+                    elif 0.74 < shipping < 5.00:
+                        earnings -= 1.32
+                    else:
+                        earnings -= shipping
+                    row["Order Earnings"] = round(earnings, 2)
+                else:
+                    row["Order Earnings"] = None

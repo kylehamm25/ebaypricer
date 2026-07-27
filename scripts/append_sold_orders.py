@@ -129,6 +129,31 @@ def blank_order_level_continuation_rows(rows: list[dict]) -> None:
                 rows[i][col] = None
 
 
+def update_existing_earnings(ws: Worksheet, col_map: dict, earnings_by_order: dict) -> int:
+    earn_col = col_map.get("Order Earnings")
+    oid_col = col_map.get("Order ID")
+    if earn_col is None or oid_col is None:
+        return 0
+    updated = 0
+    for row in ws.iter_rows(min_row=2, values_only=False):
+        oid_cell = row[oid_col]
+        if oid_cell.value is None:
+            continue
+        oid = str(oid_cell.value).strip()
+        api_earn = earnings_by_order.get(oid)
+        if api_earn is None:
+            continue
+        earn_cell = row[earn_col]
+        current = float(earn_cell.value) if earn_cell.value is not None else None
+        if current != round(api_earn, 2):
+            earn_cell.value = round(api_earn, 2)
+            earn_cell.number_format = '#,##0.00'
+            updated += 1
+    if updated:
+        print(f"  Updated {updated} rows with API earnings")
+    return updated
+
+
 def main():
     args = parse_args()
     now = datetime.now(timezone.utc)
@@ -167,8 +192,8 @@ def main():
         sys.exit(0)
 
     fee_start = start_dt - timedelta(days=15)
-    fees_by_order, item_id_index = fetch_finance_fees(token, fee_start, now)
-    merge_fees_into_rows(raw_rows, fees_by_order, item_id_index)
+    fees_by_order, item_id_index, earnings_by_order, debits_by_order = fetch_finance_fees(token, fee_start, now)
+    merge_fees_into_rows(raw_rows, fees_by_order, item_id_index, earnings_by_order, debits_by_order)
 
     enrich_rows(raw_rows)
 
@@ -203,7 +228,8 @@ def main():
     skipped = len(raw_rows) - len(new_orders)
 
     if not new_orders:
-        if new_cols:
+        if new_cols or earnings_by_order:
+            update_existing_earnings(ws, existing_cols, earnings_by_order)
             wb.save(xlsx_path)
         print(f"No new orders")
         sys.exit(0)
@@ -211,6 +237,7 @@ def main():
     blank_order_level_continuation_rows(new_orders)
 
     if os.path.exists(xlsx_path):
+        update_existing_earnings(ws, existing_cols, earnings_by_order)
         start_row = find_last_data_row(ws) + 1
     else:
         start_row = 2

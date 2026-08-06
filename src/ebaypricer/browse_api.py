@@ -15,6 +15,24 @@ log = logging.getLogger(__name__)
 
 OUTLIER_SIGMA = 2.0
 LISTING_LIMIT = 50
+MAX_QUERY_WORDS = 5
+
+# Search configuration — toggle listing formats and graded exclusions here.
+# BUYING_OPTIONS: "FIXED_PRICE" (Buy It Now), "AUCTION", or both "FIXED_PRICE|AUCTION"
+BUYING_OPTIONS = "FIXED_PRICE"
+# EXCLUDED_TERMS: space-separated negative keywords appended to every query
+EXCLUDED_TERMS = "-PSA -BGS -CGC -SGC -graded -slab"
+
+
+def _build_query(query: str) -> str:
+    words = query.split()
+    if len(words) > MAX_QUERY_WORDS:
+        query = " ".join(words[:MAX_QUERY_WORDS])
+    return f"{query} {EXCLUDED_TERMS}".strip()
+
+
+def _buying_options_filter() -> str:
+    return f"buyingOptions:{{{BUYING_OPTIONS}}}"
 
 
 def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
@@ -30,8 +48,8 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     params = {
-        "q": f"{query} -PSA -BGS -CGC -SGC -graded -slab",
-        "filter": f"buyingOptions:{{FIXED_PRICE|AUCTION}},soldDate:[{date_from}]",
+        "q": _build_query(query),
+        "filter": f"{_buying_options_filter()},soldDate:[{date_from}]",
         "sort": "newlyListed",
         "limit": str(LISTING_LIMIT),
     }
@@ -128,6 +146,16 @@ def init_db(path: str) -> sqlite3.Connection:
             weighted_avg    REAL,
             UNIQUE(card_query, snapshot_date)
         );
+
+        CREATE TABLE IF NOT EXISTS listing_positions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id         TEXT,
+            card_query      TEXT,
+            snapshot_date   TEXT,
+            position        INTEGER,
+            search_size     INTEGER,
+            UNIQUE(item_id, snapshot_date)
+        );
     """)
     conn.commit()
     return conn
@@ -201,7 +229,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
     return snapshot
 
 
-def search_active_listings(query: str, limit: int = 5) -> list[dict]:
+def search_active_listings(query: str, limit: int = 5, offset: int = 0) -> list[dict]:
     token = get_ebay_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -210,10 +238,10 @@ def search_active_listings(query: str, limit: int = 5) -> list[dict]:
     }
 
     params = {
-        "q": f"{query} -PSA -BGS -CGC -SGC -graded -slab",
-        "filter": "buyingOptions:{FIXED_PRICE|AUCTION}",
-        "sort": "bestMatch",
+        "q": _build_query(query),
+        "filter": _buying_options_filter(),
         "limit": str(limit),
+        "offset": str(offset),
     }
 
     resp = requests.get(
@@ -226,7 +254,7 @@ def search_active_listings(query: str, limit: int = 5) -> list[dict]:
     if resp.status_code == 429:
         log.warning("Rate limited — sleeping 60s before retry")
         time.sleep(60)
-        return search_active_listings(query, limit)
+        return search_active_listings(query, limit, offset)
 
     resp.raise_for_status()
     data = resp.json()
@@ -321,3 +349,39 @@ def get_today_snapshot(conn: sqlite3.Connection, card_query: str) -> dict | None
         "std_dev":       row[5],
         "weighted_avg":  row[6],
     }
+
+
+def get_today_listing_positions(
+    conn: sqlite3.Connection, card_query: str
+) -> dict[str, tuple[int, int]] | None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = conn.execute(
+        """
+        SELECT item_id, position, search_size
+        FROM listing_positions
+        WHERE card_query = ? AND snapshot_date = ?
+        """,
+        (card_query, today),
+    ).fetchall()
+    if not rows:
+        return None
+    return {item_id: (position, search_size) for item_id, position, search_size in rows}
+
+
+def save_listing_positions(
+    conn: sqlite3.Connection,
+    card_query: str,
+    positions: dict[str, int],
+    search_size: int,
+) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    for item_id, position in positions.items():
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO listing_positions
+                (item_id, card_query, snapshot_date, position, search_size)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (item_id, card_query, today, position, search_size),
+        )
+    conn.commit()

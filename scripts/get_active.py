@@ -93,7 +93,7 @@ def main():
 
     xlsx_path = args.output
 
-    PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked", "Active Avg (Top 5)", "Price Accuracy"]
+    PRICE_COLS_TO_SAVE = ["Recent Sold Avg", "Price vs Sold Avg", "Recent Sold Count", "Last Checked", "Active Avg (Top 5)", "Price Accuracy", "Search Position"]
 
     ws = None
     existing_prices: dict[str, dict[str, object]] = {}

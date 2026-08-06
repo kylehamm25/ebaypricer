@@ -154,6 +154,83 @@ def update_existing_earnings(ws: Worksheet, col_map: dict, earnings_by_order: di
     return updated
 
 
+def append_rows_to_workbook(
+    raw_rows: list[dict],
+    xlsx_path: str,
+    start_dt: datetime,
+    token: str,
+) -> int:
+    fee_start = start_dt - timedelta(days=15)
+    now = datetime.now(timezone.utc)
+    fees_by_order, item_id_index, earnings_by_order, debits_by_order = fetch_finance_fees(token, fee_start, now)
+    merge_fees_into_rows(raw_rows, fees_by_order, item_id_index, earnings_by_order, debits_by_order)
+
+    enrich_rows(raw_rows)
+
+    raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
+    headers = list(raw_rows[0].keys())
+
+    existing_keys: set = set()
+    fetched_keys = {order_key(r) for r in raw_rows}
+
+    new_cols: list[str] = []
+    existing_cols: dict[str, int] = {}
+    if os.path.exists(xlsx_path):
+        wb = load_workbook(xlsx_path)
+        ws = wb["Sold Orders"]
+        _strip_deprecated_cols(ws)
+        _deduplicate_headers(ws)
+        existing_cols = read_header_cols(ws)
+        new_cols = [h for h in headers if h not in existing_cols]
+        if new_cols:
+            next_col = max(existing_cols.values()) + 2 if existing_cols else 1
+            for h in new_cols:
+                cell = ws.cell(row=1, column=next_col, value=h)
+                cell.fill = HEADER_FILL
+                cell.font = HEADER_FONT
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                next_col += 1
+        existing_keys = get_existing_keys(ws)
+    else:
+        wb, ws = create_new_workbook(headers)
+        existing_cols = read_header_cols(ws)
+
+    new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
+    skipped = len(raw_rows) - len(new_orders)
+
+    if not new_orders:
+        if new_cols or earnings_by_order:
+            update_existing_earnings(ws, existing_cols, earnings_by_order)
+            wb.save(xlsx_path)
+        print(f"No new orders")
+        return 0
+
+    blank_order_level_continuation_rows(new_orders)
+
+    if os.path.exists(xlsx_path):
+        update_existing_earnings(ws, existing_cols, earnings_by_order)
+        start_row = find_last_data_row(ws) + 1
+    else:
+        start_row = 2
+
+    for row_idx, row in enumerate(new_orders, start_row):
+        for h, val in row.items():
+            col_idx = read_header_cols(ws).get(h)
+            if col_idx is None:
+                continue
+            cell = ws.cell(row=row_idx, column=col_idx + 1, value=val)
+            cell.font = DATA_FONT
+            cell.alignment = Alignment(vertical="center")
+            if h in CURRENCY_COLS and val is not None:
+                cell.number_format = '#,##0.00'
+            elif h in INT_COLS:
+                cell.number_format = '0'
+
+    wb.save(xlsx_path)
+    print(f"Appended {len(new_orders)} ({skipped} dupes)\n")
+    return len(new_orders)
+
+
 def main():
     args = parse_args()
     now = datetime.now(timezone.utc)
@@ -191,72 +268,7 @@ def main():
         print("No orders found")
         sys.exit(0)
 
-    fee_start = start_dt - timedelta(days=15)
-    fees_by_order, item_id_index, earnings_by_order, debits_by_order = fetch_finance_fees(token, fee_start, now)
-    merge_fees_into_rows(raw_rows, fees_by_order, item_id_index, earnings_by_order, debits_by_order)
-
-    enrich_rows(raw_rows)
-
-    raw_rows.sort(key=lambda r: (r["Sale Date"], r.get("Buyer") or ""))
-    headers = list(raw_rows[0].keys())
-
-    xlsx_path = args.output
-    existing_keys: set = set()
-    fetched_keys = {order_key(r) for r in raw_rows}
-
-    new_cols: list[str] = []
-    if os.path.exists(xlsx_path):
-        wb = load_workbook(xlsx_path)
-        ws = wb["Sold Orders"]
-        _strip_deprecated_cols(ws)
-        _deduplicate_headers(ws)
-        existing_cols = read_header_cols(ws)
-        new_cols = [h for h in headers if h not in existing_cols]
-        if new_cols:
-            next_col = max(existing_cols.values()) + 2 if existing_cols else 1
-            for h in new_cols:
-                cell = ws.cell(row=1, column=next_col, value=h)
-                cell.fill = HEADER_FILL
-                cell.font = HEADER_FONT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-                next_col += 1
-        existing_keys = get_existing_keys(ws)
-    else:
-        wb, ws = create_new_workbook(headers)
-
-    new_orders = [r for r in raw_rows if order_key(r) not in existing_keys]
-    skipped = len(raw_rows) - len(new_orders)
-
-    if not new_orders:
-        if new_cols or earnings_by_order:
-            update_existing_earnings(ws, existing_cols, earnings_by_order)
-            wb.save(xlsx_path)
-        print(f"No new orders")
-        sys.exit(0)
-
-    blank_order_level_continuation_rows(new_orders)
-
-    if os.path.exists(xlsx_path):
-        update_existing_earnings(ws, existing_cols, earnings_by_order)
-        start_row = find_last_data_row(ws) + 1
-    else:
-        start_row = 2
-
-    for row_idx, row in enumerate(new_orders, start_row):
-        for h, val in row.items():
-            col_idx = read_header_cols(ws).get(h)
-            if col_idx is None:
-                continue
-            cell = ws.cell(row=row_idx, column=col_idx + 1, value=val)
-            cell.font = DATA_FONT
-            cell.alignment = Alignment(vertical="center")
-            if h in CURRENCY_COLS and val is not None:
-                cell.number_format = '#,##0.00'
-            elif h in INT_COLS:
-                cell.number_format = '0'
-
-    wb.save(xlsx_path)
-    print(f"Appended {len(new_orders)} ({skipped} dupes)\n")
+    append_rows_to_workbook(raw_rows, args.output, start_dt, token)
 
 
 if __name__ == "__main__":

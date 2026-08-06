@@ -200,6 +200,13 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
         debit = round(debits_by_order.get(real_order_id, 0.0), 2) if debits_by_order and real_order_id else None
 
         for row in group:
+            current_oid = str(row.get("Order ID") or "")
+            if (
+                real_order_id
+                and real_order_id != current_oid
+                and current_oid.startswith(str(row.get("Item ID") or ""))
+            ):
+                row["Order ID"] = real_order_id
             row["Total eBay Fees"] = total_fees
             if gross is not None:
                 expenses = (total_fees or 0.0) + (debit or 0.0)

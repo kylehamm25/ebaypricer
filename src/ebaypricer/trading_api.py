@@ -117,7 +117,7 @@ def _parse_order(order_el, rows: list) -> None:
             shipping = calc
 
     for txn in order_el.findall(f".//{{{NS}}}Transaction"):
-        txn_created = created or _t(txn, "CreatedDate")[:10]
+        txn_created = _t(txn, "CreatedDate")[:10] or created
         txn_buyer = buyer or (txn.findtext(f".//{{{NS}}}Buyer/{{{NS}}}UserID") or "")
 
         rows.append(_build_row(

@@ -16,6 +16,8 @@ from ebaypricer.browse_api import (
     get_today_snapshot,
     init_db,
     parse_item,
+    save_listing_positions,
+    search_active_listings,
     search_sold_listings,
 )
 from ebaypricer.excel import HEADER_FILL, HEADER_FONT, DATA_FONT
@@ -36,6 +38,9 @@ PRICE_COLUMNS = [
     ("Recent Sold Count",  '0'),
     ("Last Checked",      None),
 ]
+
+SEARCH_POSITION_COL = "Search Position"
+MAX_REPORTED_POSITION = 50
 
 
 def parse_args():
@@ -183,6 +188,62 @@ def fetch_price_for_card(conn, card_name: str) -> dict | None:
     return snapshot
 
 
+def _normalize_item_id(raw_id: str) -> str:
+    return raw_id.split("|")[1] if raw_id.startswith("v1|") and len(raw_id.split("|")) > 1 else raw_id
+
+
+GENERIC_TITLE_WORDS = {
+    "pokemon", "tcg", "card", "near", "mint", "promo", "holo", "holofoil",
+    "english", "japanese", "scarlet", "violet", "black", "star", "sv",
+    "nm", "lp", "mp", "swirl", "swsh", "sealed", "lot", "pack", "and",
+}
+
+
+def _candidate_queries(title: str, card: str) -> list[str]:
+    queries: list[str] = []
+    if card:
+        queries.append(" ".join(card.split()[:5]))
+    words = title.split()
+    if words:
+        q = " ".join(words[:5])
+        if q not in queries:
+            queries.append(q)
+        distinct = [w for w in words if w.lower().strip("'()") not in GENERIC_TITLE_WORDS]
+        if distinct:
+            q2 = " ".join(distinct[:5])
+            if q2 not in queries:
+                queries.append(q2)
+    return queries
+
+
+def fetch_position_for_item(
+    conn, item_id: str, title: str, card: str
+) -> int | None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    row = conn.execute(
+        "SELECT position FROM listing_positions WHERE item_id = ? AND snapshot_date = ?",
+        (item_id, today),
+    ).fetchone()
+    if row:
+        pos = row[0] or 0
+        return min(pos, MAX_REPORTED_POSITION) or MAX_REPORTED_POSITION
+
+    for query in _candidate_queries(title, card):
+        try:
+            items = search_active_listings(query, limit=MAX_REPORTED_POSITION)
+        except requests.HTTPError as e:
+            log.error("eBay API error for '%s': %s", query, e)
+            continue
+        for idx, item in enumerate(items):
+            if _normalize_item_id(str(item.get("itemId", "")).strip()) == item_id:
+                position = idx + 1
+                save_listing_positions(conn, card or title, {item_id: position}, len(items))
+                return position
+
+    save_listing_positions(conn, card or title, {item_id: MAX_REPORTED_POSITION}, 0)
+    return MAX_REPORTED_POSITION
+
+
 def remove_orphan_columns(ws, headers: list[str]) -> list[str]:
     price_names = {name for name, _ in PRICE_COLUMNS}
     to_remove = []
@@ -207,7 +268,7 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
 
     next_col = last_data_col + 1
     price_col_map = {}
-    for col_name, _ in PRICE_COLUMNS:
+    for col_name, _ in PRICE_COLUMNS + [(SEARCH_POSITION_COL, None)]:
         if col_name in col_map:
             price_col_map[col_name] = col_map[col_name]
         else:
@@ -222,9 +283,25 @@ def ensure_price_columns(ws, headers: list[str]) -> dict[str, int]:
 
 
 def write_price_data(ws, ws_rows: list[dict], headers: list[str],
-                     price_col_map: dict[str, int], card_prices: dict[str, dict | None]) -> None:
+                     price_col_map: dict[str, int], card_prices: dict[str, dict | None],
+                     card_positions: dict[str, dict[str, int]]) -> None:
     for row in ws_rows:
         row_idx = row["_row"]
+        item_id = str(row.get("Item ID") or "").strip()
+
+        pos_idx = price_col_map.get(SEARCH_POSITION_COL)
+        if pos_idx is not None and item_id:
+            pos_cell = ws.cell(row=row_idx, column=pos_idx + 1)
+            pos_cell.font = DATA_FONT
+            pos_cell.alignment = Alignment(horizontal="left", vertical="center")
+            for positions in card_positions.values():
+                if item_id in positions:
+                    val = positions[item_id]
+                    pos_cell.value = min(val, MAX_REPORTED_POSITION) if val is not None else None
+                    break
+            else:
+                pos_cell.value = None
+
         card = row.get("Card")
         if not card or not str(card).strip():
             continue
@@ -313,15 +390,37 @@ def main():
     conn = init_db(db_path)
     try:
         card_prices: dict[str, dict | None] = {}
+        card_positions: dict[str, dict[str, int]] = {}
         found = 0
-        for card in unique_cards:
-            snapshot = fetch_price_for_card(conn, card)
+        card_keys = set(unique_cards)
+        if any(not str(row.get("Card") or "").strip() for row in ws_rows):
+            card_keys.add("")
+        for card in card_keys:
+            snapshot = fetch_price_for_card(conn, card) if card else None
             card_prices[card] = snapshot
             if snapshot:
                 found += 1
 
+            item_rows = [
+                {
+                    "Item ID": row.get("Item ID"),
+                    "Title": row.get("Title") or row.get("Item Title"),
+                }
+                for row in ws_rows
+                if str(row.get("Card") or "").strip() == card
+            ]
+            if item_rows:
+                card_positions[card] = {
+                    str(r["Item ID"] or "").strip(): fetch_position_for_item(
+                        conn, str(r["Item ID"] or "").strip(),
+                        str(r["Title"] or "").strip(), card,
+                    )
+                    for r in item_rows
+                    if str(r.get("Item ID") or "").strip()
+                }
+
         price_col_map = ensure_price_columns(ws, headers)
-        write_price_data(ws, ws_rows, headers, price_col_map, card_prices)
+        write_price_data(ws, ws_rows, headers, price_col_map, card_prices, card_positions)
 
         wb.save(xlsx_path)
         print(f"\n  {found}/{len(unique_cards)} cards had sold data")

@@ -1,13 +1,36 @@
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from dashboard.backend.routers import dashboard, sold, active, pricing, pipeline, promotion
-from dashboard.backend.services.excel_sync import sync_excel
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
-app = FastAPI(title="EbayPrice Dashboard", version="1.0.0")
+from dashboard.backend.config import ALLOWED_ORIGINS, DEFAULT_USER_ID, FRONTEND_DIST
+from dashboard.backend.database import close_pool
+from dashboard.backend.routers import dashboard, sold, active, pricing, pipeline, promotion, ebay
+from dashboard.backend.services.excel_sync import sync_excel
+from dashboard.backend.services.ebay_data import has_connections, start_scheduler
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        if has_connections():
+            start_scheduler()
+        result = sync_excel()
+        print(f"Excel sync on startup: {result}")
+    except Exception as e:
+        print(f"Startup sync skipped: {e}")
+    yield
+    close_pool()
+
+
+app = FastAPI(title="EbayPrice Dashboard", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -19,15 +42,7 @@ app.include_router(active.router)
 app.include_router(pricing.router)
 app.include_router(pipeline.router)
 app.include_router(promotion.router)
-
-
-@app.on_event("startup")
-def on_startup():
-    try:
-        result = sync_excel()
-        print(f"Excel sync on startup: {result}")
-    except Exception as e:
-        print(f"Excel sync skipped on startup: {e}")
+app.include_router(ebay.router)
 
 
 @app.get("/api/v1/pipeline/sync-excel")
@@ -37,4 +52,22 @@ def trigger_excel_sync():
 
 @app.get("/")
 def root():
+    if _index and os.path.isfile(_index):
+        return FileResponse(_index)
     return {"app": "EbayPrice Dashboard", "status": "running"}
+
+
+# Serve the built frontend (single host deployment)
+_index = None
+_assets = os.path.join(FRONTEND_DIST, "assets")
+
+if os.path.isdir(FRONTEND_DIST):
+    _index = os.path.join(FRONTEND_DIST, "index.html")
+    app.mount("/assets", StaticFiles(directory=_assets), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        file_path = os.path.join(FRONTEND_DIST, full_path)
+        if full_path and os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(_index)

@@ -1,21 +1,33 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, ShoppingCart, Package,
+  LayoutDashboard, ShoppingCart, Package, LogOut, Settings, Sun, Moon,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
+import { useAuth } from '../../lib/auth-context'
+import { useTheme } from '../../lib/theme'
 
 const links = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/sold', label: 'Sold Orders', icon: ShoppingCart },
   { to: '/active', label: 'Active Listings', icon: Package },
+  { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
 export function Sidebar() {
+  const { signOut } = useAuth()
+  const navigate = useNavigate()
+  const { theme, toggle } = useTheme()
+
+  const handleSignOut = async () => {
+    await signOut()
+    navigate('/login', { replace: true })
+  }
+
   return (
-    <aside className="w-56 bg-slate-900 text-white flex flex-col h-screen fixed left-0 top-0">
-      <div className="p-4 border-b border-slate-700">
+    <aside className="w-56 bg-black text-white flex flex-col h-screen fixed left-0 top-0">
+      <div className="p-4 border-b border-neutral-800">
         <h1 className="text-lg font-bold">EbayPrice</h1>
-        <p className="text-xs text-slate-400">Dashboard</p>
+        <p className="text-xs text-neutral-500">Dashboard</p>
       </div>
       <nav className="flex-1 p-2 space-y-1">
         {links.map(({ to, label, icon: Icon }) => (
@@ -26,8 +38,8 @@ export function Sidebar() {
               cn(
                 'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',
                 isActive
-                  ? 'bg-slate-700 text-white font-medium'
-                  : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                  ? 'bg-neutral-800 text-white font-medium'
+                  : 'text-neutral-400 hover:bg-neutral-900 hover:text-white'
               )
             }
           >
@@ -36,6 +48,23 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      <div className="p-2 border-t border-neutral-800">
+        <button
+          onClick={toggle}
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-md text-sm text-neutral-400 hover:bg-neutral-900 hover:text-white transition-colors"
+          title="Toggle dark mode"
+        >
+          {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+          {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+        </button>
+        <button
+          onClick={handleSignOut}
+          className="flex items-center gap-3 w-full px-3 py-2 rounded-md text-sm text-neutral-400 hover:bg-neutral-900 hover:text-white transition-colors"
+        >
+          <LogOut size={18} />
+          Sign out
+        </button>
+      </div>
     </aside>
   )
 }

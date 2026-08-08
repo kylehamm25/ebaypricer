@@ -9,6 +9,7 @@ class PipelineStatus(BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     exit_code: Optional[int] = None
+    last_run_at: Optional[str] = None
 
 
 class RunHistory(BaseModel):

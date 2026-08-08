@@ -1,7 +1,39 @@
 from fastapi import APIRouter, Query
+
 from dashboard.backend.database import get_db
 
 router = APIRouter(prefix="/api/v1/pricing", tags=["pricing"])
+
+_GENERIC_WORDS = {
+    "pokemon", "promo", "promos", "english", "card", "cards", "tcg",
+    "near", "mint", "black", "star", "white", "holo", "common", "uncommon",
+}
+
+
+def _fuzzy_card_query(db, card_name: str) -> str | None:
+    words = [
+        w.lower()
+        for w in card_name.split()
+        if len(w) > 3 and w.isalnum() and not w.isdigit() and w.lower() not in _GENERIC_WORDS
+    ]
+    if not words:
+        return None
+    rows = db.execute("SELECT DISTINCT card_query FROM price_snapshots").fetchall()
+    best, best_score = None, 0
+    for r in rows:
+        q = (r["card_query"] or "").lower()
+        score = sum(1 for w in words if w in q)
+        if score > best_score:
+            best, best_score = r["card_query"], score
+    return best if best_score else None
+
+
+def _card_has_data(db, q: str) -> bool:
+    return bool(
+        db.execute("SELECT 1 FROM price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
+        or db.execute("SELECT 1 FROM active_price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
+        or db.execute("SELECT 1 FROM sold_listings WHERE card_query = %s LIMIT 1", (q,)).fetchone()
+    )
 
 
 @router.get("/comparisons")
@@ -25,7 +57,7 @@ def get_price_comparisons():
                       aps.sample_size AS active_sample
                FROM price_snapshots ps
                JOIN active_price_snapshots aps ON ps.card_query = aps.card_query
-               WHERE ps.snapshot_date = ? AND aps.snapshot_date = ?
+               WHERE ps.snapshot_date = %s AND aps.snapshot_date = %s
                ORDER BY ps.card_query""",
             (latest_sold, latest_active),
         ).fetchall()
@@ -48,15 +80,15 @@ def get_price_snapshots(card: str = Query(...), days: int = 90):
     with get_db() as db:
         sold_rows = db.execute(
             """SELECT * FROM price_snapshots
-               WHERE card_query = ? AND snapshot_date >= DATE('now', ? || ' days')
+               WHERE card_query = %s AND snapshot_date >= CURRENT_DATE - make_interval(days => %s)
                ORDER BY snapshot_date DESC LIMIT 30""",
-            (card, f"-{days}"),
+            (card, days),
         ).fetchall()
         active_rows = db.execute(
             """SELECT * FROM active_price_snapshots
-               WHERE card_query = ? AND snapshot_date >= DATE('now', ? || ' days')
+               WHERE card_query = %s AND snapshot_date >= CURRENT_DATE - make_interval(days => %s)
                ORDER BY snapshot_date DESC LIMIT 30""",
-            (card, f"-{days}"),
+            (card, days),
         ).fetchall()
     return {
         "card_query": card,
@@ -68,20 +100,29 @@ def get_price_snapshots(card: str = Query(...), days: int = 90):
 @router.get("/cards/{card_name}")
 def get_card_price_detail(card_name: str):
     with get_db() as db:
+        card_name = card_name.strip()
+        used = card_name
+        matched_query = None
+        if not _card_has_data(db, used):
+            alt = _fuzzy_card_query(db, used)
+            if alt:
+                used = alt
+                matched_query = alt
         sold_snaps = db.execute(
-            "SELECT * FROM price_snapshots WHERE card_query = ? ORDER BY snapshot_date DESC LIMIT 30",
-            (card_name,),
+            "SELECT * FROM price_snapshots WHERE card_query = %s ORDER BY snapshot_date DESC LIMIT 30",
+            (used,),
         ).fetchall()
         active_snaps = db.execute(
-            "SELECT * FROM active_price_snapshots WHERE card_query = ? ORDER BY snapshot_date DESC LIMIT 30",
-            (card_name,),
+            "SELECT * FROM active_price_snapshots WHERE card_query = %s ORDER BY snapshot_date DESC LIMIT 30",
+            (used,),
         ).fetchall()
         recent_sold = db.execute(
-            "SELECT * FROM sold_listings WHERE card_query = ? ORDER BY sold_date DESC LIMIT 50",
-            (card_name,),
+            "SELECT * FROM sold_listings WHERE card_query = %s ORDER BY sold_date DESC LIMIT 10",
+            (used,),
         ).fetchall()
     return {
-        "card_query": card_name,
+        "card_query": used,
+        "matched_query": matched_query,
         "price_snapshots": [dict(r) for r in sold_snaps],
         "active_snapshots": [dict(r) for r in active_snaps],
         "recent_sold": [dict(r) for r in recent_sold],

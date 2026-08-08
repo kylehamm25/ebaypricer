@@ -13,7 +13,7 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
     Returns:
         fees_by_order: {real_order_id: {feeType: amount}}
         item_id_index: {item_id: [(transaction_date_iso, real_order_id), ...]}
-        earnings_by_order: {real_order_id: net_amount}
+        earnings_by_order: {real_order_id: gross proceeds (totalFeeBasisAmount, fees NOT subtracted)}
     """
     headers = {
         "Authorization": f"Bearer {access_token}",

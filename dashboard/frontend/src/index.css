@@ -1,1 +1,24 @@
 @import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+.dark .recharts-cartesian-axis-tick text {
+  fill: #a3a3a3;
+}
+
+.dark .recharts-cartesian-grid line {
+  stroke: #404040;
+}
+
+.dark .recharts-default-tooltip {
+  background-color: #262626 !important;
+  border-color: #525252 !important;
+}
+
+.dark .recharts-default-tooltip .recharts-tooltip-label {
+  color: #f5f5f5;
+}
+
+.dark .recharts-default-tooltip .recharts-tooltip-item {
+  color: #a3a3a3 !important;
+}

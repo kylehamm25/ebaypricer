@@ -10,7 +10,7 @@ export function StatusBadge({ status }: StatusBadgeProps) {
     <span
       className={cn(
         'inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium',
-        isRunning ? 'bg-amber-100 text-amber-800' : 'bg-green-100 text-green-800'
+        isRunning ? 'bg-amber-100 text-amber-800 dark:bg-amber-500/20 dark:text-amber-300' : 'bg-green-100 text-green-800 dark:bg-green-500/20 dark:text-green-300'
       )}
     >
       <span

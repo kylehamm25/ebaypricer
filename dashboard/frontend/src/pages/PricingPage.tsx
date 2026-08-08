@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
+import { TableSkeleton } from '../components/shared/Skeleton'
 import { formatCurrency } from '../lib/utils'
 import type { PriceComparison, CardPriceDetail } from '../types'
 
@@ -33,12 +34,21 @@ export function PricingPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900">Pricing Analytics</h1>
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Pricing Analytics</h1>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2">
           {isLoading ? (
-            <div className="text-sm text-slate-400">Loading...</div>
+            <TableSkeleton
+              rows={8}
+              columns={[
+                { header: 'Card', width: 'w-48' },
+                { header: 'Sold Avg', width: 'w-16' },
+                { header: 'Active Avg', width: 'w-16' },
+                { header: 'Spread', width: 'w-14' },
+                { header: '', width: 'w-12' },
+              ]}
+            />
           ) : comparisons && comparisons.length > 0 ? (
             <DataTable
               columns={[
@@ -60,7 +70,7 @@ export function PricingPage() {
                     const v = r.spread as number | null
                     if (v == null) return '—'
                     return (
-                      <span className={v > 0 ? 'text-green-600' : v < 0 ? 'text-red-600' : ''}>
+                      <span className={v > 0 ? 'text-green-600 dark:text-green-400' : v < 0 ? 'text-red-600 dark:text-red-400' : ''}>
                         {formatCurrency(v)}
                       </span>
                     )
@@ -82,18 +92,17 @@ export function PricingPage() {
               data={comparisons as unknown as Record<string, unknown>[]}
             />
           ) : (
-            <div className="text-sm text-slate-400">No price comparison data available.</div>
-          )}
+            <div className="text-sm text-slate-400">No price comparison data available.</div>          )}
         </div>
 
         {selectedCard && (
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
             <div className="flex justify-between items-center mb-3">
-              <h2 className="text-sm font-semibold text-slate-700 truncate max-w-[200px]">
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 truncate max-w-[200px]">
                 {selectedCard}
               </h2>
               <button
-                className="text-xs text-slate-400 hover:text-slate-600"
+                className="text-xs text-slate-400 hover:text-slate-600 dark:hover:text-neutral-300"
                 onClick={() => setSelectedCard(null)}
               >
                 Close

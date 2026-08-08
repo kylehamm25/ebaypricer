@@ -4,6 +4,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recha
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
+import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { PaginatedResponse, SoldSummary, SoldTrend } from '../types'
 
@@ -38,7 +39,7 @@ export function SoldOrdersPage() {
   const { data: listData, isLoading } = useQuery({
     queryKey: ['sold-list', page, cardFilter],
     queryFn: () =>
-      api<PaginatedResponse<Record<string, string>>>(
+      api<PaginatedResponse<SoldOrderItem>>(
         `/sold/list?page=${page}&per_page=50${cardFilter ? `&card=${encodeURIComponent(cardFilter)}` : ''}`
       ),
   })
@@ -55,14 +56,14 @@ export function SoldOrdersPage() {
 
   const totalPages = listData ? Math.ceil(listData.total / listData.per_page) : 0
 
-  const trendData = trends ? trends.slice().reverse() : []
+  const trendData = trends ?? []
   const tickInterval = getTickInterval(trendData.length, 10)
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900">Sold Orders</h1>
+      <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Sold Orders</h1>
 
-      {summary && (
+      {summary ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
           <KpiCard title="Total Items Sold" value={formatInt(summary.total_items)} />
           <KpiCard title="Total Revenue" value={formatCurrency(summary.total_revenue)} />
@@ -70,11 +71,15 @@ export function SoldOrdersPage() {
           <KpiCard title="eBay Fees" value={formatCurrency(summary.total_fees)} />
           <KpiCard title="Order Earnings" value={formatCurrency(summary.total_earnings)} />
         </div>
+      ) : (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+          {Array.from({ length: 5 }).map((_, i) => <KpiSkeleton key={i} />)}
+        </div>
       )}
 
-      {trends && trends.length > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-          <h2 className="text-sm font-semibold text-slate-700 mb-3">Daily Revenue Trend</h2>
+      {trends && trends.length > 0 ? (
+        <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+          <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Daily Revenue Trend</h2>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={trendData}>
               <XAxis
@@ -92,13 +97,15 @@ export function SoldOrdersPage() {
             </BarChart>
           </ResponsiveContainer>
         </div>
+      ) : (
+        <ChartSkeleton height={240} />
       )}
 
       <div className="flex gap-2 items-center">
         <input
           type="text"
           placeholder="Filter by card name..."
-          className="border border-slate-300 rounded-lg px-3 py-1.5 text-sm w-64"
+          className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm w-64"
           value={cardFilter}
           onChange={(e) => { setCardFilter(e.target.value); setPage(1) }}
         />
@@ -108,7 +115,18 @@ export function SoldOrdersPage() {
       </div>
 
       {isLoading ? (
-        <div className="text-sm text-slate-400">Loading...</div>
+        <TableSkeleton
+          rows={8}
+          columns={[
+            { header: '', width: 'w-10' },
+            { header: 'Date', width: 'w-20' },
+            { header: 'Title', width: 'w-44' },
+            { header: 'Price', width: 'w-16' },
+            { header: 'Shipping', width: 'w-16' },
+            { header: 'Fees', width: 'w-16' },
+            { header: 'Earnings', width: 'w-16' },
+          ]}
+        />
       ) : listData ? (
         <>
           <DataTable<SoldOrderItem>
@@ -131,7 +149,7 @@ export function SoldOrdersPage() {
             >
               Previous
             </button>
-            <span className="text-sm text-slate-500">
+            <span className="text-sm text-slate-500 dark:text-neutral-400">
               Page {page} of {totalPages}
             </span>
             <button

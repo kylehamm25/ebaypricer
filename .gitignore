@@ -14,3 +14,4 @@ src/*.egg-info/
 *.log
 *.html
 /.opencode
+node_modules

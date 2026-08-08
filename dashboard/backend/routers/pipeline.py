@@ -1,11 +1,9 @@
 import os
-import sys
-import subprocess
 import threading
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from dashboard.backend.config import LOG_PATH
-from ebaypricer.paths import PROJECT_ROOT
+from dashboard.backend.services.pipeline_runner import run_pipeline_once
 
 router = APIRouter(prefix="/api/v1/pipeline", tags=["pipeline"])
 
@@ -20,7 +18,17 @@ _pipeline_state = {
 
 @router.get("/status")
 def get_pipeline_status():
-    return _pipeline_state
+    state = dict(_pipeline_state)
+    if state["finished_at"] is not None:
+        state["last_run_at"] = state["finished_at"]
+    else:
+        try:
+            state["last_run_at"] = datetime.fromtimestamp(
+                os.path.getmtime(LOG_PATH), tz=timezone.utc
+            ).isoformat()
+        except OSError:
+            state["last_run_at"] = None
+    return state
 
 
 @router.get("/logs")
@@ -44,13 +52,8 @@ def run_pipeline():
         _pipeline_state["finished_at"] = None
         _pipeline_state["exit_code"] = None
         try:
-            result = subprocess.run(
-                [sys.executable, "scripts/main.py"],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-            )
-            _pipeline_state["exit_code"] = result.returncode
+            result = run_pipeline_once()
+            _pipeline_state["exit_code"] = result.get("exit_code")
         except Exception:
             _pipeline_state["exit_code"] = -1
         finally:

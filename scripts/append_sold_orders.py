@@ -11,7 +11,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_sold_orders
-from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
+from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows, _closest_by_date
 from ebaypricer.cards import enrich_rows
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT,
@@ -129,28 +129,124 @@ def blank_order_level_continuation_rows(rows: list[dict]) -> None:
                 rows[i][col] = None
 
 
-def update_existing_earnings(ws: Worksheet, col_map: dict, earnings_by_order: dict) -> int:
+def _resolve_real_order_id(
+    trading_oid: str,
+    iid: str,
+    sale_date: str,
+    fees_by_order: dict,
+    item_id_index: dict,
+) -> str | None:
+    if trading_oid in fees_by_order:
+        return trading_oid
+    if iid and sale_date and iid in item_id_index:
+        return _closest_by_date(item_id_index[iid], sale_date)
+    if "-" in trading_oid and sale_date:
+        liid = trading_oid.split("-", 1)[1]
+        if liid in item_id_index:
+            return _closest_by_date(item_id_index[liid], sale_date)
+    return None
+
+
+def update_existing_earnings(
+    ws: Worksheet,
+    col_map: dict,
+    earnings_by_order: dict,
+    fees_by_order: dict,
+    debits_by_order: dict | None = None,
+    item_id_index: dict | None = None,
+) -> int:
     earn_col = col_map.get("Order Earnings")
     oid_col = col_map.get("Order ID")
+    iid_col = col_map.get("Item ID")
+    date_col = col_map.get("Sale Date")
+    fees_col = col_map.get("Total eBay Fees")
+    price_col = col_map.get("Item Price")
     if earn_col is None or oid_col is None:
         return 0
     updated = 0
+
+    resolved: list[tuple] = []  # (row, real_oid)
     for row in ws.iter_rows(min_row=2, values_only=False):
         oid_cell = row[oid_col]
         if oid_cell.value is None:
             continue
         oid = str(oid_cell.value).strip()
-        api_earn = earnings_by_order.get(oid)
-        if api_earn is None:
+        iid = str(row[iid_col].value).strip() if iid_col is not None and row[iid_col].value else ""
+        real_oid = _resolve_real_order_id(
+            oid,
+            iid,
+            str(row[date_col].value).strip() if date_col is not None and row[date_col].value else "",
+            fees_by_order,
+            item_id_index or {},
+        )
+        if real_oid is None:
             continue
-        earn_cell = row[earn_col]
-        current = float(earn_cell.value) if earn_cell.value is not None else None
-        if current != round(api_earn, 2):
-            earn_cell.value = round(api_earn, 2)
-            earn_cell.number_format = '#,##0.00'
+        # Canonicalize line-item order ids (e.g. "<itemid>-<lineitem>") to the real order id
+        if real_oid != oid and iid and oid.startswith(iid):
+            oid_cell.value = real_oid
             updated += 1
+        resolved.append((row, real_oid))
+
+    def _price(row: tuple) -> float:
+        try:
+            return float(row[price_col].value or 0) if price_col is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    groups: dict[str, list] = {}
+    for row, real_oid in resolved:
+        groups.setdefault(real_oid, []).append(row)
+
+    for real_oid, group in groups.items():
+        gross = earnings_by_order.get(real_oid)
+        if gross is None:
+            continue
+        fees = fees_by_order.get(real_oid)
+        total_fees = sum(fees.values()) if fees else 0.0
+        debit = (debits_by_order or {}).get(real_oid, 0.0)
+        api_earn = round(gross - total_fees - debit, 2)
+
+        if len(group) > 1:
+            # Multi-line order: order-level values belong only on the primary line
+            primary = max(group, key=_price)
+            for row in group:
+                if row is primary:
+                    earn_cell = row[earn_col]
+                    current = float(earn_cell.value) if earn_cell.value is not None else None
+                    if current != api_earn:
+                        earn_cell.value = api_earn
+                        earn_cell.number_format = '#,##0.00'
+                        updated += 1
+                    if fees_col is not None and total_fees:
+                        fees_cell = row[fees_col]
+                        current_fee = float(fees_cell.value) if fees_cell.value is not None else None
+                        if current_fee is not None and abs(current_fee - total_fees) > 0.005:
+                            fees_cell.value = round(total_fees, 2)
+                            fees_cell.number_format = '#,##0.00'
+                            updated += 1
+                else:
+                    for name in ORDER_LEVEL_COLS:
+                        col = col_map.get(name)
+                        if col is not None and row[col].value is not None:
+                            row[col].value = None
+                            updated += 1
+        else:
+            row = group[0]
+            earn_cell = row[earn_col]
+            current = float(earn_cell.value) if earn_cell.value is not None else None
+            if current != api_earn:
+                earn_cell.value = api_earn
+                earn_cell.number_format = '#,##0.00'
+                updated += 1
+            if fees_col is not None and total_fees:
+                fees_cell = row[fees_col]
+                current_fee = float(fees_cell.value) if fees_cell.value is not None else None
+                if current_fee is not None and abs(current_fee - total_fees) > 0.005:
+                    fees_cell.value = round(total_fees, 2)
+                    fees_cell.number_format = '#,##0.00'
+                    updated += 1
     if updated:
-        print(f"  Updated {updated} rows with API earnings")
+        print(f"  Updated {updated} cells with API earnings/fees")
     return updated
 
 
@@ -200,7 +296,7 @@ def append_rows_to_workbook(
 
     if not new_orders:
         if new_cols or earnings_by_order:
-            update_existing_earnings(ws, existing_cols, earnings_by_order)
+            update_existing_earnings(ws, existing_cols, earnings_by_order, fees_by_order, debits_by_order, item_id_index)
             wb.save(xlsx_path)
         print(f"No new orders")
         return 0
@@ -208,7 +304,7 @@ def append_rows_to_workbook(
     blank_order_level_continuation_rows(new_orders)
 
     if os.path.exists(xlsx_path):
-        update_existing_earnings(ws, existing_cols, earnings_by_order)
+        update_existing_earnings(ws, existing_cols, earnings_by_order, fees_by_order, debits_by_order, item_id_index)
         start_row = find_last_data_row(ws) + 1
     else:
         start_row = 2

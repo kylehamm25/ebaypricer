@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+logs
+db/pokemon_prices.db
+.env
+.env.example
+active_listing_debug.xml
+dashboard/frontend/node_modules
+dashboard/frontend/dist
+dashboard/frontend/.env
+ebay-defaults-extension
+*.xlsx
+*.csv

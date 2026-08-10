@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
+import { StageRefreshButton } from '../components/shared/StageRefreshButton'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { PaginatedResponse, SoldSummary, SoldTrend } from '../types'
 
@@ -35,6 +36,7 @@ interface SoldOrderItem extends Record<string, unknown> {
 export function SoldOrdersPage() {
   const [page, setPage] = useState(1)
   const [cardFilter, setCardFilter] = useState('')
+  const queryClient = useQueryClient()
 
   const { data: listData, isLoading } = useQuery({
     queryKey: ['sold-list', page, cardFilter],
@@ -61,7 +63,19 @@ export function SoldOrdersPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Sold Orders</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Sold Orders</h1>
+        <StageRefreshButton
+          statusPath="/sold/refresh/status"
+          runPath="/sold/refresh"
+          label="Refresh from eBay"
+          onRefreshed={() => {
+            queryClient.invalidateQueries({ queryKey: ['sold-list'] })
+            queryClient.invalidateQueries({ queryKey: ['sold-summary'] })
+            queryClient.invalidateQueries({ queryKey: ['sold-trends'] })
+          }}
+        />
+      </div>
 
       {summary ? (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -78,7 +92,7 @@ export function SoldOrdersPage() {
       )}
 
       {trends && trends.length > 0 ? (
-        <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+        <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Daily Revenue Trend</h2>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={trendData}>

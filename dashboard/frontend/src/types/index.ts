@@ -1,10 +1,12 @@
 export interface DashboardKpis {
+  month: string
+  available_months: string[]
   sold_items: number
   revenue: number
   shipping: number
   fees: number
   active_listings: number
-  trends: { day: string; count: number; revenue: number }[]
+  trends: { date: string; count: number; revenue: number }[]
   top_items: { title: string; count: number; avg_price: number; revenue: number }[]
 }
 

@@ -53,7 +53,7 @@ export function SettingsPage() {
         <div className="p-4 rounded-md bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300 border border-red-200 dark:border-red-500/30">{error}</div>
       )}
 
-      <div className="p-6 bg-white dark:bg-neutral-800 rounded-lg border border-slate-200 dark:border-neutral-700 shadow-sm">
+      <div className="p-6 bg-white dark:bg-neutral-800 rounded-lg">
         <h2 className="text-lg font-semibold text-slate-900 dark:text-neutral-100">eBay Account</h2>
         <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
           Connect your eBay account to sync sold orders and finances.

@@ -2,7 +2,8 @@
 Per-user eBay OAuth (Phase 5).
 
 Three-legged OAuth (authorization_code, no PKCE - server-side app with client secret):
-  1. GET /ebay/connect-url  -> state {user_id} + code_verifier stored in memory, returns authorize URL
+  1. GET /ebay/connect-url  -> state {user_id} + code_verifier stored in ebay_oauth_states
+     (Postgres, so the flow survives backend restarts/redeploys), returns authorize URL
   2. eBay redirects browser to /ebay/callback?code=...&state=...
   3. Callback exchanges code -> refresh_token (Fernet-encrypted), stores in ebay_connections,
      redirects the browser back to the frontend.
@@ -37,8 +38,6 @@ USERINFO_URL = "https://api.ebay.com/identity/v1/oauth2/userinfo"
 
 _STATE_TTL_SECONDS = 600  # 10 minutes
 _lock = threading.Lock()
-# state -> {"user_id": uuid, "verifier": str, "expires_at": float}
-_auth_states: dict[str, dict] = {}
 # user_id -> {"token": str, "expires_at": float}
 _access_cache: dict[str, dict] = {}
 
@@ -64,26 +63,21 @@ def _encryptor() -> Fernet:
     return Fernet(EBAY_TOKEN_ENCRYPTION_KEY.encode())
 
 
-def _prune_states() -> None:
-    now = time.time()
-    for key in [k for k, v in _auth_states.items() if v["expires_at"] < now]:
-        del _auth_states[key]
-
-
 def create_authorize_url(user_id: uuid.UUID) -> str:
-    """Build the eBay authorization URL for a user; state is stored in memory."""
+    """Build the eBay authorization URL for a user; state is stored in Postgres."""
     if not EBAY_APP_ID or not EBAY_SECRET or not EBAY_RUNAME:
         raise EbayOAuthError("EBAY_APP_ID, EBAY_SECRET, and RUNAME must be set in .env")
 
     state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(48)
-    with _lock:
-        _prune_states()
-        _auth_states[state] = {
-            "user_id": str(user_id),
-            "verifier": verifier,
-            "expires_at": time.time() + _STATE_TTL_SECONDS,
-        }
+    now = datetime.now(timezone.utc)
+    with get_db(read_only=False) as conn:
+        conn.execute("DELETE FROM ebay_oauth_states WHERE expires_at < %s", [now])
+        conn.execute(
+            "INSERT INTO ebay_oauth_states (state, user_id, verifier, expires_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (state, str(user_id), verifier, now + timedelta(seconds=_STATE_TTL_SECONDS)),
+        )
 
     params = {
         "client_id": EBAY_APP_ID,
@@ -100,11 +94,16 @@ def complete_connection(code: str, state: str, error: str | None = None) -> str:
 
     Returns the frontend redirect path (e.g. "/settings?ebay=connected").
     """
-    with _lock:
-        entry = _auth_states.pop(state, None)
-    if entry is None:
+    now = datetime.now(timezone.utc)
+    with get_db(read_only=False) as conn:
+        rows = conn.execute(
+            "DELETE FROM ebay_oauth_states WHERE state = %s AND expires_at > %s "
+            "RETURNING user_id, verifier",
+            (state, now),
+        ).fetchall()
+    if not rows:
         raise EbayOAuthError("OAuth state expired or invalid - please try connecting again")
-    user_id = uuid.UUID(entry["user_id"])
+    user_id = rows[0]["usfier_id"]
 
     if error:
         raise EbayOAuthError(f"eBay authorization failed: {error}")
@@ -159,8 +158,8 @@ def complete_connection(code: str, state: str, error: str | None = None) -> str:
                VALUES (%s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (user_id) DO UPDATE SET
                    ebay_user_id = EXCLUDED.ebay_user_id,
-                   refresh_token = EXCLUDED.refresh_token,
-                   scopes = EXCLUDED.scopes,
+            e       refresh_token = EXCLUDED.refresh_token,
+                   scopes = EXCLUDED.scopes,ad
                    token_issued_at = EXCLUDED.token_issued_at,
                    token_expires_at = EXCLUDED.token_expires_at,
                    sync_status = 'connected'""",

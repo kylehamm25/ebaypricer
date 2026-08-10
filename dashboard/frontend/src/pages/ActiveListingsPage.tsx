@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -8,6 +8,7 @@ import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
+import { StageRefreshButton } from '../components/shared/StageRefreshButton'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { ActiveSummary, PriceComparison, ValueBucketResponse } from '../types'
 
@@ -24,6 +25,7 @@ export function ActiveListingsPage() {
   const [sortBy, setSortBy] = useState('Days Listed')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
 
   const listQuery = useQuery({
     queryKey: ['active-list', page, cardFilter, conditionFilter, sortBy, sortDir],
@@ -111,7 +113,22 @@ export function ActiveListingsPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Active Listings</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">Active Listings</h1>
+        <StageRefreshButton
+          statusPath="/active/refresh/status"
+          runPath="/active/refresh"
+          label="Refresh from eBay"
+          onRefreshed={() => {
+            queryClient.invalidateQueries({ queryKey: ['active-list'] })
+            queryClient.invalidateQueries({ queryKey: ['active-conditions'] })
+            queryClient.invalidateQueries({ queryKey: ['active-summary'] })
+            queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
+            queryClient.invalidateQueries({ queryKey: ['active-value-buckets'] })
+            queryClient.invalidateQueries({ queryKey: ['active-value-trend'] })
+          }}
+        />
+      </div>
 
       {summary ? (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -134,7 +151,7 @@ export function ActiveListingsPage() {
         ) : (
           <>
         {valueBuckets && valueBuckets.buckets.length > 0 && (
-          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+          <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
             <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Inventory by Value Range</h2>
             <ResponsiveContainer width="100%" height={320}>
               <BarChart data={valueBuckets.buckets}>
@@ -159,7 +176,7 @@ export function ActiveListingsPage() {
           </div>
         )}
         {valueTrend && valueTrend.length > 0 && (
-          <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+          <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
             <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Total Inventory Value Over Time</h2>
             <ResponsiveContainer width="100%" height={320}>
               <LineChart data={trendData}>

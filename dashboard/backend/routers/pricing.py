@@ -1,5 +1,8 @@
-from fastapi import APIRouter, Query
+import uuid
 
+from fastapi import APIRouter, Depends, Query
+
+from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
 
 router = APIRouter(prefix="/api/v1/pricing", tags=["pricing"])
@@ -37,7 +40,7 @@ def _card_has_data(db, q: str) -> bool:
 
 
 @router.get("/comparisons")
-def get_price_comparisons():
+def get_price_comparisons(user_id: uuid.UUID = Depends(get_current_user_id)):
     with get_db() as db:
         latest_sold = db.execute(
             "SELECT MAX(snapshot_date) AS d FROM price_snapshots"
@@ -76,7 +79,9 @@ def get_price_comparisons():
 
 
 @router.get("/snapshots")
-def get_price_snapshots(card: str = Query(...), days: int = 90):
+def get_price_snapshots(
+    card: str = Query(...), days: int = 90, user_id: uuid.UUID = Depends(get_current_user_id)
+):
     with get_db() as db:
         sold_rows = db.execute(
             """SELECT * FROM price_snapshots
@@ -98,7 +103,7 @@ def get_price_snapshots(card: str = Query(...), days: int = 90):
 
 
 @router.get("/cards/{card_name}")
-def get_card_price_detail(card_name: str):
+def get_card_price_detail(card_name: str, user_id: uuid.UUID = Depends(get_current_user_id)):
     with get_db() as db:
         card_name = card_name.strip()
         used = card_name

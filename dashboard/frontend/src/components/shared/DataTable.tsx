@@ -28,14 +28,14 @@ export function DataTable<T extends Record<string, unknown>>({
 }: DataTableProps<T>) {
   if (data.length === 0) {
     return (
-      <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-8 text-center text-slate-400 text-sm">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-8 text-center text-slate-400 text-sm">
         No data
       </div>
     )
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+    <div className="overflow-x-auto rounded-xl bg-white dark:bg-neutral-800">
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-slate-50 dark:bg-neutral-800/60 border-b border-slate-200 dark:border-neutral-700">

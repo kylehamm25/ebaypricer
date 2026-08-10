@@ -23,6 +23,7 @@ import sys
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_active_listings
 from ebaypricer.marketing_api import (
+    MarketingApiError,
     compute_target_bid,
     get_ads,
     get_campaigns,
@@ -140,4 +141,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except MarketingApiError as e:
+        log.error(str(e))
+        if e.status_code == 401:
+            log.error("Run: python scripts/gen_access_token.py")
+        sys.exit(1)

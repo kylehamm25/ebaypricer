@@ -6,6 +6,8 @@ data/*
 !data/.gitkeep
 db/*
 !db/.gitkeep
+!db/migrations/
+!db/migrations/**
 *.xmlrem
 *.csv
 active_listing_debug.xml

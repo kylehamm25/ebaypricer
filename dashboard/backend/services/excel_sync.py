@@ -172,8 +172,20 @@ def sync_excel(force: bool = False) -> dict:
             count = _upsert_rows(conn, table, col_map, key_cols, rows)
             result[sheet_name] = f"{count} rows synced"
 
+            if table == "active_listings":
+                # The Excel sheet is the source of truth for what's currently active;
+                # anything not in this run's rows has sold/ended and must be dropped,
+                # or it lingers in Postgres forever and inflates inventory value.
+                current_ids = [r["item_id"] for r in rows]
+                deleted = conn.execute(
+                    "DELETE FROM active_listings WHERE user_id = %s AND item_id != ALL(%s)",
+                    [user_id, current_ids],
+                ).rowcount
+                if deleted:
+                    result[sheet_name] += f" ({deleted} stale rows removed)"
+
         total_row = conn.execute(
-            "SELECT COALESCE(SUM(price), 0) AS v, COUNT(*) AS n "
+            "SELECT COALESCE(SUM(price * COALESCE(quantity, 1)), 0) AS v, COUNT(*) AS n "
             "FROM active_listings WHERE user_id = %s AND price IS NOT NULL",
             [user_id],
         ).fetchone()

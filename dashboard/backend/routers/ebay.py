@@ -16,6 +16,7 @@ from dashboard.backend.services.ebay_oauth import (
     disconnect,
     get_connection_status,
 )
+from dashboard.backend.services.promotion_boost import run_user_promotion_boost
 
 router = APIRouter(prefix="/api/v1/ebay", tags=["ebay"])
 
@@ -78,6 +79,13 @@ def sync_now_background(user_id: uuid.UUID = Depends(get_current_user_id)):
     """Start a per-user sync in a background thread and return immediately."""
     threading.Thread(target=sync_user_ebay_data, args=(user_id,), daemon=True).start()
     return {"started": True}
+
+
+@router.post("/promotion-boost")
+def promotion_boost_now(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Run promoted-listing ad-rate boosting for this user now. Never raises for
+    ineligible/unconnected accounts - check the returned status field."""
+    return run_user_promotion_boost(user_id)
 
 
 @router.get("/orders")

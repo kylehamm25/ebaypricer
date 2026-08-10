@@ -20,7 +20,13 @@ from ebaypricer.cards import enrich_rows
 from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
 from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders
 
-from dashboard.backend.config import EBAY_SYNC_DAYS, EBAY_SYNC_INTERVAL_HOURS, EBAY_PIPELINE_INTERVAL_HOURS
+from dashboard.backend.config import (
+    EBAY_PIPELINE_INTERVAL_HOURS,
+    EBAY_PRICE_RESEARCH_INTERVAL_HOURS,
+    EBAY_PROMOTION_INTERVAL_HOURS,
+    EBAY_SYNC_DAYS,
+    EBAY_SYNC_INTERVAL_HOURS,
+)
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import get_access_token
 
@@ -268,8 +274,19 @@ def sync_user_ebay_data(user_id: uuid.UUID) -> dict:
                 conn, "active_listings", _ACTIVE_MAP, ["user_id", "item_id"], active_rows
             )
 
+            # eBay's response is the full current set of active listings; anything
+            # already in Postgres but absent here has sold/ended and must be dropped,
+            # or it lingers forever and inflates inventory value. Only prune when eBay
+            # actually returned listings, so a transient empty/failed fetch can't wipe
+            # the table.
+            if active_rows:
+                conn.execute(
+                    "DELETE FROM active_listings WHERE user_id = %s AND item_id != ALL(%s)",
+                    [key, [r["item_id"] for r in active_rows]],
+                )
+
             total = conn.execute(
-                "SELECT COALESCE(SUM(price), 0) AS v, COUNT(*) AS n "
+                "SELECT COALESCE(SUM(price * COALESCE(quantity, 1)), 0) AS v, COUNT(*) AS n "
                 "FROM active_listings WHERE user_id = %s AND price IS NOT NULL",
                 [key],
             ).fetchone()
@@ -331,8 +348,12 @@ def default_user_connected(default_user_id: str) -> bool:
 def _scheduler_loop() -> None:
     pipeline_interval = EBAY_PIPELINE_INTERVAL_HOURS * 3600
     ebay_interval = EBAY_SYNC_INTERVAL_HOURS * 3600
+    promotion_interval = EBAY_PROMOTION_INTERVAL_HOURS * 3600
+    research_interval = EBAY_PRICE_RESEARCH_INTERVAL_HOURS * 3600
     next_pipeline = time.monotonic() + pipeline_interval  # first round after one interval
     next_ebay = time.monotonic()  # immediate round for status/token refresh
+    next_promotion = time.monotonic() + promotion_interval
+    next_research = time.monotonic() + research_interval
     while True:
         now = time.monotonic()
         try:
@@ -347,6 +368,22 @@ def _scheduler_loop() -> None:
             if now >= next_ebay:
                 next_ebay = now + ebay_interval
                 sync_all_users()
+            if now >= next_promotion:
+                next_promotion = now + promotion_interval
+                try:
+                    from dashboard.backend.services.promotion_boost import run_all_users_promotion_boost
+
+                    run_all_users_promotion_boost()
+                except Exception as e:
+                    print(f"[scheduler] promotion boost round failed: {e}")
+            if now >= next_research:
+                next_research = now + research_interval
+                try:
+                    from dashboard.backend.services.price_research import run_shared_price_research
+
+                    run_shared_price_research()
+                except Exception as e:
+                    print(f"[scheduler] price research round failed: {e}")
         except Exception as e:
             print(f"[scheduler] sync round failed: {e}")
         time.sleep(60)

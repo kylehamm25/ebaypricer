@@ -469,12 +469,18 @@ class CardDatabase:
         for name in self.name_list_by_len:
             if _name_in_title(name, title):
                 candidates = self.name_to_cards.get(name, [])
+                if not candidates:
+                    return None
                 result = self._disambiguate(candidates, title)
                 if result:
                     return result
-                # Ambiguous with no disambiguating signal in the title --
-                # don't silently return an arbitrary print.
-                return None
+                # Species is confirmed by an exact literal name match even if we
+                # can't pin the exact print/rarity -- that's still far better than
+                # falling through to fuzzy matching, which has no name anchor at
+                # all and can land on a completely different Pokemon. Matches the
+                # fallback already used by _match_by_number/_match_by_promo_number/
+                # _match_fuzzy below.
+                return dict(candidates[0])
         return None
 
     @staticmethod
@@ -566,10 +572,21 @@ class CardDatabase:
         clean = re.sub(r"\s+", " ", clean).strip()
         if not clean or len(clean) < 3:
             return None
+        # The scorer (rapidfuzz's default WRatio) is character-similarity based and
+        # can score a name deceptively high purely off generic suffix tokens shared
+        # by hundreds of names (e.g. "ex", "gx") even when the actual species word
+        # doesn't appear anywhere in the title. Guard against that by requiring at
+        # least one of the candidate's own distinguishing (non-generic) tokens to
+        # literally appear in the title.
+        query_tokens = set(_significant_tokens(title))
+
         results = fuzz_process.extract(
             clean, self.name_list, score_cutoff=80, limit=5,
         )
         for candidate_name, score, _ in results:
+            candidate_tokens = _significant_tokens(candidate_name)
+            if candidate_tokens and not query_tokens.intersection(candidate_tokens):
+                continue
             cards = self.name_to_cards.get(candidate_name, [self.name_to_card[candidate_name]])
             cards = [c for c in cards if self._subtypes_match(title, c.get("subtypes", []))]
             if not cards:

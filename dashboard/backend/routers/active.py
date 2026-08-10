@@ -1,9 +1,12 @@
+import threading
+from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
+from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
 router = APIRouter(prefix="/api/v1/active", tags=["active"])
@@ -95,6 +98,28 @@ def get_active_listings(
     }
 
 
+@router.get("/refresh/status")
+def get_active_refresh_status(user_id: UUID = Depends(get_current_user_id)):
+    row = get_latest_run(ACTIVE_JOB_NAME)
+    if row is None:
+        return {"state": "idle", "last_run_at": None, "last_status": None}
+    running = row["finished_at"] is None
+    return {
+        "state": "running" if running else "idle",
+        "last_run_at": (row["finished_at"] or row["started_at"]).isoformat(),
+        "last_status": row["status"],
+    }
+
+
+@router.post("/refresh")
+def trigger_active_refresh(user_id: UUID = Depends(get_current_user_id)):
+    row = get_latest_run(ACTIVE_JOB_NAME)
+    if row is not None and row["finished_at"] is None:
+        raise HTTPException(409, "Active listings refresh is already running")
+    threading.Thread(target=run_active_refresh, daemon=True).start()
+    return {"message": "Active listings refresh started"}
+
+
 @router.get("/item/{item_id}")
 def get_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
     with get_db() as db:
@@ -126,7 +151,7 @@ def get_active_summary(user_id: UUID = Depends(get_current_user_id)):
             }
         row = db.execute(
             """SELECT COUNT(*) AS total_listings,
-                       COALESCE(SUM(price), 0) AS total_value,
+                       COALESCE(SUM(price * COALESCE(quantity, 1)), 0) AS total_value,
                        COALESCE(AVG(days_listed), 0) AS avg_days_listed,
                        COALESCE(AVG(watchers), 0) AS avg_watchers,
                        COALESCE(AVG(price), 0) AS avg_price
@@ -161,7 +186,7 @@ def get_active_by_card_value(user_id: UUID = Depends(get_current_user_id)):
             return []
         rows = db.execute(
             """SELECT card AS card, COUNT(*) AS count,
-                       COALESCE(SUM(price), 0) AS total_value
+                       COALESCE(SUM(price * COALESCE(quantity, 1)), 0) AS total_value
                 FROM active_listings
                 WHERE user_id = %s
                   AND card IS NOT NULL AND card != ''
@@ -187,7 +212,7 @@ def get_active_value_buckets(user_id: UUID = Depends(get_current_user_id)):
                      ELSE '50+'
                    END AS bucket,
                    COUNT(*) AS count,
-                   ROUND(SUM(price), 2) AS value
+                   ROUND(SUM(price * COALESCE(quantity, 1)), 2) AS value
                  FROM active_listings
                  WHERE user_id = %s
                    AND price IS NOT NULL
@@ -211,14 +236,34 @@ def get_active_value_buckets(user_id: UUID = Depends(get_current_user_id)):
 @router.get("/value-trend")
 def get_active_value_trend(user_id: UUID = Depends(get_current_user_id)):
     with get_db() as db:
+        today = datetime.now(timezone.utc).date()
         rows = db.execute(
             """SELECT snapshot_date AS date, total_value, total_listings
                FROM inventory_value_history
-               WHERE user_id = %s
+               WHERE user_id = %s AND snapshot_date < %s
                ORDER BY snapshot_date ASC""",
-            [user_id],
+            [user_id, today],
         ).fetchall()
-    return [dict(r) for r in rows]
+        points = [dict(r) for r in rows]
+
+        # Today's snapshot row (if any) only reflects the value as of the last sync,
+        # which can lag behind mid-day listing/price changes. Compute it live instead
+        # so the trend's current-day point always matches the "Total Value" KPI.
+        if _exists(db):
+            today_totals = db.execute(
+                """SELECT COALESCE(SUM(price * COALESCE(quantity, 1)), 0) AS total_value,
+                          COUNT(*) AS total_listings
+                   FROM active_listings
+                   WHERE user_id = %s AND price IS NOT NULL""",
+                [user_id],
+            ).fetchone()
+            if today_totals["total_listings"] > 0:
+                points.append({
+                    "date": today,
+                    "total_value": today_totals["total_value"],
+                    "total_listings": today_totals["total_listings"],
+                })
+    return points
 
 
 @router.get("/days-distribution")

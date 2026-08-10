@@ -11,11 +11,15 @@ from dashboard.backend.database import close_pool
 from dashboard.backend.routers import dashboard, sold, active, pricing, pipeline, promotion, ebay
 from dashboard.backend.services.excel_sync import sync_excel
 from dashboard.backend.services.ebay_data import has_connections, start_scheduler
+from dashboard.backend.services.price_research import reconcile_stale_job_runs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        orphaned = reconcile_stale_job_runs()
+        if orphaned:
+            print(f"Reconciled {orphaned} job_runs row(s) orphaned by a previous crash/restart")
         if has_connections():
             start_scheduler()
         result = sync_excel()

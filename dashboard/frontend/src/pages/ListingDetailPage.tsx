@@ -175,7 +175,7 @@ export function ListingDetailPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Header */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-6 shadow-sm flex flex-col justify-between">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex flex-col justify-between">
         <div className="flex flex-wrap items-start gap-5">
           {item.sprite_url ? (
             <img
@@ -273,7 +273,7 @@ export function ListingDetailPage() {
       </div>
 
       {/* Price history */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
         <div className="flex items-center justify-between mb-1">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">Price History</h2>
           {priceHistory.length > 0 && (
@@ -324,7 +324,7 @@ export function ListingDetailPage() {
       </div>
 
       {/* Recent sold listings */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
         <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-1">Recent Sold Listings</h2>
         {matchedNote && <p className="text-xs text-slate-400 mb-3">{matchedNote}</p>}
         {cardLoading ? (
@@ -386,7 +386,7 @@ export function ListingDetailPage() {
 
 function SkeletonHeader() {
   return (
-    <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-6 shadow-sm flex items-start gap-5">
+    <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex items-start gap-5">
       <div className="w-24 h-24 rounded-lg bg-slate-200 dark:bg-neutral-700 animate-pulse shrink-0" />
       <div className="space-y-2 w-full">
         <div className="h-6 w-3/4 bg-slate-200 dark:bg-neutral-700 animate-pulse rounded-md" />

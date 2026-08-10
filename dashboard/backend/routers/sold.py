@@ -1,10 +1,12 @@
+import threading
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
+from dashboard.backend.services.stage_runner import SOLD_JOB_NAME, get_latest_run, run_sold_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
 router = APIRouter(prefix="/api/v1/sold", tags=["sold"])
@@ -146,6 +148,28 @@ def get_sold_trends(user_id: UUID = Depends(get_current_user_id), days: int = 90
                 }
             )
     return trends
+
+
+@router.get("/refresh/status")
+def get_sold_refresh_status(user_id: UUID = Depends(get_current_user_id)):
+    row = get_latest_run(SOLD_JOB_NAME)
+    if row is None:
+        return {"state": "idle", "last_run_at": None, "last_status": None}
+    running = row["finished_at"] is None
+    return {
+        "state": "running" if running else "idle",
+        "last_run_at": (row["finished_at"] or row["started_at"]).isoformat(),
+        "last_status": row["status"],
+    }
+
+
+@router.post("/refresh")
+def trigger_sold_refresh(user_id: UUID = Depends(get_current_user_id)):
+    row = get_latest_run(SOLD_JOB_NAME)
+    if row is not None and row["finished_at"] is None:
+        raise HTTPException(409, "Sold orders refresh is already running")
+    threading.Thread(target=run_sold_refresh, daemon=True).start()
+    return {"message": "Sold orders refresh started"}
 
 
 @router.get("/by-card")

@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 OUTLIER_SIGMA = 2.0
 LISTING_LIMIT = 50
 MAX_QUERY_WORDS = 5
+MAX_RATE_LIMIT_RETRIES = 3
 
 # Search configuration — toggle listing formats and graded exclusions here.
 # BUYING_OPTIONS: "FIXED_PRICE" (Buy It Now), "AUCTION", or both "FIXED_PRICE|AUCTION"
@@ -35,7 +36,7 @@ def _buying_options_filter() -> str:
     return f"buyingOptions:{{{BUYING_OPTIONS}}}"
 
 
-def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
+def search_sold_listings(query: str, days_back: int = 30, _retries: int = 0) -> list[dict]:
     token = get_ebay_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -62,9 +63,11 @@ def search_sold_listings(query: str, days_back: int = 30) -> list[dict]:
     )
 
     if resp.status_code == 429:
-        log.warning("Rate limited — sleeping 60s before retry")
+        if _retries >= MAX_RATE_LIMIT_RETRIES:
+            resp.raise_for_status()
+        log.warning("Rate limited — sleeping 60s before retry (%d/%d)", _retries + 1, MAX_RATE_LIMIT_RETRIES)
         time.sleep(60)
-        return search_sold_listings(query, days_back)
+        return search_sold_listings(query, days_back, _retries=_retries + 1)
 
     resp.raise_for_status()
     data = resp.json()
@@ -229,7 +232,7 @@ def compute_snapshot(conn: sqlite3.Connection, card_query: str, days_back: int =
     return snapshot
 
 
-def search_active_listings(query: str, limit: int = 5, offset: int = 0) -> list[dict]:
+def search_active_listings(query: str, limit: int = 5, offset: int = 0, _retries: int = 0) -> list[dict]:
     token = get_ebay_token()
     headers = {
         "Authorization": f"Bearer {token}",
@@ -252,9 +255,11 @@ def search_active_listings(query: str, limit: int = 5, offset: int = 0) -> list[
     )
 
     if resp.status_code == 429:
-        log.warning("Rate limited — sleeping 60s before retry")
+        if _retries >= MAX_RATE_LIMIT_RETRIES:
+            resp.raise_for_status()
+        log.warning("Rate limited — sleeping 60s before retry (%d/%d)", _retries + 1, MAX_RATE_LIMIT_RETRIES)
         time.sleep(60)
-        return search_active_listings(query, limit, offset)
+        return search_active_listings(query, limit, offset, _retries=_retries + 1)
 
     resp.raise_for_status()
     data = resp.json()

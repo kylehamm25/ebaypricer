@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
-import { useQuery, useMutation } from '@tanstack/react-query'
+import { useQuery, useMutation, keepPreviousData } from '@tanstack/react-query'
 import {
   XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar,
 } from 'recharts'
-import { Loader2, Play } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Loader2, Play } from 'lucide-react'
 
 import { api, apiPost } from '../lib/api'
 import { KpiCard } from '../components/shared/KpiCard'
@@ -18,17 +18,38 @@ function formatShortDate(dateStr: unknown) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
 }
 
+// Formats a "YYYY-MM" string as "July 2026"
+function formatMonthLabel(monthStr: string) {
+  const [year, month] = monthStr.split('-').map(Number)
+  return new Date(year, month - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+}
+
 // Computes a tick interval so at most `maxTicks` labels are shown
 function getTickInterval(dataLength: number, maxTicks = 10) {
   if (dataLength <= maxTicks) return 0
   return Math.ceil(dataLength / maxTicks) - 1
 }
 
+function currentMonthStr() {
+  const now = new Date()
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+}
+
+// Shifts a "YYYY-MM" string by `delta` calendar months
+function shiftMonth(monthStr: string, delta: number): string {
+  const [year, month] = monthStr.split('-').map(Number)
+  const d = new Date(year, month - 1 + delta, 1)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
+
 export function DashboardPage() {
+  const [month, setMonth] = useState<string>(currentMonthStr())
+
   const { data, isLoading } = useQuery<DashboardKpis>({
-    queryKey: ['dashboard-kpis'],
-    queryFn: () => api('/dashboard/kpis'),
+    queryKey: ['dashboard-kpis', month],
+    queryFn: () => api(`/dashboard/kpis?month=${month}`),
     refetchInterval: 60_000,
+    placeholderData: keepPreviousData,
   })
 
   const [pStatus, setPStatus] = useState<'idle' | 'running'>('idle')
@@ -73,6 +94,13 @@ export function DashboardPage() {
     )
   }
 
+  const availableMonths = data.available_months ?? []
+  const oldestMonth = availableMonths.length
+    ? availableMonths[availableMonths.length - 1]
+    : month
+  const canGoPrev = month > oldestMonth
+  const canGoNext = month < currentMonthStr()
+
   return (
     <div className="relative space-y-6">
       {pStatus === 'running' && (
@@ -102,7 +130,29 @@ export function DashboardPage() {
       </div>
 
       <div>
-        <p className="text-xs text-slate-500 dark:text-neutral-400 uppercase tracking-wide font-medium mb-3">{new Date().toLocaleString('en-US', { month: 'long' })}</p>
+        <div className="flex items-center gap-2 mb-3">
+          <button
+            type="button"
+            className="p-1 rounded-md border border-slate-200 dark:border-neutral-700 text-slate-500 dark:text-neutral-400 hover:bg-slate-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            disabled={!canGoPrev}
+            onClick={() => setMonth((m) => shiftMonth(m, -1))}
+            aria-label="Previous month"
+          >
+            <ChevronLeft size={14} />
+          </button>
+          <span className="text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-neutral-400 min-w-32 text-center">
+            {formatMonthLabel(month)}
+          </span>
+          <button
+            type="button"
+            className="p-1 rounded-md border border-slate-200 dark:border-neutral-700 text-slate-500 dark:text-neutral-400 hover:bg-slate-100 dark:hover:bg-neutral-700 disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            disabled={!canGoNext}
+            onClick={() => setMonth((m) => shiftMonth(m, 1))}
+            aria-label="Next month"
+          >
+            <ChevronRight size={14} />
+          </button>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
           <KpiCard title="Items Sold" value={formatInt(data.sold_items)} />
           <KpiCard title="Total Revenue" value={formatCurrency(data.revenue)} />
@@ -113,7 +163,7 @@ export function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="lg:col-span-1 bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+        <div className="lg:col-span-1 bg-white dark:bg-neutral-800 rounded-xl p-4">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Daily Orders</h2>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={data.trends}>
@@ -124,7 +174,7 @@ export function DashboardPage() {
             </BarChart>
           </ResponsiveContainer>
         </div>
-        <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+        <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-3">Daily Revenue</h2>
           <ResponsiveContainer width="100%" height={240}>
             <BarChart data={data.trends}>

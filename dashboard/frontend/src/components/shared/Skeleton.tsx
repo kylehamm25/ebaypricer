@@ -6,7 +6,7 @@ export function Skeleton({ className = '', style }: { className?: string; style?
 
 export function KpiSkeleton() {
   return (
-    <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm space-y-2">
+    <div className="bg-white dark:bg-neutral-800 rounded-xl p-4 space-y-2">
       <Skeleton className="h-3 w-24" />
       <Skeleton className="h-7 w-28" />
     </div>
@@ -15,7 +15,7 @@ export function KpiSkeleton() {
 
 export function ChartSkeleton({ height = 240 }: { height?: number }) {
   return (
-    <div className="bg-white dark:bg-neutral-800 rounded-xl border border-slate-200 dark:border-neutral-700 p-4 shadow-sm">
+    <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
       <Skeleton className="h-4 w-44 mb-3" />
       <Skeleton className="w-full" style={{ height }} />
     </div>
@@ -30,7 +30,7 @@ export interface TableSkeletonColumn {
 export function TableSkeleton({ rows = 8, columns = [] }: { rows?: number; columns?: TableSkeletonColumn[] }) {
   const cols = columns.length > 0 ? columns : [{ header: '', width: 'w-full' }]
   return (
-    <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-neutral-700 bg-white dark:bg-neutral-800">
+    <div className="overflow-x-auto rounded-xl bg-white dark:bg-neutral-800">
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-slate-50 dark:bg-neutral-800/60 border-b border-slate-200 dark:border-neutral-700">

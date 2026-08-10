@@ -1,10 +1,14 @@
-from fastapi import APIRouter, HTTPException
-from ebaypricer.auth import get_access_token, get_ebay_token
-from ebaypricer.marketing_api import get_campaigns, get_ads
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from dashboard.backend.auth import get_current_user_id
+from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_token
+from ebaypricer.marketing_api import MarketingApiError, get_campaigns, get_ads
 
 router = APIRouter(prefix="/api/v1/promotions", tags=["promotions"])
 
-# Simple server-side cache
+# Simple server-side cache, keyed per-user
 _cache = {}
 _cache_ttl = {}
 
@@ -19,22 +23,24 @@ def _cached_or_fetch(key, fetch_fn, ttl=60):
         _cache[key] = result
         _cache_ttl[key] = now
         return result
-    except Exception as e:
+    except NotConnectedError as e:
+        raise HTTPException(400, str(e))
+    except MarketingApiError as e:
         raise HTTPException(502, str(e))
 
 
 @router.get("/campaigns")
-def get_campaign_list():
+def get_campaign_list(user_id: uuid.UUID = Depends(get_current_user_id)):
     def _fetch():
-        token = get_access_token()
+        token = get_access_token(user_id)
         return get_campaigns(token)
-    return _cached_or_fetch("campaigns", _fetch)
+    return _cached_or_fetch(f"campaigns:{user_id}", _fetch)
 
 
 @router.get("/ads")
-def get_ad_list():
+def get_ad_list(user_id: uuid.UUID = Depends(get_current_user_id)):
     def _fetch():
-        token = get_access_token()
+        token = get_access_token(user_id)
         campaigns = get_campaigns(token)
         all_ads = []
         for c in campaigns:
@@ -43,4 +49,4 @@ def get_ad_list():
                 ad["campaign_name"] = c.get("campaignName", "")
             all_ads.extend(ads)
         return all_ads
-    return _cached_or_fetch("ads", _fetch, ttl=120)
+    return _cached_or_fetch(f"ads:{user_id}", _fetch, ttl=120)

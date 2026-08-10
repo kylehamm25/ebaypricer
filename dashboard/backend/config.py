@@ -16,7 +16,7 @@ SUPABASE_ANON_KEY = _env("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_KEY = _env("SUPABASE_SERVICE_KEY")
 SUPABASE_JWT_SECRET = _env("SUPABASE_JWT_SECRET")
 DEFAULT_USER_ID = _env("DEFAULT_USER_ID")
-AUTH_REQUIRED = _env("AUTH_REQUIRED").lower() in ("1", "true", "yes")
+AUTH_REQUIRED = _env("AUTH_REQUIRED", "true").lower() in ("1", "true", "yes")
 
 # eBay per-user OAuth (Phase 5)
 EBAY_APP_ID = _env("EBAY_APP_ID")
@@ -37,6 +37,17 @@ EBAY_SYNC_INTERVAL_HOURS = float(_env("EBAY_SYNC_INTERVAL_HOURS", "6"))
 
 # Legacy pipeline run (Phase 7): runs scripts/main.py then ingests workbook + SQLite
 EBAY_PIPELINE_INTERVAL_HOURS = float(_env("EBAY_PIPELINE_INTERVAL_HOURS", "1"))
+
+# Per-user promotion ad-rate boosting (Phase 4). Requires the connecting user's eBay
+# account to have the sell.marketing scope granted (not in EBAY_SCOPES by default -
+# it's only issued to accounts with an eBay Store subscription that accepted Promoted
+# Listings terms; add it to EBAY_SCOPES if you want boosting for newly-connected users).
+EBAY_PROMOTION_INTERVAL_HOURS = float(_env("EBAY_PROMOTION_INTERVAL_HOURS", "24"))
+
+# Shared marketplace price research (Phase 3): researches every card any connected
+# user currently has listed (not just the legacy Excel pipeline's account) and writes
+# derived pricing columns onto each user's own active_listings rows.
+EBAY_PRICE_RESEARCH_INTERVAL_HOURS = float(_env("EBAY_PRICE_RESEARCH_INTERVAL_HOURS", "6"))
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "main.log")
 DATA_DIR_STR = str(DATA_DIR)

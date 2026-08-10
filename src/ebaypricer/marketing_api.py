@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sys
 
 import requests
 
@@ -12,6 +11,19 @@ from .auth import get_access_token
 log = logging.getLogger(__name__)
 
 MARKETING_URL = "https://api.ebay.com/sell/marketing/v1"
+
+
+class MarketingApiError(Exception):
+    """Raised on a non-recoverable Marketing API response (auth failure, ineligible account).
+
+    Must be raised rather than calling sys.exit() - this module is imported into the
+    long-running dashboard backend process, where exiting the interpreter would kill
+    the whole server for every user over one user's bad/ineligible token.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 # Trading API returns Item ID as plain "123456789".
 # The Marketing API may return listingId as "v1|123456789|0" for a plain
@@ -48,36 +60,26 @@ def get_campaigns(token: str, status: str = "RUNNING") -> list[dict]:
     if resp.status_code == 404:
         return []
     if resp.status_code == 401:
-        print("ERROR: eBay returned 401 Unauthorized for the Marketing API.")
-        print("  Your access token is likely invalid or expired.")
-        print("  Run: python scripts/gen_access_token.py")
-        sys.exit(1)
+        raise MarketingApiError(
+            "eBay returned 401 Unauthorized for the Marketing API - "
+            "the access token is likely invalid or expired.",
+            status_code=401,
+        )
     if resp.status_code == 403:
-        print("ERROR: eBay returned 403 Forbidden for the Marketing API.")
         try:
             detail = resp.json()
         except Exception:
             detail = resp.text[:1000]
-        print(f"  Response body: {json.dumps(detail, indent=2) if isinstance(detail, dict) else detail}")
-        print()
-        print("  This usually means your account is not eligible for Promoted Listings.")
-        print("  eBay silently drops the sell.marketing scope during authorization")
-        print("  if the seller account doesn't meet the requirements.")
-        print()
-        print("  Required in your eBay account:")
-        print("    1. Active eBay Store subscription")
-        print("       -> Account -> Subscriptions -> eBay Store")
-        print("    2. Top Rated or Above Standard seller level")
-        print("       -> Seller Dashboard -> Performance")
-        print("    3. Accept Promoted Listings terms")
-        print("       -> Go to a listing you own and click 'Promote' to accept terms")
-        print()
-        print("  If you believe you meet all requirements, re-authorize:")
-        print("    1. Go to https://www.ebay.com/mye/myebay/account/application-access")
-        print("    2. Revoke 'tcg pricefinder'")
-        print("    3. Run: python scripts/gen_access_token.py")
-        print("    4. Check the RESPONSE line for 'sell.marketing' in the scope list")
-        sys.exit(1)
+        log.warning(
+            "Marketing API 403 (not eligible for Promoted Listings): %s",
+            json.dumps(detail, indent=2) if isinstance(detail, dict) else detail,
+        )
+        raise MarketingApiError(
+            "eBay returned 403 Forbidden for the Marketing API - this account is not "
+            "eligible for Promoted Listings (requires an active eBay Store subscription, "
+            "Top Rated/Above Standard seller level, and accepted Promoted Listings terms).",
+            status_code=403,
+        )
     resp.raise_for_status()
     campaigns = resp.json().get("campaigns", [])
     return [c for c in campaigns if c.get("campaignStatus") == status]
@@ -99,10 +101,11 @@ def get_ads(token: str, campaign_id: str) -> list[dict]:
             # No ads in this campaign yet - not an error.
             break
         if resp.status_code == 401:
-            print("ERROR: eBay returned 401 Unauthorized for the Marketing API.")
-            print("  Your access token is likely invalid or expired.")
-            print("  Run: python scripts/gen_access_token.py")
-            sys.exit(1)
+            raise MarketingApiError(
+                "eBay returned 401 Unauthorized for the Marketing API - "
+                "the access token is likely invalid or expired.",
+                status_code=401,
+            )
         resp.raise_for_status()
         data = resp.json()
         for ad in data.get("ads", []):

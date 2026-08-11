@@ -36,34 +36,47 @@ def _card_has_data(db, q: str) -> bool:
         db.execute("SELECT 1 FROM price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
         or db.execute("SELECT 1 FROM active_price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
         or db.execute("SELECT 1 FROM sold_listings WHERE card_query = %s LIMIT 1", (q,)).fetchone()
+        or db.execute("SELECT 1 FROM active_market_listings WHERE card_query = %s LIMIT 1", (q,)).fetchone()
     )
 
 
 @router.get("/comparisons")
 def get_price_comparisons(user_id: uuid.UUID = Depends(get_current_user_id)):
     with get_db() as db:
-        latest_sold = db.execute(
-            "SELECT MAX(snapshot_date) AS d FROM price_snapshots"
-        ).fetchone()["d"]
-        latest_active = db.execute(
-            "SELECT MAX(snapshot_date) AS d FROM active_price_snapshots"
-        ).fetchone()["d"]
-
-        if not latest_sold or not latest_active:
-            return []
-
+        # Research runs incrementally across cards (each run is wall-clock budgeted and
+        # picks up where it left off), so on any given day only a handful of cards have
+        # a snapshot dated *today* - most still carry yesterday's (or older) date. Using
+        # a single shared "latest date" filter here previously meant every card not
+        # touched by the most recent run vanished from this endpoint entirely, leaving
+        # the Active Avg/Sold Avg columns blank for most listings. Pull each card's own
+        # newest row instead, independent of what date that happens to be.
+        #
+        # active_price_snapshots is the primary table (Active Avg/Suggested no longer
+        # depend on sold data at all) - LEFT JOIN sold data in optionally rather than
+        # requiring it, or any card whose TCGdex lookup didn't find a price (~30% of
+        # cards) would be excluded from this list entirely despite having perfectly
+        # good active data.
         rows = db.execute(
-            """SELECT ps.card_query,
+            """SELECT DISTINCT ON (aps.card_query)
+                      aps.card_query,
                       ps.weighted_avg AS sold_weighted_avg,
                       ps.sample_size AS sold_sample,
                       aps.avg_price AS active_avg,
+                      aps.min_price AS active_min,
                       aps.sample_size AS active_sample
-               FROM price_snapshots ps
-               JOIN active_price_snapshots aps ON ps.card_query = aps.card_query
-               WHERE ps.snapshot_date = %s AND aps.snapshot_date = %s
-               ORDER BY ps.card_query""",
-            (latest_sold, latest_active),
+               FROM active_price_snapshots aps
+               LEFT JOIN LATERAL (
+                   SELECT weighted_avg, sample_size
+                   FROM price_snapshots p
+                   WHERE p.card_query = aps.card_query
+                   ORDER BY p.snapshot_date DESC
+                   LIMIT 1
+               ) ps ON true
+               ORDER BY aps.card_query, aps.snapshot_date DESC"""
         ).fetchall()
+
+        if not rows:
+            return []
 
     result = []
     for r in rows:
@@ -121,8 +134,13 @@ def get_card_price_detail(card_name: str, user_id: uuid.UUID = Depends(get_curre
             "SELECT * FROM active_price_snapshots WHERE card_query = %s ORDER BY snapshot_date DESC LIMIT 30",
             (used,),
         ).fetchall()
-        recent_sold = db.execute(
-            "SELECT * FROM sold_listings WHERE card_query = %s ORDER BY sold_date DESC LIMIT 10",
+        # Only recently-seen competitors. active_market_listings is append/upsert-only
+        # (nothing ever deletes from it), so without this filter the comps table and the
+        # Active Min/Max tiles surface listings that ended weeks ago.
+        recent_active = db.execute(
+            """SELECT * FROM active_market_listings
+               WHERE card_query = %s AND pulled_at >= now() - interval '14 days'
+               ORDER BY price ASC LIMIT 15""",
             (used,),
         ).fetchall()
     return {
@@ -130,5 +148,5 @@ def get_card_price_detail(card_name: str, user_id: uuid.UUID = Depends(get_curre
         "matched_query": matched_query,
         "price_snapshots": [dict(r) for r in sold_snaps],
         "active_snapshots": [dict(r) for r in active_snaps],
-        "recent_sold": [dict(r) for r in recent_sold],
+        "recent_active": [dict(r) for r in recent_active],
     }

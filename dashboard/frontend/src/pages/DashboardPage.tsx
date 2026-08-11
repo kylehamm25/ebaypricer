@@ -8,6 +8,7 @@ import { ChevronLeft, ChevronRight, Loader2, Play } from 'lucide-react'
 import { api, apiPost } from '../lib/api'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton } from '../components/shared/Skeleton'
+import { useChartCursor } from '../lib/theme'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { DashboardKpis } from '../types'
 
@@ -43,6 +44,7 @@ function shiftMonth(monthStr: string, delta: number): string {
 }
 
 export function DashboardPage() {
+  const cursor = useChartCursor()
   const [month, setMonth] = useState<string>(currentMonthStr())
 
   const { data, isLoading } = useQuery<DashboardKpis>({
@@ -169,8 +171,8 @@ export function DashboardPage() {
             <BarChart data={data.trends}>
               <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={getTickInterval(data.trends.length)} tickFormatter={formatShortDate} />
               <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip labelFormatter={formatShortDate} />
-              <Bar dataKey="count" fill="#3b82f6" radius={[2, 2, 0, 0]} />
+              <Tooltip cursor={cursor.bar} labelFormatter={formatShortDate} />
+              <Bar dataKey="count" fill="#3b82f6" radius={[2, 2, 0, 0]} isAnimationActive={false} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -180,8 +182,8 @@ export function DashboardPage() {
             <BarChart data={data.trends}>
               <XAxis dataKey="date" tick={{ fontSize: 11 }} interval={getTickInterval(data.trends.length)} tickFormatter={formatShortDate} />
               <YAxis tick={{ fontSize: 11 }} />
-              <Tooltip formatter={(v) => '$' + Number(v).toFixed(2)} labelFormatter={formatShortDate} />
-              <Bar dataKey="revenue" fill="#10b981" radius={[2, 2, 0, 0]} />
+              <Tooltip cursor={cursor.bar} formatter={(v) => '$' + Number(v).toFixed(2)} labelFormatter={formatShortDate} />
+              <Bar dataKey="revenue" fill="#10b981" radius={[2, 2, 0, 0]} isAnimationActive={false} />
             </BarChart>
           </ResponsiveContainer>
         </div>

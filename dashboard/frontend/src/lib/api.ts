@@ -21,8 +21,17 @@ export async function apiText(path: string): Promise<string> {
   return res.text()
 }
 
-export async function apiPost(path: string): Promise<unknown> {
-  const res = await fetch(`${BASE}${path}`, { method: 'POST', headers: await headers() })
-  if (!res.ok) throw new Error(`API error: ${res.statusText}`)
+export async function apiPost(path: string, body?: unknown): Promise<unknown> {
+  const h = await headers()
+  if (body !== undefined) h['Content-Type'] = 'application/json'
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: h,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  if (!res.ok) {
+    const detail = await res.json().then((d) => d?.detail).catch(() => null)
+    throw new Error(typeof detail === 'string' ? detail : `API error: ${res.statusText}`)
+  }
   return res.json()
 }

@@ -3,23 +3,19 @@ import logging
 import os
 import sqlite3
 import sys
-import time
-from datetime import datetime, timedelta, timezone
-from statistics import mean, stdev
+from datetime import datetime, timezone
 
 import requests
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 
 from ebaypricer.browse_api import (
-    OUTLIER_SIGMA,
     get_today_snapshot,
     init_db,
-    parse_item,
     save_listing_positions,
     search_active_listings,
-    search_sold_listings,
 )
+from ebaypricer.cards import lookup_market_price
 from ebaypricer.excel import HEADER_FILL, HEADER_FONT, DATA_FONT
 from ebaypricer.paths import DB_PATH as DEFAULT_DB_PATH
 
@@ -27,9 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 SHEET_NAME = "Active Listings"
-LOOKBACK_DAYS = 30
 MAX_LISTINGS = 9999
-MAX_SOLD_MATCHES = 10
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
 PRICE_COLUMNS = [
@@ -95,82 +89,36 @@ def collect_unique_cards(rows: list[dict], card_col_idx: int, headers: list[str]
 
 
 def fetch_price_for_card(conn, card_name: str) -> dict | None:
+    """Market-price lookup for one card, from TCGdex/TCGPlayer (lookup_market_price).
+
+    eBay's Browse API has no real "sold items" search - despite the soldDate filter
+    this used to pass to search_sold_listings, eBay silently ignores it and returns
+    ordinary active listings (verified: identical item IDs to the active search, live
+    buyingOptions present, no soldDate/itemEndDate field in the response). Real sold
+    comps require eBay's Marketplace Insights API, which is restricted-access. TCGdex
+    gives one current market price rather than individual sold comps, so the snapshot
+    below is a single-point sample (sample_size=1), not an aggregate of many sales.
+    Relies on get_active.py having already run enrich_rows() earlier in this pipeline
+    round, which is what populates the card_query -> structured card lookup this uses."""
     snapshot = get_today_snapshot(conn, card_name)
     if snapshot:
         return snapshot
 
     print(".", end="", flush=True)
-    try:
-        items = search_sold_listings(card_name, LOOKBACK_DAYS)
-    except requests.HTTPError as e:
-        log.error("eBay API error for '%s': %s", card_name, e)
+    price = lookup_market_price(card_name)
+    if price is None:
         return None
-
-    items.sort(
-        key=lambda i: i.get("itemEndDate") or i.get("itemCreationDate") or "",
-        reverse=True,
-    )
-    items = items[:MAX_SOLD_MATCHES]
-
-    parsed_items = []
-    for raw in items:
-        parsed = parse_item(raw, card_name)
-        if not parsed:
-            continue
-        parsed_items.append(parsed)
-        try:
-            conn.execute(
-                """
-                INSERT OR IGNORE INTO sold_listings
-                    (item_id, card_query, title, price, currency, condition,
-                     listing_type, sold_date, url, pulled_at)
-                VALUES
-                    (:item_id, :card_query, :title, :price, :currency, :condition,
-                     :listing_type, :sold_date, :url, :pulled_at)
-                """,
-                parsed,
-            )
-        except Exception:
-            pass
-    conn.commit()
-    time.sleep(1)
-
-    pairs = [(p["price"], p["sold_date"]) for p in parsed_items if p.get("currency") == "USD"]
-    if not pairs:
-        return None
-
-    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-
-    if len(pairs) >= 4:
-        raw_prices = [p for p, _ in pairs]
-        m, s = mean(raw_prices), stdev(raw_prices)
-        pairs = [(p, d) for p, d in pairs if abs(p - m) <= OUTLIER_SIGMA * s]
-
-    if not pairs:
-        return None
-
-    prices = [p for p, _ in pairs]
-    weighted_sum = 0.0
-    weight_total = 0
-    for p, sold_date in pairs:
-        w = 2 if sold_date >= recent_cutoff else 1
-        weighted_sum += p * w
-        weight_total += w
-
-    sorted_p = sorted(prices)
-    n = len(sorted_p)
-    median = sorted_p[n // 2] if n % 2 else (sorted_p[n // 2 - 1] + sorted_p[n // 2]) / 2
 
     snapshot = {
         "card_query":    card_name,
         "snapshot_date": datetime.now(timezone.utc).date().isoformat(),
-        "sample_size":   n,
-        "avg_price":     round(mean(prices), 2),
-        "median_price":  round(median, 2),
-        "min_price":     round(min(prices), 2),
-        "max_price":     round(max(prices), 2),
-        "std_dev":       round(stdev(prices), 2) if n > 1 else 0.0,
-        "weighted_avg":  round(weighted_sum / weight_total, 2),
+        "sample_size":   1,
+        "avg_price":     price,
+        "median_price":  price,
+        "min_price":     price,
+        "max_price":     price,
+        "std_dev":       0.0,
+        "weighted_avg":  price,
     }
 
     conn.execute(

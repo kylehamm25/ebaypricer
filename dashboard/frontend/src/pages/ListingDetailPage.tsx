@@ -1,4 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
+import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import {
   LineChart,
@@ -12,25 +13,26 @@ import {
 } from 'recharts'
 import {
   ArrowLeft,
+  Check,
+  Clock,
   ExternalLink,
   ImageIcon,
+  Loader2,
+  Pencil,
+  RefreshCw,
   TrendingDown,
   TrendingUp,
+  X,
 } from 'lucide-react'
-import { api } from '../lib/api'
+import { api, apiPost } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
+import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
-import { formatCurrency, formatInt } from '../lib/utils'
-import type { CardPriceDetail } from '../types'
-
-interface ListingItem extends Record<string, unknown> {
-  'Item ID': string
-  Title: string
-  Card?: string
-  Condition?: string
-  Price?: string
-  sprite_url?: string
-}
+import { useChartCursor } from '../lib/theme'
+import { formatCurrency, formatInt, formatSuggestionReason } from '../lib/utils'
+import type {
+  ActiveListing, CardPriceDetail, PositionHistoryPoint, PriceComparison, SuggestedPriceBasis,
+} from '../types'
 
 const CONDITION_STYLES: Record<string, string> = {
   new: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 ring-1 ring-inset ring-emerald-600/20',
@@ -58,6 +60,27 @@ function toNumber(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+function formatShortDate(v: string | null | undefined) {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function renderListingLink(r: Record<string, unknown>) {
+  return r.url ? (
+    <a
+      href={r.url as string}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 dark:text-blue-400 hover:underline inline-flex"
+      title="View on eBay"
+    >
+      <ExternalLink size={13} />
+    </a>
+  ) : null
+}
+
 function EmptyChart({ label }: { label: string }) {
   return (
     <div className="flex h-[200px] flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-slate-400">
@@ -66,14 +89,63 @@ function EmptyChart({ label }: { label: string }) {
   )
 }
 
-export function ListingDetailPage() {
-  const { itemId } = useParams<{ itemId: string }>()
+interface PriceHistoryPoint {
+  date: string
+  sold?: number
+  active?: number
+}
 
-  const { data: item, isLoading } = useQuery<ListingItem | null>({
+export function ListingDetailPage() {
+  const cursor = useChartCursor()
+  const { itemId } = useParams<{ itemId: string }>()
+  const queryClient = useQueryClient()
+
+  const { data: item, isLoading } = useQuery<ActiveListing | null>({
     queryKey: ['active-item', itemId],
     queryFn: () => api(`/active/item/${encodeURIComponent(itemId!)}`),
     enabled: !!itemId,
   })
+
+  const [editingPrice, setEditingPrice] = useState(false)
+  const [priceInput, setPriceInput] = useState('')
+
+  const revisePriceMutation = useMutation({
+    mutationFn: (price: number) => apiPost(`/active/item/${encodeURIComponent(itemId!)}/price`, { price }),
+    onSuccess: () => {
+      setEditingPrice(false)
+      queryClient.invalidateQueries({ queryKey: ['active-item', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['active-list'] })
+      queryClient.invalidateQueries({ queryKey: ['active-summary'] })
+      // The price just changed, so the comparison figures and the suggestion (which is
+      // computed relative to the current price) are stale. Without these the page kept
+      // showing pre-change numbers until the 120s background refetch.
+      queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
+      queryClient.invalidateQueries({ queryKey: ['pricing-card', cardQuery] })
+    },
+  })
+
+  const refreshMutation = useMutation({
+    mutationFn: () => apiPost(`/active/item/${encodeURIComponent(itemId!)}/refresh`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['active-item', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['active-list'] })
+      queryClient.invalidateQueries({ queryKey: ['active-item-positions', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
+      queryClient.invalidateQueries({ queryKey: ['pricing-card', cardQuery] })
+    },
+  })
+
+  const startEditingPrice = () => {
+    setPriceInput(item?.Price != null ? String(item.Price) : '')
+    revisePriceMutation.reset()
+    setEditingPrice(true)
+  }
+
+  const submitPrice = () => {
+    const parsed = Number(priceInput)
+    if (!Number.isFinite(parsed) || parsed <= 0) return
+    revisePriceMutation.mutate(parsed)
+  }
 
   const cardQuery = item?.Card || item?.Title || ''
   const { data: cardDetail, isLoading: cardLoading } = useQuery<CardPriceDetail>({
@@ -82,30 +154,52 @@ export function ListingDetailPage() {
     enabled: !!cardQuery,
   })
 
-  const soldSnaps: Record<string, unknown>[] = (cardDetail?.price_snapshots ?? []).map((s) => ({
+  const { data: comparisons } = useQuery<PriceComparison[]>({
+    queryKey: ['pricing-comparisons'],
+    queryFn: () => api('/pricing/comparisons'),
+  })
+
+  const { data: positions } = useQuery<PositionHistoryPoint[]>({
+    queryKey: ['active-item-positions', itemId],
+    queryFn: () => api(`/active/item/${encodeURIComponent(itemId!)}/positions`),
+    enabled: !!itemId,
+  })
+
+  // The exact price_snapshots/active_price_snapshots card_query this listing resolved
+  // to (possibly fuzzy-matched) - used to pull the SAME weighted sold average shown on
+  // the Active Listings list page, instead of re-deriving a plain mean here that could
+  // disagree with it for the same card.
+  const comparison = comparisons?.find((c) => c.card_query === cardDetail?.card_query)
+
+  const soldSnaps = (cardDetail?.price_snapshots ?? []).map((s) => ({
     ...s,
-    date: (s.snapshot_date as string)?.slice(5),
+    date: s.snapshot_date?.slice(5),
   })).reverse()
 
-  const activeSnaps: Record<string, unknown>[] = (cardDetail?.active_snapshots ?? []).map((s) => ({
+  const activeSnaps = (cardDetail?.active_snapshots ?? []).map((s) => ({
     ...s,
-    date: (s.snapshot_date as string)?.slice(5),
+    date: s.snapshot_date?.slice(5),
   })).reverse()
 
-  const priceHistory: { date: string; sold?: number; active?: number }[] = []
+  const priceHistory: PriceHistoryPoint[] = []
   for (const s of soldSnaps) {
-    const row = { date: s.date as string, sold: Number(s.avg_price) }
-    priceHistory.push(row)
+    priceHistory.push({ date: s.date, sold: s.avg_price ?? undefined })
   }
   for (const a of activeSnaps) {
-    const row = priceHistory.find((r) => r.date === (a.date as string))
-    if (row) row.active = Number(a.avg_price)
-    else priceHistory.push({ date: a.date as string, active: Number(a.avg_price) })
+    const row = priceHistory.find((r) => r.date === a.date)
+    const active = a.avg_price ?? undefined
+    if (row) row.active = active
+    else priceHistory.push({ date: a.date, active })
   }
   priceHistory.sort((a, b) => a.date.localeCompare(b.date))
 
-  const recentSold = cardDetail?.recent_sold ?? []
+  const recentActive = cardDetail?.recent_active ?? []
   const matchedNote = cardDetail?.matched_query ? `Showing data for: ${cardDetail.card_query}` : null
+
+  const positionHistory = (positions ?? []).map((p) => ({
+    date: p.snapshot_date.slice(5),
+    position: p.position,
+  }))
 
   if (isLoading) {
     return (
@@ -143,35 +237,80 @@ export function ListingDetailPage() {
   }
 
   const priceNum = toNumber(item.Price)
-  const soldAvgNum = toNumber(item['Recent Sold Avg'])
-  const deltaPct =
-    priceNum !== null && soldAvgNum !== null && soldAvgNum !== 0
-      ? ((priceNum - soldAvgNum) / soldAvgNum) * 100
-      : null
-  const deltaVsSold = priceNum !== null && soldAvgNum !== null ? priceNum - soldAvgNum : null
 
-  const soldPrices = recentSold
+  // Canonical, backend-computed benchmark figures (price_research.py) instead of
+  // re-deriving them client-side, so this page always agrees with the Active
+  // Listings list page for the same card.
+  const priceAccuracyPct = (() => {
+    const n = toNumber(item['Price Accuracy'])
+    return n !== null ? n * 100 : null
+  })()
+  const activePrices = recentActive
     .map((r) => Number(r.price))
     .filter((n) => Number.isFinite(n))
-  const soldMin = soldPrices.length ? Math.min(...soldPrices) : null
-  const soldMax = soldPrices.length ? Math.max(...soldPrices) : null
-  const soldAvg =
-    soldPrices.length ? soldPrices.reduce((a, b) => a + b, 0) / soldPrices.length : null
+  const activeAvg =
+    comparison?.active_avg ?? (activePrices.length ? activePrices.reduce((a, b) => a + b, 0) / activePrices.length : null)
+  const activeMin = activePrices.length ? Math.min(...activePrices) : null
+  const activeMax = activePrices.length ? Math.max(...activePrices) : null
 
-  const ebayUrl = `https://www.ebay.com/itm/${String(item['Item ID']).replace(/[^0-9]/g, '')}`
+  const rawItemId = typeof item['Item ID'] === 'string' ? item['Item ID'].trim() : ''
+  const ebayUrl = rawItemId ? `https://www.ebay.com/itm/${rawItemId}` : null
 
   const rankNum = toNumber(item['Search Position'])
   const watchersNum = toNumber(item.Watchers)
 
+  // Read the stored, server-computed suggestion. Both this page and the list page read
+  // this same field, so they can no longer disagree the way the old client-side
+  // calculation did.
+  const recommendedPrice = toNumber(item['Suggested Price'])
+  const suggestionBasis = (item['Suggested Price Basis'] as SuggestedPriceBasis | null) ?? null
+  const recommendationDiffers =
+    recommendedPrice !== null && (priceNum === null || Math.abs(recommendedPrice - priceNum) >= 0.01)
+
+  const useRecommendedPrice = () => {
+    if (recommendedPrice === null) return
+    setPriceInput(recommendedPrice.toFixed(2))
+    revisePriceMutation.reset()
+    setEditingPrice(true)
+  }
+
+  const lastChecked = (item['Last Checked'] as string) || null
+  const daysSinceChecked = lastChecked
+    ? Math.floor((Date.now() - new Date(`${lastChecked}T00:00:00Z`).getTime()) / 86_400_000)
+    : null
+  const freshnessClass =
+    daysSinceChecked === null || daysSinceChecked >= 7
+      ? 'text-rose-600 dark:text-rose-400'
+      : daysSinceChecked >= 2
+        ? 'text-amber-600 dark:text-amber-400'
+        : 'text-emerald-600 dark:text-emerald-400'
+
   return (
     <div className="space-y-8">
-      <Link
-        to="/active"
-        className="group inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
-      >
-        <ArrowLeft size={14} className="transition-transform group-hover:-translate-x-0.5" />
-        Back to Active Listings
-      </Link>
+      <div className="flex items-center justify-between gap-4">
+        <Link
+          to="/active"
+          className="group inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
+        >
+          <ArrowLeft size={14} className="transition-transform group-hover:-translate-x-0.5" />
+          Back to Active Listings
+        </Link>
+        <div className="flex flex-col items-end gap-0.5">
+          <button
+            onClick={() => refreshMutation.mutate()}
+            disabled={refreshMutation.isPending}
+            className="inline-flex items-center gap-2 px-3 py-1.5 border border-slate-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-slate-700 dark:text-neutral-200 text-sm font-medium rounded-lg hover:bg-slate-50 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw size={14} className={refreshMutation.isPending ? 'animate-spin' : ''} />
+            {refreshMutation.isPending ? 'Refreshing…' : 'Refresh This Card'}
+          </button>
+          {refreshMutation.isError && (
+            <p className="text-xs text-rose-600 dark:text-rose-400">
+              {(refreshMutation.error as Error).message}
+            </p>
+          )}
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Header */}
@@ -208,41 +347,106 @@ export function ListingDetailPage() {
 
           <div className="flex flex-col items-end gap-1.5 pl-4 border-l border-slate-100 dark:border-neutral-700">
             <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Price</p>
-            <p className="text-3xl font-bold text-slate-900 dark:text-neutral-100 tabular-nums">{money(item.Price)}</p>
-            {deltaPct !== null && (
+            {editingPrice ? (
+              <div className="flex flex-col items-end gap-1">
+                <div className="flex items-center gap-1">
+                  <span className="text-lg font-semibold text-slate-400">$</span>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    autoFocus
+                    value={priceInput}
+                    onChange={(e) => setPriceInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') submitPrice()
+                      if (e.key === 'Escape') setEditingPrice(false)
+                    }}
+                    className="w-28 text-3xl font-bold tabular-nums text-slate-900 dark:text-neutral-100 bg-transparent border-b-2 border-blue-500 focus:outline-none"
+                  />
+                  <button
+                    onClick={submitPrice}
+                    disabled={revisePriceMutation.isPending}
+                    className="p-1.5 rounded-md text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-500/15 disabled:opacity-50"
+                    title="Save"
+                  >
+                    {revisePriceMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  </button>
+                  <button
+                    onClick={() => setEditingPrice(false)}
+                    disabled={revisePriceMutation.isPending}
+                    className="p-1.5 rounded-md text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-700 disabled:opacity-50"
+                    title="Cancel"
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                {revisePriceMutation.isError && (
+                  <p className="text-xs text-rose-600 dark:text-rose-400 max-w-[220px] text-right">
+                    {(revisePriceMutation.error as Error).message}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 group">
+                <p className="text-3xl font-bold text-slate-900 dark:text-neutral-100 tabular-nums">{money(item.Price)}</p>
+                <button
+                  onClick={startEditingPrice}
+                  className="p-1 rounded-md text-slate-300 hover:text-slate-600 hover:bg-slate-100 dark:text-neutral-600 dark:hover:text-neutral-300 dark:hover:bg-neutral-700 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title="Revise price on eBay"
+                >
+                  <Pencil size={14} />
+                </button>
+              </div>
+            )}
+            {priceAccuracyPct !== null && (
               <span
                 className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
-                  deltaPct <= 0
+                  priceAccuracyPct <= 0
                     ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
                     : 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
                 }`}
               >
-                {deltaPct <= 0 ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
-                {Math.abs(deltaPct).toFixed(1)}% {deltaPct <= 0 ? 'below' : 'above'} sold avg
+                {priceAccuracyPct <= 0 ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
+                {Math.abs(priceAccuracyPct).toFixed(1)}% {priceAccuracyPct <= 0 ? 'below' : 'above'} market avg
               </span>
             )}
-            <div className="mt-1 text-right text-xs text-slate-500 dark:text-neutral-400">
-              Est. Net{' '}
-              <span className="font-semibold text-slate-700 dark:text-neutral-200 tabular-nums">{money(item['Estimated Net'])}</span>
-              {' · '}
-              Est. Fees{' '}
-              <span className="font-semibold text-slate-700 dark:text-neutral-200 tabular-nums">{money(item['Estimated Fees'])}</span>
-            </div>
+            {!editingPrice && recommendedPrice !== null && recommendationDiffers && (
+              <div className="flex flex-col items-end gap-0.5">
+                <button
+                  onClick={useRecommendedPrice}
+                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                  title={formatSuggestionReason(suggestionBasis)}
+                >
+                  Suggested: {formatCurrency(recommendedPrice)}
+                </button>
+                {/* When a guardrail clamped the suggestion, the number above is a
+                    step rather than the destination - say so instead of quietly
+                    showing a figure the model didn't actually want. */}
+                {suggestionBasis?.clamps?.length && suggestionBasis.pre_guardrail != null ? (
+                  <span className="text-[11px] text-slate-400">
+                    step toward {formatCurrency(suggestionBasis.pre_guardrail)}
+                  </span>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
 
         <div className="mt-5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-3 border-t border-slate-100 dark:border-neutral-700 pt-4 text-sm justify-items-start">
-          <div>
-            <a
-              href={ebayUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-blue-600 dark:text-blue-400 font-medium hover:underline inline-flex items-center gap-1 text-sm"
-            >
-              View on eBay
-              <ExternalLink size={11} />
-            </a>
-          </div>
+          {ebayUrl && (
+            <div>
+              <a
+                href={ebayUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 font-medium hover:underline inline-flex items-center gap-1 text-sm"
+              >
+                View on eBay
+                <ExternalLink size={11} />
+              </a>
+            </div>
+          )}
           <div>
             <p className="text-xs text-slate-400">Start Date</p>
             <p className="text-slate-700 dark:text-neutral-200 font-medium">{(item['Start Date'] as string) || '—'}</p>
@@ -263,12 +467,44 @@ export function ListingDetailPage() {
             <p className="text-xs text-slate-400">Ad Rate</p>
             <p className="text-slate-700 dark:text-neutral-200 font-medium">{pct(item['Ad Rate'])}</p>
           </div>
+          {item.SKU && (
+            <div>
+              <p className="text-xs text-slate-400">SKU</p>
+              <p className="text-slate-700 dark:text-neutral-200 font-medium">{item.SKU as string}</p>
+            </div>
+          )}
+          <div>
+            <p className="text-xs text-slate-400">Shipping Charge</p>
+            <p className="text-slate-700 dark:text-neutral-200 font-medium">{money(item['Shipping Charge'])}</p>
+          </div>
           {rankNum !== null && (
             <div>
               <p className="text-xs text-slate-400">Search Rank</p>
-              <p className="text-slate-700 dark:text-neutral-200 font-medium">#{rankNum}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-slate-700 dark:text-neutral-200 font-medium">#{rankNum}</p>
+                {positionHistory.length > 1 && (
+                  <div className="h-6 w-16" title="Search rank, last 90 days">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={positionHistory}>
+                        <Line type="monotone" dataKey="position" stroke="#94a3b8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
             </div>
           )}
+          <div>
+            <p className="text-xs text-slate-400">Last Checked</p>
+            <p className={`font-medium inline-flex items-center gap-1 ${freshnessClass}`}>
+              <Clock size={11} />
+              {lastChecked
+                ? daysSinceChecked === 0
+                  ? 'Today'
+                  : `${daysSinceChecked}d ago`
+                : 'Never'}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -301,10 +537,22 @@ export function ListingDetailPage() {
               <CartesianGrid vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="date" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
               <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} width={40} />
-              <Tooltip formatter={(v, name) => [
-                formatCurrency(Number(v)),
-                name === 'sold' ? 'Sold avg' : 'Active avg',
-              ]} />
+              <Tooltip
+                cursor={cursor.line}
+                content={({ active, payload, label }) => {
+                  if (!active || !payload?.length) return null
+                  const sold = payload.find((p) => p.dataKey === 'sold')?.value
+                  const activeAvg = payload.find((p) => p.dataKey === 'active')?.value
+                  if (sold == null && activeAvg == null) return null
+                  return (
+                    <div className="bg-white dark:bg-neutral-800 border border-slate-200 dark:border-neutral-700 rounded-md shadow-sm px-3 py-2 text-xs space-y-0.5">
+                      <p className="font-semibold text-slate-700 dark:text-neutral-200 mb-1">{label}</p>
+                      {sold != null && <p className="text-blue-600 dark:text-blue-400">Sold avg: {formatCurrency(Number(sold))}</p>}
+                      {activeAvg != null && <p className="text-emerald-600 dark:text-emerald-400">Active avg: {formatCurrency(Number(activeAvg))}</p>}
+                    </div>
+                  )
+                }}
+              />
               {priceNum !== null && (
                 <ReferenceLine
                   y={priceNum}
@@ -313,8 +561,8 @@ export function ListingDetailPage() {
                   label={{ value: `Listed $${priceNum.toFixed(2)}`, position: 'insideTopLeft', fill: '#b45309', fontSize: 10 }}
                 />
               )}
-              <Line type="monotone" dataKey="sold" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls />
-              <Line type="monotone" dataKey="active" stroke="#10b981" strokeWidth={2} dot={false} connectNulls />
+              <Line type="monotone" dataKey="sold" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
+              <Line type="monotone" dataKey="active" stroke="#10b981" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>
         ) : (
@@ -323,61 +571,44 @@ export function ListingDetailPage() {
       </div>
       </div>
 
-      {/* Recent sold listings */}
+      {/* Active listings for this card (competing listings currently on eBay) */}
       <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-1">Recent Sold Listings</h2>
-        {matchedNote && <p className="text-xs text-slate-400 mb-3">{matchedNote}</p>}
+        <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-1">Active Listings</h2>
         {cardLoading ? (
           <TableSkeleton rows={5} columns={[{ header: 'Title', width: 'w-72' }, { header: 'Price', width: 'w-16' }]} />
-        ) : recentSold.length > 0 ? (
-          <>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
-              <div className="rounded-lg bg-slate-50 dark:bg-neutral-700/50 px-3 py-2">
-                <p className="text-[11px] text-slate-400 uppercase tracking-wide font-medium">Sold Count</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-neutral-100 tabular-nums">
-                  {int(item['Recent Sold Count'])}
-                </p>
-              </div>
-              <div className="rounded-lg bg-slate-50 dark:bg-neutral-700/50 px-3 py-2">
-                <p className="text-[11px] text-slate-400 uppercase tracking-wide font-medium">Sold Avg</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-neutral-100 tabular-nums">
-                  {soldAvg !== null ? formatCurrency(soldAvg) : '—'}
-                </p>
-              </div>
-              <div className="rounded-lg bg-slate-50 dark:bg-neutral-700/50 px-3 py-2">
-                <p className="text-[11px] text-slate-400 uppercase tracking-wide font-medium">Sold Min</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-neutral-100 tabular-nums">
-                  {soldMin !== null ? formatCurrency(soldMin) : '—'}
-                </p>
-              </div>
-              <div className="rounded-lg bg-slate-50 dark:bg-neutral-700/50 px-3 py-2">
-                <p className="text-[11px] text-slate-400 uppercase tracking-wide font-medium">Sold Max</p>
-                <p className="text-lg font-bold text-slate-900 dark:text-neutral-100 tabular-nums">
-                  {soldMax !== null ? formatCurrency(soldMax) : '—'}
-                </p>
-              </div>
-              <div className="rounded-lg bg-slate-50 dark:bg-neutral-700/50 px-3 py-2">
-                <p className="text-[11px] text-slate-400 uppercase tracking-wide font-medium">Vs Sold Avg</p>
-                <p className={`text-lg font-bold tabular-nums ${deltaVsSold === null || deltaVsSold === 0 ? 'text-slate-900 dark:text-neutral-100' : deltaVsSold < 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
-                  {deltaVsSold !== null ? formatCurrency(deltaVsSold) : '—'}
-                </p>
-              </div>
-            </div>
-            <DataTable
-              columns={[
-                { key: 'sold_date', header: 'Sold Date' },
-                { key: 'title', header: 'Title', className: 'max-w-sm truncate' },
-                { key: 'price', header: 'Price', render: (r) => formatCurrency(r.price as string) },
-                { key: 'condition', header: 'Condition' },
-                { key: 'listing_type', header: 'Type' },
-              ]}
-              data={recentSold as Record<string, unknown>[]}
-            />
-          </>
         ) : (
-          <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-sm text-slate-400">
-            No recent sold listings.
-          </div>
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+              <KpiCard title="Active Count" value={int(recentActive.length)} />
+              <KpiCard title="Active Avg" value={activeAvg !== null ? formatCurrency(activeAvg) : '—'} />
+              <KpiCard title="Active Min" value={activeMin !== null ? formatCurrency(activeMin) : '—'} />
+              <KpiCard title="Active Max" value={activeMax !== null ? formatCurrency(activeMax) : '—'} />
+            </div>
+            {recentActive.length > 0 ? (
+              <DataTable
+                columns={[
+                  {
+                    key: 'title',
+                    header: 'Title',
+                    className: 'max-w-sm',
+                    render: (r) => (
+                      <div>
+                        <div className="truncate">{r.title as string}</div>
+                        <div className="text-xs text-slate-400">{formatShortDate(r.pulled_at as string)}</div>
+                      </div>
+                    ),
+                  },
+                  { key: 'price', header: 'Price', className: 'w-20', render: (r) => formatCurrency(r.price as string) },
+                  { key: 'url', header: '', className: 'w-8', render: renderListingLink },
+                ]}
+                data={recentActive as Record<string, unknown>[]}
+              />
+            ) : (
+              <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-sm text-slate-400">
+                No other active listings found.
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

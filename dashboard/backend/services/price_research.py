@@ -1,14 +1,22 @@
 """
 Shared marketplace price research (Phase 3).
 
-price_active_listings.py and avg_active_price.py did their sold/active-listing
-research via the eBay Browse API with a client-credentials token — public
-marketplace data, not any user's account. So this runs ONCE PER UNIQUE CARD
-across ALL users (not per-user), writes to the shared Postgres tables
-(price_snapshots, active_price_snapshots, sold_listings), writes per-owner
-listing_positions, then updates every user's own active_listings row for
-that card with the derived columns (Recent Sold Avg, Price vs Sold Avg,
+Runs ONCE PER UNIQUE CARD across ALL users (not per-user), writes to the shared
+Postgres tables (price_snapshots, active_price_snapshots, active_market_listings),
+writes per-owner listing_positions, then updates every user's own active_listings
+row for that card with the derived columns (Recent Sold Avg, Price vs Sold Avg,
 Active Avg (Top 5), Price Accuracy, Search Position).
+
+Sold-side research (research_card_sold) uses ebaypricer.cards.lookup_market_price
+(TCGdex/TCGPlayer market price), NOT eBay's API. eBay's Browse API has no real
+"sold items" search - it was previously called here with a soldDate filter that
+eBay silently ignores, so it returned ordinary active listings mislabeled as sold
+(verified: identical item IDs to the active search, live buyingOptions present, no
+soldDate/itemEndDate in the response). Real sold comps require eBay's Marketplace
+Insights API, which is restricted-access and not on this app's granted scopes.
+
+Active-side research (research_card_active) still uses eBay's Browse API via
+client-credentials token - that one IS a real active-listings search, so it's fine.
 
 Supersedes scripts/price_active_listings.py + scripts/avg_active_price.py,
 which read/wrote an Excel workbook and a local SQLite cache as their
@@ -22,31 +30,29 @@ same pattern as pipeline_runner.py's legacy pipeline lock (different key).
 import logging
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from statistics import mean, stdev
 
 import psycopg
 import requests
 from psycopg.types.json import Json
 
-from ebaypricer.browse_api import (
-    OUTLIER_SIGMA,
-    parse_active_item,
-    parse_item,
-    search_active_listings,
-    search_sold_listings,
-)
+from ebaypricer.browse_api import OUTLIER_SIGMA, parse_active_item, search_active_listings
+from ebaypricer.cards import lookup_market_price
 
 from dashboard.backend.config import DATABASE_URL
 from dashboard.backend.database import get_db
+from dashboard.backend.services.suggested_price import (
+    Suggestion as SuggestionResult,
+    compute_suggested_price,
+)
 
 log = logging.getLogger(__name__)
 
 _RESEARCH_LOCK_KEY = 727002
 _LOCAL_GUARD = threading.Lock()
 
-LOOKBACK_DAYS = 30
-MAX_SOLD_MATCHES = 10
+MAX_ACTIVE_MATCHES = 15
 MAX_REPORTED_POSITION = 50
 # Wall-clock budget for one run. Each card's API calls are individually bounded
 # (requests timeout=15s, capped 429 retries in browse_api.py), but a long tail of
@@ -84,7 +90,7 @@ def _normalize_item_id(raw_id: str) -> str:
 
 
 def _parse_iso(v: str | None) -> datetime | None:
-    """eBay/parse_item ISO timestamp text -> datetime; None for empty/junk."""
+    """eBay/parse_active_item ISO timestamp text -> datetime; None for empty/junk."""
     if not v:
         return None
     s = str(v).strip()
@@ -158,7 +164,78 @@ def _save_price_snapshot(conn, snapshot: dict) -> None:
     )
 
 
-def _save_sold_listings(conn, parsed_items: list[dict]) -> None:
+def research_card_sold(card_query: str, today: date, force: bool = False) -> dict | None:
+    """Market-price research for one card, from TCGdex/TCGPlayer (lookup_market_price).
+
+    eBay's Browse API has no real "sold items" search - despite the soldDate filter
+    this used to pass, it silently ignores it and returns ordinary active listings
+    (verified: identical item IDs, live buyingOptions, no soldDate/itemEndDate field
+    in the response). Real sold comps require eBay's Marketplace Insights API, which
+    is restricted-access and not granted on this app's scopes. TCGdex gives one
+    current market price rather than individual sold comps, so the snapshot below
+    is a single-point sample (sample_size=1) rather than an aggregate of many sales.
+
+    force=True bypasses today's cached snapshot. Without it, a changed algorithm
+    silently has no effect on any card already researched today - the caller's own
+    force flag has to reach this far down to actually re-research."""
+    if not force:
+        with get_db() as conn:
+            existing = _get_today_price_snapshot(conn, card_query, today)
+        if existing:
+            return existing
+
+    price = lookup_market_price(card_query)
+    if price is None:
+        return None
+
+    snapshot = {
+        "card_query": card_query,
+        "snapshot_date": today,
+        "sample_size": 1,
+        "avg_price": price,
+        "median_price": price,
+        "min_price": price,
+        "max_price": price,
+        "std_dev": 0.0,
+        "weighted_avg": price,
+    }
+    with get_db(read_only=False) as conn:
+        _save_price_snapshot(conn, snapshot)
+    return snapshot
+
+
+def _get_today_active_snapshot(conn, card_query: str, today: date) -> dict | None:
+    row = conn.execute(
+        "SELECT card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price "
+        "FROM active_price_snapshots WHERE card_query = %s AND snapshot_date = %s",
+        (card_query, today),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _percentile(sorted_values: list[float], pct: float) -> float:
+    """Nearest-rank percentile of an already-sorted list. Used for the p25 floor
+    anchor: with ~15 comps that is the 4th-cheapest, i.e. "cheaper than 75% of the
+    market" - competitive without chasing a single (possibly junk) cheapest listing."""
+    if not sorted_values:
+        raise ValueError("empty list")
+    idx = max(0, min(len(sorted_values) - 1, int(round(pct * (len(sorted_values) - 1)))))
+    return sorted_values[idx]
+
+
+def _own_item_ids(conn) -> set[str]:
+    """Every item_id listed by any user, for excluding our own listings from the
+    competitor pool. Without this the aggregates include our own price, which for a
+    repricing feature is a feedback loop: cut price -> next run reads that lower
+    price as a competitor -> pulls the average down -> suggests cutting again."""
+    return {
+        str(r["item_id"]).strip()
+        for r in conn.execute("SELECT item_id FROM active_listings").fetchall()
+        if r["item_id"]
+    }
+
+
+def _save_active_listings(conn, parsed_items: list[dict]) -> None:
     if not parsed_items:
         return
     rows = [
@@ -170,7 +247,6 @@ def _save_sold_listings(conn, parsed_items: list[dict]) -> None:
             "currency": p["currency"],
             "condition": p["condition"],
             "listing_type": p["listing_type"],
-            "sold_date": _parse_iso(p["sold_date"]),
             "url": p["url"],
             "pulled_at": _parse_iso(p["pulled_at"]),
         }
@@ -178,127 +254,99 @@ def _save_sold_listings(conn, parsed_items: list[dict]) -> None:
     ]
     with conn.cursor() as cur:
         cur.executemany(
-            """INSERT INTO sold_listings
-                   (item_id, card_query, title, price, currency, condition, listing_type, sold_date, url, pulled_at)
+            """INSERT INTO active_market_listings
+                   (item_id, card_query, title, price, currency, condition, listing_type, url, pulled_at)
                VALUES (%(item_id)s, %(card_query)s, %(title)s, %(price)s, %(currency)s, %(condition)s,
-                       %(listing_type)s, %(sold_date)s, %(url)s, %(pulled_at)s)
-               ON CONFLICT (item_id) DO NOTHING""",
+                       %(listing_type)s, %(url)s, %(pulled_at)s)
+               ON CONFLICT (item_id) DO UPDATE SET
+                   card_query = EXCLUDED.card_query, title = EXCLUDED.title, price = EXCLUDED.price,
+                   currency = EXCLUDED.currency, condition = EXCLUDED.condition,
+                   listing_type = EXCLUDED.listing_type, url = EXCLUDED.url, pulled_at = EXCLUDED.pulled_at""",
             rows,
         )
-
-
-def research_card_sold(card_query: str, today: date) -> dict | None:
-    """Sold-comp pricing research for one card (ports price_active_listings.py::fetch_price_for_card)."""
-    with get_db() as conn:
-        existing = _get_today_price_snapshot(conn, card_query, today)
-    if existing:
-        return existing
-
-    try:
-        items = search_sold_listings(card_query, LOOKBACK_DAYS)
-    except requests.HTTPError as e:
-        log.error("eBay API error researching sold '%s': %s", card_query, e)
-        return None
-
-    items.sort(key=lambda i: i.get("itemEndDate") or i.get("itemCreationDate") or "", reverse=True)
-    items = items[:MAX_SOLD_MATCHES]
-    parsed_items = [p for p in (parse_item(raw, card_query) for raw in items) if p]
-
-    if parsed_items:
-        with get_db(read_only=False) as conn:
-            _save_sold_listings(conn, parsed_items)
-    time.sleep(1)
-
-    pairs = [(p["price"], p["sold_date"]) for p in parsed_items if p.get("currency") == "USD"]
-    if not pairs:
-        return None
-
-    recent_cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
-    if len(pairs) >= 4:
-        raw_prices = [p for p, _ in pairs]
-        m, s = mean(raw_prices), stdev(raw_prices)
-        pairs = [(p, d) for p, d in pairs if abs(p - m) <= OUTLIER_SIGMA * s]
-    if not pairs:
-        return None
-
-    prices = [p for p, _ in pairs]
-    weighted_sum = 0.0
-    weight_total = 0
-    for p, sold_date in pairs:
-        w = 2 if sold_date >= recent_cutoff else 1
-        weighted_sum += p * w
-        weight_total += w
-
-    sorted_p = sorted(prices)
-    n = len(sorted_p)
-    median = sorted_p[n // 2] if n % 2 else (sorted_p[n // 2 - 1] + sorted_p[n // 2]) / 2
-
-    snapshot = {
-        "card_query": card_query,
-        "snapshot_date": today,
-        "sample_size": n,
-        "avg_price": round(mean(prices), 2),
-        "median_price": round(median, 2),
-        "min_price": round(min(prices), 2),
-        "max_price": round(max(prices), 2),
-        "std_dev": round(stdev(prices), 2) if n > 1 else 0.0,
-        "weighted_avg": round(weighted_sum / weight_total, 2),
-    }
-    with get_db(read_only=False) as conn:
-        _save_price_snapshot(conn, snapshot)
-    return snapshot
-
-
-def _get_today_active_snapshot(conn, card_query: str, today: date) -> dict | None:
-    row = conn.execute(
-        "SELECT card_query, snapshot_date, sample_size, avg_price, min_price, max_price "
-        "FROM active_price_snapshots WHERE card_query = %s AND snapshot_date = %s",
-        (card_query, today),
-    ).fetchone()
-    return dict(row) if row else None
 
 
 def _save_active_snapshot(conn, snapshot: dict) -> None:
     conn.execute(
         """INSERT INTO active_price_snapshots
-               (card_query, snapshot_date, sample_size, avg_price, min_price, max_price)
-           VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s, %(max_price)s)
+               (card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price)
+           VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
+                   %(max_price)s, %(p25_price)s)
            ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
                sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
-               min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price""",
+               min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
+               p25_price = EXCLUDED.p25_price""",
         snapshot,
     )
 
 
-def research_card_active(card_query: str, today: date) -> dict | None:
-    """Active-listing pricing research for one card (ports avg_active_price.py::fetch_active_price_for_card)."""
-    with get_db() as conn:
-        existing = _get_today_active_snapshot(conn, card_query, today)
-    if existing:
-        return existing
+def research_card_active(card_query: str, today: date, force: bool = False) -> dict | None:
+    """Active-listing pricing research for one card (ports avg_active_price.py::fetch_active_price_for_card).
+
+    force=True bypasses today's cached snapshot - see research_card_sold's note."""
+    if not force:
+        with get_db() as conn:
+            existing = _get_today_active_snapshot(conn, card_query, today)
+        if existing:
+            return existing
 
     try:
-        items = search_active_listings(card_query)
+        items = search_active_listings(card_query, limit=MAX_ACTIVE_MATCHES)
     except requests.RequestException as e:
         log.error("eBay API error researching active '%s': %s", card_query, e)
         return None
 
     parsed_items = [p for p in (parse_active_item(raw, card_query) for raw in items) if p]
+
+    # Exclude our own listings from the competitor pool. eBay's search returns them
+    # like any other result (it is in fact how search_position is derived), so
+    # without this every aggregate is partly a measurement of ourselves.
+    # active_market_listings.item_id is the raw "v1|123456|0" form while
+    # active_listings.item_id is bare numeric, hence _normalize_item_id.
+    with get_db() as conn:
+        own_ids = _own_item_ids(conn)
+    competitor_items = [
+        p for p in parsed_items if _normalize_item_id(str(p.get("item_id") or "").strip()) not in own_ids
+    ]
+    self_excluded = len(parsed_items) - len(competitor_items)
+    # If stripping ourselves leaves too little to reason about, fall back to the
+    # unfiltered pool rather than emitting a garbage band off 1-2 comps.
+    if len(competitor_items) >= 3:
+        parsed_items = competitor_items
+    elif self_excluded:
+        log.warning(
+            "Self-exclusion left only %d comps for '%s'; keeping unfiltered pool",
+            len(competitor_items), card_query,
+        )
+
+    if parsed_items:
+        with get_db(read_only=False) as conn:
+            _save_active_listings(conn, parsed_items)
     time.sleep(0.5)
 
     prices = [p["price"] for p in parsed_items if p.get("currency") == "USD"]
     if not prices:
         return None
 
+    # Drop outliers (a misclassified/bundle/wrong-print listing miles away from the
+    # rest) before averaging, same 2-sigma approach as the rest of this codebase.
+    if len(prices) >= 4:
+        m, s = mean(prices), stdev(prices)
+        if s > 0:
+            filtered = [p for p in prices if abs(p - m) <= OUTLIER_SIGMA * s]
+            if filtered:
+                prices = filtered
+
     sorted_prices = sorted(prices)
-    top5 = sorted_prices[:5]
+    cheapest = sorted_prices[:MAX_ACTIVE_MATCHES]
     snapshot = {
         "card_query": card_query,
         "snapshot_date": today,
-        "sample_size": len(top5),
-        "avg_price": round(mean(top5), 2),
-        "min_price": round(min(top5), 2),
-        "max_price": round(max(top5), 2),
+        "sample_size": len(cheapest),
+        "avg_price": round(mean(cheapest), 2),
+        "min_price": round(min(cheapest), 2),
+        "max_price": round(max(cheapest), 2),
+        "p25_price": round(_percentile(cheapest, 0.25), 2),
     }
     with get_db(read_only=False) as conn:
         _save_active_snapshot(conn, snapshot)
@@ -363,15 +411,52 @@ def research_card_positions(conn, card_query: str, items: list[dict], today: dat
                        search_size = EXCLUDED.search_size""",
                 to_upsert,
             )
+            # Also mirror today's position onto active_listings.search_position, so it's
+            # populated for users on the Excel-free per-user OAuth sync path too (the
+            # legacy Excel pipeline previously was the only source of this column).
+            # NOTE: this deliberately mirrors `reported` (the clamped value, where
+            # not-found-in-top-50 becomes MAX_REPORTED_POSITION), not the raw position.
+            # A not-found listing is the least visible one, so it must land at the
+            # aggressive end of the pricing ramp - writing raw NULL here would instead
+            # make it look "unknown" and get neutral treatment.
+            cur.executemany(
+                "UPDATE active_listings SET search_position = %s WHERE user_id = %s AND item_id = %s",
+                [(reported, user_id, item_id) for user_id, item_id, _, _, reported, _ in to_upsert],
+            )
+
+
+def _suggestion_for_row(row, active_snapshot: dict | None):
+    """Run the suggested-price model for one active_listings row. Falls back to
+    min_price when p25_price is absent, so rows still get a sane suggestion before a
+    fresh research run has populated the newer column."""
+    if not active_snapshot:
+        return SuggestionResult(None, "no_comps", {"v": 1, "status": "no_comps", "comps": 0})
+    floor_anchor = active_snapshot.get("p25_price") or active_snapshot.get("min_price")
+    return compute_suggested_price(
+        current_price=float(row["price"]) if row["price"] is not None else None,
+        anchor_avg=active_snapshot.get("avg_price"),
+        anchor_floor=floor_anchor,
+        comps=active_snapshot.get("sample_size"),
+        days_listed=row.get("days_listed"),
+        rank=row.get("search_position"),
+        condition=row.get("condition"),
+        shipping_charge=float(row["shipping_charge"]) if row.get("shipping_charge") is not None else None,
+    )
 
 
 def update_active_listing_derived_columns(
     conn, card_query: str, sold_snapshot: dict | None, active_snapshot: dict | None, today: date
 ) -> int:
     """Apply this card's research to every user's matching active_listings rows in one pass
-    (ports price_active_listings.py/avg_active_price.py::write_price_data)."""
+    (ports price_active_listings.py/avg_active_price.py::write_price_data).
+
+    Also computes the stored suggested price. This runs immediately after
+    research_card_positions() has written search_position in the same transaction, so
+    every model input (price, condition, days_listed, rank) is current and consistent."""
     rows = conn.execute(
-        "SELECT user_id, item_id, price FROM active_listings WHERE card = %s", (card_query,)
+        "SELECT user_id, item_id, price, condition, days_listed, search_position, shipping_charge "
+        "FROM active_listings WHERE card = %s",
+        (card_query,),
     ).fetchall()
     if not rows:
         return 0
@@ -379,7 +464,11 @@ def update_active_listing_derived_columns(
     recent_sold_avg = sold_snapshot["weighted_avg"] if sold_snapshot else None
     recent_sold_count = sold_snapshot["sample_size"] if sold_snapshot else None
     active_avg = active_snapshot["avg_price"] if active_snapshot else None
-    last_checked = today if sold_snapshot else None
+    # "Last checked" means we researched this card, not specifically that TCGdex had a
+    # price for it. Gating on sold_snapshot alone left the ~30% of cards with no TCGdex
+    # match permanently showing the red stale indicator despite current active data.
+    last_checked = today if (sold_snapshot or active_snapshot) else None
+    now = datetime.now(timezone.utc)
 
     updates = []
     for r in rows:
@@ -395,10 +484,14 @@ def update_active_listing_derived_columns(
             if target != 0:
                 price_accuracy = round((float(price) - target) / target, 4)
 
+        suggestion = _suggestion_for_row(r, active_snapshot)
+
         updates.append(
             (
                 recent_sold_avg, recent_sold_count, last_checked, active_avg,
-                price_vs_sold_avg, price_accuracy, r["user_id"], r["item_id"],
+                price_vs_sold_avg, price_accuracy,
+                suggestion.price, now, Json(suggestion.basis),
+                r["user_id"], r["item_id"],
             )
         )
 
@@ -407,11 +500,110 @@ def update_active_listing_derived_columns(
             """UPDATE active_listings
                SET recent_sold_avg = %s, recent_sold_count = %s,
                    last_checked = COALESCE(%s, last_checked), active_avg_top5 = %s,
-                   price_vs_sold_avg = %s, price_accuracy = %s
+                   price_vs_sold_avg = %s, price_accuracy = %s,
+                   suggested_price = %s, suggested_price_at = %s, suggested_price_basis = %s
                WHERE user_id = %s AND item_id = %s""",
             updates,
         )
     return len(updates)
+
+
+def recompute_suggestions(user_id: str | None = None) -> dict:
+    """Recompute stored suggestions from the most recent existing snapshots.
+
+    Makes ZERO eBay calls - it reads whatever active_price_snapshots already holds. Used
+    three ways: after a per-user sync (so new listings and daily days_listed drift get a
+    suggestion without waiting for the 6h research cadence), as the backfill entry point
+    after a model change, and for verification reruns."""
+    where = "WHERE al.card IS NOT NULL AND al.card <> ''"
+    params: list = []
+    if user_id:
+        where += " AND al.user_id = %s"
+        params.append(user_id)
+
+    # DISTINCT ON picks each card's newest snapshot row.
+    sql = f"""
+        SELECT al.user_id, al.item_id, al.price, al.condition, al.days_listed,
+               al.search_position, al.shipping_charge,
+               s.avg_price, s.min_price, s.p25_price, s.sample_size
+        FROM active_listings al
+        LEFT JOIN LATERAL (
+            SELECT avg_price, min_price, p25_price, sample_size
+            FROM active_price_snapshots aps
+            WHERE aps.card_query = al.card
+            ORDER BY aps.snapshot_date DESC LIMIT 1
+        ) s ON true
+        {where}
+    """
+    now = datetime.now(timezone.utc)
+    computed = nulled = clamped = 0
+    updates = []
+    with get_db() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    for r in rows:
+        snapshot = None
+        if r["avg_price"] is not None:
+            snapshot = {
+                "avg_price": r["avg_price"],
+                "min_price": r["min_price"],
+                "p25_price": r["p25_price"],
+                "sample_size": r["sample_size"],
+            }
+        suggestion = _suggestion_for_row(r, snapshot)
+        if suggestion.price is None:
+            nulled += 1
+        else:
+            computed += 1
+            if suggestion.basis.get("clamps"):
+                clamped += 1
+        updates.append((suggestion.price, now, Json(suggestion.basis), r["user_id"], r["item_id"]))
+
+    if updates:
+        with get_db(read_only=False) as conn, conn.cursor() as cur:
+            cur.executemany(
+                """UPDATE active_listings
+                   SET suggested_price = %s, suggested_price_at = %s, suggested_price_basis = %s
+                   WHERE user_id = %s AND item_id = %s""",
+                updates,
+            )
+    return {"rows": len(updates), "computed": computed, "null": nulled, "clamped": clamped}
+
+
+def refresh_card(card_query: str) -> dict:
+    """Force-refresh one card's shared research (sold + active) and every user's derived
+    active_listings columns for it, synchronously. Backs the per-listing "Refresh" button
+    on the listing detail page - deliberately bypasses run_shared_price_research's
+    advisory lock/batch loop, since that machinery exists to serialize whole-catalog runs
+    and would otherwise make a single-card refresh wait behind (or block) one."""
+    today = datetime.now(timezone.utc).date()
+    sold_snapshot = research_card_sold(card_query, today, force=True)
+    active_snapshot = research_card_active(card_query, today, force=True)
+
+    with get_db() as conn:
+        items = [
+            dict(r)
+            for r in conn.execute(
+                "SELECT item_id, title, user_id FROM active_listings WHERE card = %s",
+                (card_query,),
+            ).fetchall()
+        ]
+
+    updated_rows = 0
+    if items:
+        with get_db(read_only=False) as conn:
+            research_card_positions(conn, card_query, items, today)
+            updated_rows = update_active_listing_derived_columns(
+                conn, card_query, sold_snapshot, active_snapshot, today
+            )
+
+    return {
+        "status": "ok",
+        "card_query": card_query,
+        "sold_found": sold_snapshot is not None,
+        "active_found": active_snapshot is not None,
+        "updated_rows": updated_rows,
+    }
 
 
 JOB_NAME = "shared_price_research"
@@ -504,7 +696,7 @@ def run_shared_price_research(force: bool = False) -> dict:
                     _finish_job_run(job_id, "skipped", detail)
                     return {"status": "skipped", **detail}
 
-        found_sold = found_active = errors = 0
+        found_sold = found_active = errors = suggested_rows = 0
         timed_out = False
         for i, card in enumerate(cards):
             if (datetime.now(timezone.utc) - started).total_seconds() > MAX_RUN_SECONDS:
@@ -517,10 +709,14 @@ def run_shared_price_research(force: bool = False) -> dict:
                 )
                 break
             try:
-                sold_snapshot = research_card_sold(card, today)
+                # force has to reach the per-card functions, not just the
+                # all-researched-today check above - otherwise a forced run silently
+                # reuses today's cached snapshots and an algorithm change appears to
+                # have no effect.
+                sold_snapshot = research_card_sold(card, today, force=force)
                 if sold_snapshot:
                     found_sold += 1
-                active_snapshot = research_card_active(card, today)
+                active_snapshot = research_card_active(card, today, force=force)
                 if active_snapshot:
                     found_active += 1
 
@@ -535,7 +731,9 @@ def run_shared_price_research(force: bool = False) -> dict:
                 if items:
                     with get_db(read_only=False) as conn:
                         research_card_positions(conn, card, items, today)
-                        update_active_listing_derived_columns(conn, card, sold_snapshot, active_snapshot, today)
+                        suggested_rows += update_active_listing_derived_columns(
+                            conn, card, sold_snapshot, active_snapshot, today
+                        )
             except Exception as e:
                 errors += 1
                 log.error("Research failed for card '%s': %s", card, e)
@@ -544,6 +742,7 @@ def run_shared_price_research(force: bool = False) -> dict:
             "cards": len(cards),
             "sold_found": found_sold,
             "active_found": found_active,
+            "suggested_rows": suggested_rows,
             "errors": errors,
             "timed_out": timed_out,
             "duration_s": round((datetime.now(timezone.utc) - started).total_seconds()),

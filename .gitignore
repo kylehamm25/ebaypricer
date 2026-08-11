@@ -1,6 +1,7 @@
 .venv*
 .env
 !.env.example
+deploy/.env.deploy
 __pycache__/
 data/*
 !data/.gitkeep

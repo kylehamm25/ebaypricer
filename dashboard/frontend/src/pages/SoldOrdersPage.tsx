@@ -1,11 +1,12 @@
-import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { StageRefreshButton } from '../components/shared/StageRefreshButton'
+import { useChartCursor } from '../lib/theme'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { PaginatedResponse, SoldSummary, SoldTrend } from '../types'
 
@@ -34,9 +35,30 @@ interface SoldOrderItem extends Record<string, unknown> {
 }
 
 export function SoldOrdersPage() {
-  const [page, setPage] = useState(1)
-  const [cardFilter, setCardFilter] = useState('')
+  const cursor = useChartCursor()
   const queryClient = useQueryClient()
+
+  const [searchParams, setSearchParams] = useSearchParams()
+  const page = Number(searchParams.get('page') ?? '1')
+  const cardFilter = searchParams.get('card') ?? ''
+
+  // Keeps filters/page in the URL so they survive navigating away and back
+  // (the page component unmounts on route change and would otherwise lose
+  // plain useState).
+  const updateParams = (updates: Record<string, string | null>) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null || value === '') next.delete(key)
+        else next.set(key, value)
+      }
+      return next
+    }, { replace: true })
+  }
+  const setPage = (value: number | ((p: number) => number)) => {
+    const nextPage = typeof value === 'function' ? value(page) : value
+    updateParams({ page: nextPage > 1 ? String(nextPage) : null })
+  }
 
   const { data: listData, isLoading } = useQuery({
     queryKey: ['sold-list', page, cardFilter],
@@ -104,10 +126,11 @@ export function SoldOrdersPage() {
               />
               <YAxis tick={{ fontSize: 11 }} />
               <Tooltip
+                cursor={cursor.bar}
                 formatter={(v) => '$' + Number(v).toFixed(2)}
                 labelFormatter={(label) => formatShortDate(label as string)}
               />
-              <Bar dataKey="revenue" fill="#10b981" radius={[2, 2, 0, 0]} />
+              <Bar dataKey="revenue" fill="#10b981" radius={[2, 2, 0, 0]} isAnimationActive={false} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -121,7 +144,7 @@ export function SoldOrdersPage() {
           placeholder="Filter by card name..."
           className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm w-64"
           value={cardFilter}
-          onChange={(e) => { setCardFilter(e.target.value); setPage(1) }}
+          onChange={(e) => updateParams({ card: e.target.value, page: null })}
         />
         <span className="text-xs text-slate-400">
           {listData ? `${listData.total} orders` : ''}

@@ -3,9 +3,14 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from psycopg.types.json import Json
+from pydantic import BaseModel
+
+from ebaypricer.trading_api import EbayReviseError, revise_item_price
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
+from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_token
 from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
@@ -20,7 +25,12 @@ _SELECT = (
     'recent_sold_avg AS "Recent Sold Avg", price_vs_sold_avg AS "Price vs Sold Avg", '
     'recent_sold_count AS "Recent Sold Count", last_checked AS "Last Checked", '
     'active_avg_top5 AS "Active Avg (Top 5)", price_accuracy AS "Price Accuracy", '
-    'search_position AS "Search Position"'
+    'search_position AS "Search Position", '
+    # Computed server-side by services/suggested_price.py. Both /list and /item use
+    # this same _SELECT, which is what keeps the list page and the detail page showing
+    # one identical number - they previously each derived their own and disagreed.
+    'suggested_price AS "Suggested Price", suggested_price_at AS "Suggested Price At", '
+    'suggested_price_basis AS "Suggested Price Basis"'
 )
 
 _SORT_COLS = {
@@ -30,13 +40,14 @@ _SORT_COLS = {
     "Search Position": "search_position",
     "Card": "card",
     "Condition": "condition",
+    "Suggested Price": "suggested_price",
 }
 
 
-def _exists(db) -> bool:
+def _exists(db, table: str = "active_listings") -> bool:
     return bool(
         db.execute(
-            "SELECT to_regclass('public.active_listings') IS NOT NULL AS exists"
+            "SELECT to_regclass(%s) IS NOT NULL AS exists", [f"public.{table}"]
         ).fetchone()["exists"]
     )
 
@@ -45,7 +56,7 @@ def _exists(db) -> bool:
 def get_active_listings(
     user_id: UUID = Depends(get_current_user_id),
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
+    per_page: int = Query(50, ge=1, le=500),
     card: str = Query(None),
     condition: str = Query(None),
     days_min: int = Query(None),
@@ -136,6 +147,172 @@ def get_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
     if title:
         item["sprite_url"] = get_sprite_url(title)
     return item
+
+
+@router.post("/item/{item_id}/refresh")
+def refresh_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
+    with get_db() as db:
+        row = db.execute(
+            "SELECT card FROM active_listings WHERE user_id = %s AND item_id = %s",
+            [user_id, item_id],
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Listing not found")
+    card = row["card"]
+    if not card:
+        raise HTTPException(400, "Listing has no matched card to research")
+
+    from dashboard.backend.services.price_research import refresh_card
+
+    refresh_card(card)
+    return get_active_item(item_id, user_id)
+
+
+@router.get("/item/{item_id}/positions")
+def get_active_item_positions(
+    item_id: str,
+    user_id: UUID = Depends(get_current_user_id),
+    days: int = Query(90, ge=1, le=365),
+):
+    with get_db() as db:
+        if not _exists(db, "listing_positions"):
+            return []
+        rows = db.execute(
+            """SELECT snapshot_date, position, search_size
+               FROM listing_positions
+               WHERE user_id = %s AND item_id = %s
+                 AND snapshot_date >= CURRENT_DATE - make_interval(days => %s)
+               ORDER BY snapshot_date ASC""",
+            [user_id, item_id, days],
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+class ReviseItemPrice(BaseModel):
+    price: float
+
+
+def _owns_item(db, user_id: UUID, item_id: str) -> bool:
+    return db.execute(
+        "SELECT 1 FROM active_listings WHERE user_id = %s AND item_id = %s",
+        [user_id, item_id],
+    ).fetchone() is not None
+
+
+@router.post("/item/{item_id}/price")
+def revise_active_item_price(
+    item_id: str, body: ReviseItemPrice, user_id: UUID = Depends(get_current_user_id)
+):
+    if body.price <= 0:
+        raise HTTPException(400, "Price must be greater than 0")
+    # Confirm the listing is ours before calling eBay. The user's own token would make
+    # eBay reject a foreign item anyway, but there's no reason to send the call.
+    with get_db() as db:
+        if not _owns_item(db, user_id, item_id):
+            raise HTTPException(404, "Listing not found")
+    try:
+        token = get_access_token(user_id)
+    except NotConnectedError:
+        raise HTTPException(409, "eBay account not connected")
+    try:
+        revise_item_price(item_id, body.price, token)
+    except EbayReviseError as e:
+        raise HTTPException(422, str(e))
+
+    with get_db(read_only=False) as db:
+        db.execute(
+            "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
+            [body.price, user_id, item_id],
+        )
+    return {"status": "ok", "price": body.price}
+
+
+class BulkPriceItem(BaseModel):
+    item_id: str
+    price: float
+
+
+class BulkPriceRequest(BaseModel):
+    items: list[BulkPriceItem]
+
+
+BULK_PRICE_JOB = "bulk_price_revision"
+MAX_BULK_ITEMS = 100
+
+
+@router.post("/bulk-price")
+def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_current_user_id)):
+    """Apply several price revisions in one call (the review-then-confirm bulk flow).
+
+    Each item is attempted independently and reported on individually - one listing
+    that eBay rejects must not silently discard the rest. Records a job_runs row, since
+    price revisions otherwise leave no audit trail anywhere."""
+    if not body.items:
+        raise HTTPException(400, "No items supplied")
+    if len(body.items) > MAX_BULK_ITEMS:
+        raise HTTPException(400, f"Too many items in one request (max {MAX_BULK_ITEMS})")
+
+    try:
+        token = get_access_token(user_id)
+    except NotConnectedError:
+        raise HTTPException(409, "eBay account not connected")
+
+    started = datetime.now(timezone.utc)
+    results: list[dict] = []
+    applied = 0
+
+    with get_db() as db:
+        owned = {
+            r["item_id"]
+            for r in db.execute(
+                "SELECT item_id FROM active_listings WHERE user_id = %s", [user_id]
+            ).fetchall()
+        }
+
+    for item in body.items:
+        if item.price <= 0:
+            results.append({"item_id": item.item_id, "status": "error", "error": "Price must be greater than 0"})
+            continue
+        if item.item_id not in owned:
+            results.append({"item_id": item.item_id, "status": "error", "error": "Listing not found"})
+            continue
+        try:
+            revise_item_price(item.item_id, item.price, token)
+        except Exception as e:
+            results.append({"item_id": item.item_id, "status": "error", "error": str(e)[:200]})
+            continue
+        with get_db(read_only=False) as db:
+            db.execute(
+                "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
+                [item.price, user_id, item.item_id],
+            )
+        applied += 1
+        results.append({"item_id": item.item_id, "status": "ok", "price": item.price})
+
+    failed = len(results) - applied
+    try:
+        with get_db(read_only=False) as db:
+            db.execute(
+                "INSERT INTO job_runs (job_name, user_id, status, started_at, finished_at, detail) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    BULK_PRICE_JOB, user_id, "ok" if failed == 0 else "partial",
+                    started, datetime.now(timezone.utc),
+                    Json({"requested": len(body.items), "applied": applied, "failed": failed}),
+                ),
+            )
+    except Exception as e:  # auditing must never fail the actual revision
+        print(f"[bulk-price] failed to record job_run: {e}")
+
+    # Prices changed, so the stored suggestions are now relative to stale prices.
+    try:
+        from dashboard.backend.services.price_research import recompute_suggestions
+
+        recompute_suggestions(user_id=str(user_id))
+    except Exception as e:
+        print(f"[bulk-price] suggestion recompute failed: {e}")
+
+    return {"applied": applied, "failed": failed, "results": results}
 
 
 @router.get("/summary")

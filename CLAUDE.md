@@ -84,3 +84,8 @@ React 19 + TypeScript + Vite, Tailwind v4, TanStack Query, react-router-dom v7, 
 ## Working across the pipeline/dashboard boundary
 
 Pipeline scripts write to Excel + local SQLite; the dashboard reads Postgres and re-syncs from Excel on each startup/trigger. If you change a column name or add a field in the Excel sheets (`get_active.py`, `append_sold_orders.py`), you must also update the corresponding column-mapping dict in `dashboard/backend/services/excel_sync.py` (`_SOLD_COLUMNS`, `_ACTIVE_COLUMNS`) or the new field silently won't reach the dashboard.
+
+## Git and Commit Conventions
+
+- NEVER include Claude/AI-related comments, attributions, or signatures in PR descriptions, commit messages, code comments, or any content pushed to GitHub.
+- Do not include "Co-Authored-By" lines.

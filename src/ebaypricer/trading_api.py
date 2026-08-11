@@ -10,6 +10,10 @@ NS = "urn:ebay:apis:eBLBaseComponents"
 TRADING_URL = "https://api.ebay.com/ws/api.dll"
 
 
+class EbayReviseError(Exception):
+    """eBay rejected a ReviseItem call (e.g. item ended, price out of allowed range)."""
+
+
 def _t(el, tag: str) -> str:
     child = el.find(f"{{{NS}}}{tag}")
     return (child.text or "").strip() if child is not None and child.text else ""
@@ -309,6 +313,40 @@ def _build_item_xml(item_id: str, access_token: str) -> str:
 </GetItemRequest>"""
 
 
+TITLE_CONDITION_MAP = {
+    r'\bNM\b': 'Near Mint',
+    r'\bNear Mint\b': 'Near Mint',
+    r'\bMint\b': 'Near Mint',
+    r'\bLP\b': 'Lightly Played',
+    r'\bLightly Played\b': 'Lightly Played',
+    r'\bMP\b': 'Moderately Played',
+    r'\bModerately Played\b': 'Moderately Played',
+    r'\bHP\b': 'Heavily Played',
+    r'\bHeavily Played\b': 'Heavily Played',
+    r'\bDMG\b': 'Damaged',
+    r'\bDamaged\b': 'Damaged',
+}
+
+
+def parse_condition_from_title(title: str) -> str:
+    for pattern, condition in TITLE_CONDITION_MAP.items():
+        if re.search(pattern, title, re.IGNORECASE):
+            return condition
+    return ""
+
+
+def resolve_condition(title: str, item_id: str, access_token: str) -> str:
+    """Condition from the title if it's stated there, otherwise a GetItem API
+    fallback call (skipped if the API only says the generic 'Ungraded')."""
+    cond = parse_condition_from_title(title)
+    if cond:
+        return cond
+    api_cond = _get_item_condition(item_id, access_token)
+    if api_cond and api_cond != "Ungraded":
+        return api_cond
+    return ""
+
+
 def _get_item_condition(item_id: str, access_token: str) -> str:
     headers = _trading_headers(access_token)
     headers["X-EBAY-API-CALL-NAME"] = "GetItem"
@@ -379,3 +417,30 @@ def fetch_active_listings(access_token: str) -> list[dict]:
         page += 1
 
     return rows
+
+
+def revise_item_price(item_id: str, new_price: float, access_token: str) -> None:
+    """Updates an active listing's price via the Trading API. Raises EbayReviseError
+    with eBay's own message on failure (e.g. item already ended, price out of the
+    range eBay allows for a revision). Requires a token with the sell.inventory
+    (not .readonly) scope."""
+    headers = _trading_headers(access_token)
+    headers["X-EBAY-API-CALL-NAME"] = "ReviseItem"
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseItemRequest xmlns="{NS}">
+  <RequesterCredentials>
+    <eBayAuthToken>{access_token}</eBayAuthToken>
+  </RequesterCredentials>
+  <Item>
+    <ItemID>{item_id}</ItemID>
+    <StartPrice>{new_price:.2f}</StartPrice>
+  </Item>
+</ReviseItemRequest>"""
+    resp = requests.post(TRADING_URL, headers=headers, data=xml, timeout=15)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+    ack = _t(root, "Ack")
+    if ack not in ("Success", "Warning"):
+        long_msgs = [el.text for el in root.findall(f".//{{{NS}}}LongMessage") if el.text]
+        short_msgs = [el.text for el in root.findall(f".//{{{NS}}}ShortMessage") if el.text]
+        raise EbayReviseError("; ".join(long_msgs or short_msgs) or "eBay rejected the price revision")

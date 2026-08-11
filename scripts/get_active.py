@@ -7,32 +7,10 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-import re
-
 from ebaypricer.auth import get_access_token
-from ebaypricer.trading_api import fetch_active_listings, _get_item_condition
-
-TITLE_CONDITION_MAP = {
-    r'\bNM\b': 'Near Mint',
-    r'\bNear Mint\b': 'Near Mint',
-    r'\bMint\b': 'Near Mint',
-    r'\bLP\b': 'Lightly Played',
-    r'\bLightly Played\b': 'Lightly Played',
-    r'\bMP\b': 'Moderately Played',
-    r'\bModerately Played\b': 'Moderately Played',
-    r'\bHP\b': 'Heavily Played',
-    r'\bHeavily Played\b': 'Heavily Played',
-    r'\bDMG\b': 'Damaged',
-    r'\bDamaged\b': 'Damaged',
-}
-
-
-def parse_condition_from_title(title: str) -> str:
-    for pattern, condition in TITLE_CONDITION_MAP.items():
-        if re.search(pattern, title, re.IGNORECASE):
-            return condition
-    return ""
+from ebaypricer.trading_api import fetch_active_listings, resolve_condition
 from ebaypricer.cards import enrich_rows
+from ebaypricer.listing_economics import estimate_fees_and_net, shipping_charge_for_profile
 from ebaypricer.marketing_api import get_campaigns, get_ads
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT, SHADE_FILL,
@@ -131,28 +109,15 @@ def main():
     rows = fetch_active_listings(token)
 
     for row in rows:
-        cond = parse_condition_from_title(row.get("Title", ""))
-        if not cond:
-            api_cond = _get_item_condition(row["Item ID"], token)
-            if api_cond and api_cond != "Ungraded":
-                cond = api_cond
-        row["Condition"] = cond or ""
+        row["Condition"] = resolve_condition(row.get("Title", ""), row["Item ID"], token)
     print(f"  Found {sum(1 for r in rows if r.get('Condition'))}/{len(rows)} conditions")
 
     if not rows:
         print("No active listings returned — leaving existing sheet untouched.")
         return
 
-    SHIPPING_PRICE_MAP = {
-        "free ebay standard": 0,
-        "ebay standard envelope": 0.78,
-        "ground advantage": 5,
-        "free ground advantage": 0,
-    }
-
     for row in rows:
-        profile = (row.get("Shipping Profile") or "").strip().lower()
-        row["Shipping Charge"] = SHIPPING_PRICE_MAP.get(profile, 0)
+        row["Shipping Charge"] = shipping_charge_for_profile(row.get("Shipping Profile"))
 
     enrich_rows(rows, title_key="Title")
 
@@ -197,18 +162,7 @@ def main():
         except (TypeError, ValueError):
             pass
 
-        if price <= 2:
-            multiplier = 0.65
-        elif price <= 5:
-            multiplier = 0.70
-        else:
-            multiplier = 0.73
-
-        estimated_net = round(price * multiplier, 2)
-        estimated_fees = round(price - estimated_net, 2)
-
-        row["Estimated Fees"] = estimated_fees
-        row["Estimated Net"] = estimated_net
+        row["Estimated Fees"], row["Estimated Net"] = estimate_fees_and_net(price)
 
     rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
 

@@ -1,0 +1,54 @@
+{
+  "family": "ebaypricer",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "ebaypricer",
+      "image": "<ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/ebaypricer:latest",
+      "essential": true,
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "SUPABASE_URL", "value": "<SUPABASE_URL>" },
+        { "name": "SUPABASE_ANON_KEY", "value": "<SUPABASE_ANON_KEY>" },
+        { "name": "DEFAULT_USER_ID", "value": "<DEFAULT_USER_ID>" },
+        { "name": "AUTH_REQUIRED", "value": "true" },
+        { "name": "ALLOWED_ORIGINS", "value": "<ALLOWED_ORIGINS>" },
+        { "name": "EBAY_SYNC_DAYS", "value": "120" },
+        { "name": "EBAY_SYNC_INTERVAL_HOURS", "value": "6" },
+        { "name": "EBAY_PROMOTION_INTERVAL_HOURS", "value": "24" },
+        { "name": "EBAY_PRICE_RESEARCH_INTERVAL_HOURS", "value": "6" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/DATABASE_URL" },
+        { "name": "SUPABASE_SERVICE_KEY", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/SUPABASE_SERVICE_KEY" },
+        { "name": "SUPABASE_JWT_SECRET", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/SUPABASE_JWT_SECRET" },
+        { "name": "EBAY_APP_ID", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/EBAY_APP_ID" },
+        { "name": "EBAY_SECRET", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/EBAY_SECRET" },
+        { "name": "RUNAME", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/RUNAME" },
+        { "name": "EBAY_TOKEN_ENCRYPTION_KEY", "valueFrom": "arn:aws:secretsmanager:<REGION>:<ACCOUNT_ID>:secret:ebaypricer/EBAY_TOKEN_ENCRYPTION_KEY" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/ebaypricer",
+          "awslogs-region": "<REGION>",
+          "awslogs-stream-prefix": "ebaypricer",
+          "awslogs-create-group": "true"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/')\" || exit 1"],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 30
+      }
+    }
+  ]
+}

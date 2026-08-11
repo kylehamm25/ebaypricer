@@ -5,13 +5,14 @@ import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
-from statistics import mean
+from statistics import mean, stdev
 
 import requests
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment
 
 from ebaypricer.browse_api import (
+    OUTLIER_SIGMA,
     get_today_active_snapshot,
     init_db,
     parse_active_item,
@@ -26,6 +27,7 @@ log = logging.getLogger(__name__)
 
 SHEET_NAME = "Active Listings"
 MAX_LISTINGS = 9999
+MAX_ACTIVE_MATCHES = 15
 DEFAULT_OUTPUT = r"H:\My Drive\ebay\ebay_sold_orders.xlsx"
 
 ACTIVE_PRICE_COLUMNS = [
@@ -102,7 +104,7 @@ def fetch_active_price_for_card(conn, card_name: str) -> dict | None:
 
     print(".", end="", flush=True)
     try:
-        items = search_active_listings(card_name)
+        items = search_active_listings(card_name, limit=MAX_ACTIVE_MATCHES)
     except requests.RequestException as e:
         log.error("eBay API error for '%s': %s", card_name, e)
         return None
@@ -119,16 +121,25 @@ def fetch_active_price_for_card(conn, card_name: str) -> dict | None:
     if not prices:
         return None
 
+    # Drop outliers (a misclassified/bundle/wrong-print listing miles away from the
+    # rest) before averaging, same 2-sigma approach as the rest of this codebase.
+    if len(prices) >= 4:
+        m, s = mean(prices), stdev(prices)
+        if s > 0:
+            filtered = [p for p in prices if abs(p - m) <= OUTLIER_SIGMA * s]
+            if filtered:
+                prices = filtered
+
     sorted_prices = sorted(prices)
-    top5 = sorted_prices[:5]
+    cheapest = sorted_prices[:MAX_ACTIVE_MATCHES]
 
     snapshot = {
         "card_query":    card_name,
         "snapshot_date": datetime.now(timezone.utc).date().isoformat(),
-        "sample_size":   len(top5),
-        "avg_price":     round(mean(top5), 2),
-        "min_price":     round(min(top5), 2),
-        "max_price":     round(max(top5), 2),
+        "sample_size":   len(cheapest),
+        "avg_price":     round(mean(cheapest), 2),
+        "min_price":     round(min(cheapest), 2),
+        "max_price":     round(max(cheapest), 2),
     }
 
     save_active_snapshot(conn, snapshot)

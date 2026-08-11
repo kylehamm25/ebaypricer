@@ -10,7 +10,7 @@ from typing import Any
 import requests
 from rapidfuzz import fuzz, process as fuzz_process
 
-from .paths import CACHE_FILE, PRICING_CACHE, TCGDEX_SET_MAP
+from .paths import CACHE_FILE, CARD_QUERY_LOOKUP, PRICING_CACHE, TCGDEX_SET_MAP
 
 GITHUB_BASE = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
 TCGDEX_API = "https://api.tcgdex.net/v2/en"
@@ -256,8 +256,9 @@ def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> f
     if not tcg_set_id:
         return None
 
-    local_id = number.zfill(3)
-    card_id = f"{tcg_set_id}-{local_id}"
+    # TCGdex's local card IDs use the number as printed, not zero-padded (e.g.
+    # "dv1-6", not "dv1-006" - the latter 404s). Confirmed against the live API.
+    card_id = f"{tcg_set_id}-{number}"
 
     cache = _load_json(PRICING_CACHE)
     if card_id in cache:
@@ -279,11 +280,14 @@ def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> f
 
         tcg = pricing.get("tcgplayer") if isinstance(pricing, dict) else None
         if tcg and isinstance(tcg, dict):
+            # TCGdex's variant keys aren't consistently cased/hyphenated (e.g.
+            # "reverse-holofoil" rather than "reverseHolofoil") - normalize every
+            # key present so the lookup below matches regardless of TCGdex's spelling.
             prices = {}
-            for v in ("normal", "holofoil", "reverseHolofoil"):
-                info = tcg.get(v)
-                if isinstance(info, dict) and "marketPrice" in info:
-                    prices[v] = info["marketPrice"]
+            for v, info in tcg.items():
+                if isinstance(info, dict) and info.get("marketPrice") is not None:
+                    norm_key = v.lower().replace("-", "").replace(" ", "")
+                    prices[norm_key] = info["marketPrice"]
         else:
             prices = {}
         cache[card_id] = prices if prices else None
@@ -293,7 +297,7 @@ def _lookup_price(card_name: str, set_name: str, number: str, variant: str) -> f
     if not prices:
         return None
 
-    variant_key = variant.lower().replace(" ", "")
+    variant_key = variant.lower().replace(" ", "").replace("-", "")
     for key in [variant_key, "holofoil", "normal", "reverseholofoil"]:
         if key in prices and prices[key] is not None:
             return round(float(prices[key]), 2)
@@ -633,9 +637,42 @@ def format_card(match_result: dict | None, title: str | None = None) -> str | No
     return card_str
 
 
+def lookup_market_price(card_query: str) -> float | None:
+    """TCGdex/TCGPlayer market price for a card previously seen via enrich_rows (looked
+    up by the exact card_query string it produced then, not re-derived from it now)."""
+    cache = _load_json(CARD_QUERY_LOOKUP)
+    entry = cache.get(card_query)
+    if not entry:
+        return None
+    return _lookup_price(entry["name"], entry["set_name"], entry["number"], entry["variant"])
+
+
 def enrich_rows(rows: list[dict], title_key: str = "Item Title") -> None:
+    """Matches each row's title to a card, setting row["Card"]. Also stashes the
+    structured match (name/set_name/number/variant) behind the flat card_query string
+    it produced, in one batched write at the end, so a later market-price lookup by
+    card_query alone (e.g. from price_research.py, which only has the flat string) can
+    use the same reliable, title-anchored match instead of re-parsing the lossy
+    formatted string - re-matching "Charizard ex 199 Obsidian Flames" on its own picks
+    the wrong print, since the bare number lost its "x/y" anchor when the string was
+    formatted. Batched (not one read+write per row) both for speed and because rapid
+    repeated replace-on-write of the same file is prone to a transient Windows file
+    lock (WinError 5) when called on a large batch."""
     db = get_db()
+    lookup_updates: dict[str, dict] = {}
     for row in rows:
         title = (row.get(title_key) or "").split(";")[0]
         m = db.match(title)
-        row["Card"] = format_card(m, title)
+        card_query = format_card(m, title)
+        row["Card"] = card_query
+        if m and card_query:
+            lookup_updates[card_query] = {
+                "name": m["name"],
+                "set_name": m["set_name"],
+                "number": m["number"],
+                "variant": "reverseHolofoil" if _REVERSE_RE.search(title) else "holofoil",
+            }
+    if lookup_updates:
+        cache = _load_json(CARD_QUERY_LOOKUP)
+        cache.update(lookup_updates)
+        _save_json(CARD_QUERY_LOOKUP, cache)

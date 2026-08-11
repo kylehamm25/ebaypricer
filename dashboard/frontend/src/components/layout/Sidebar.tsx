@@ -1,4 +1,5 @@
-import { NavLink, useNavigate } from 'react-router-dom'
+import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useRef } from 'react'
 import {
   LayoutDashboard, ShoppingCart, Package, LogOut, Settings, Sun, Moon,
 } from 'lucide-react'
@@ -17,6 +18,17 @@ export function Sidebar() {
   const { signOut } = useAuth()
   const navigate = useNavigate()
   const { theme, toggle } = useTheme()
+  const location = useLocation()
+
+  // Sidebar/Layout stay mounted across route changes, so remember the last
+  // full path (including search/filter query params) visited under each
+  // section - lets nav links return you to where you left off instead of
+  // resetting filters every time you switch pages.
+  const lastPaths = useRef<Record<string, string>>({})
+  useEffect(() => {
+    const match = links.find((l) => l.to === location.pathname)
+    if (match) lastPaths.current[match.to] = location.pathname + location.search
+  }, [location])
 
   const handleSignOut = async () => {
     await signOut()
@@ -33,7 +45,7 @@ export function Sidebar() {
         {links.map(({ to, label, icon: Icon }) => (
           <NavLink
             key={to}
-            to={to}
+            to={lastPaths.current[to] ?? to}
             className={({ isActive }) =>
               cn(
                 'flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors',

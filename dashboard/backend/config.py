@@ -25,10 +25,13 @@ EBAY_RUNAME = _env("RUNAME", "")
 EBAY_TOKEN_ENCRYPTION_KEY = _env("EBAY_TOKEN_ENCRYPTION_KEY", "")
 # Scopes the eBay app is approved for (space-separated). sell.finances.readonly
 # requires additional approval in the developer portal - add once granted.
+# sell.inventory (not .readonly) is required to revise a listing's price from the
+# dashboard - a user who connected before this scope was added must disconnect and
+# reconnect (Settings page) to grant it; their existing token won't gain it retroactively.
 EBAY_SCOPES = _env(
     "EBAY_SCOPES",
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.inventory.readonly",
+    "https://api.ebay.com/oauth/api_scope/sell.inventory",
 )
 
 # Per-user eBay sync (Phase 6)

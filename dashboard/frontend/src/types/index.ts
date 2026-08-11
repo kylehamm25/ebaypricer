@@ -69,16 +69,118 @@ export interface PriceComparison {
   sold_weighted_avg: number | null
   sold_sample: number | null
   active_avg: number | null
+  active_min: number | null
   active_sample: number | null
   spread: number | null
+}
+
+export interface PriceSnapshot {
+  card_query: string
+  snapshot_date: string
+  sample_size: number | null
+  avg_price: number | null
+  median_price: number | null
+  min_price: number | null
+  max_price: number | null
+  std_dev: number | null
+  weighted_avg: number | null
+}
+
+export interface ActiveSnapshot {
+  card_query: string
+  snapshot_date: string
+  sample_size: number | null
+  avg_price: number | null
+  min_price: number | null
+  max_price: number | null
+}
+
+export interface SoldListing extends Record<string, unknown> {
+  item_id?: string
+  card_query?: string
+  title: string
+  price: number | null
+  currency?: string | null
+  condition: string | null
+  listing_type: string | null
+  sold_date: string | null
+  url?: string | null
+  pulled_at?: string | null
+}
+
+export interface ActiveMarketListing extends Record<string, unknown> {
+  item_id?: string
+  card_query?: string
+  title: string
+  price: number | null
+  currency?: string | null
+  condition: string | null
+  listing_type: string | null
+  url?: string | null
+  pulled_at?: string | null
 }
 
 export interface CardPriceDetail {
   card_query: string
   matched_query?: string | null
-  price_snapshots: Record<string, unknown>[]
-  active_snapshots: Record<string, unknown>[]
-  recent_sold: Record<string, unknown>[]
+  price_snapshots: PriceSnapshot[]
+  active_snapshots: ActiveSnapshot[]
+  recent_active: ActiveMarketListing[]
+}
+
+export interface PositionHistoryPoint {
+  snapshot_date: string
+  position: number
+  search_size: number
+}
+
+/** Why the model landed on a given suggested price. Written by
+ *  dashboard/backend/services/suggested_price.py; read-only for display. */
+export interface SuggestedPriceBasis {
+  v: number
+  status: 'ok' | 'thin_comps' | 'no_comps'
+  anchor_avg?: number
+  anchor_floor?: number
+  comps?: number
+  days_listed?: number | null
+  rank?: number | null
+  w_days?: number
+  w_rank?: number | null
+  w?: number
+  condition?: string
+  condition_mult?: number
+  /** The model's true target before guardrails clamped it. */
+  pre_guardrail?: number
+  clamps?: string[]
+  flags?: string[]
+}
+
+export interface ActiveListing extends Record<string, unknown> {
+  'Item ID': string
+  Title: string
+  Card: string | null
+  Condition: string | null
+  SKU: string | null
+  Price: number | string | null
+  'Shipping Charge': number | string | null
+  'Ad Rate': string | null
+  Watchers: number | string | null
+  'Days Listed': number | string | null
+  'Start Date': string | null
+  Quantity: number | string | null
+  'Estimated Fees': number | string | null
+  'Estimated Net': number | string | null
+  'Recent Sold Avg': number | string | null
+  'Price vs Sold Avg': number | string | null
+  'Recent Sold Count': number | string | null
+  'Last Checked': string | null
+  'Active Avg (Top 5)': number | string | null
+  'Price Accuracy': number | string | null
+  'Search Position': number | string | null
+  'Suggested Price': number | string | null
+  'Suggested Price At': string | null
+  'Suggested Price Basis': SuggestedPriceBasis | null
+  sprite_url?: string
 }
 
 export interface PipelineStatus {

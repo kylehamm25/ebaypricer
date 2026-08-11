@@ -32,3 +32,15 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 export function useTheme() {
   return useContext(ThemeContext)
 }
+
+/** Theme-aware Recharts <Tooltip cursor={...}> styles - Recharts' own default
+ * cursor colors are light-mode only and barely visible (bar) or wrong (line)
+ * against a dark card background. */
+export function useChartCursor() {
+  const { theme } = useTheme()
+  const dark = theme === 'dark'
+  return {
+    bar: { fill: dark ? 'rgba(255,255,255,0.06)' : 'rgba(15,23,42,0.04)' },
+    line: { stroke: dark ? '#525252' : '#cbd5e1', strokeWidth: 1 },
+  }
+}

@@ -3,13 +3,16 @@ Per-user eBay data sync (Phase 6).
 
 process_ebay_data(user_id) replaces the Excel workbook pipeline for connected users:
   sold orders   <- GetMyeBaySelling (Trading API) + sell/finances fees/earnings merge
-  active listings <- GetMyeBaySelling ActiveList (refreshes price/watchers/days listed;
-                   extension-derived columns like ad_rate/search_position are preserved)
+  active listings <- GetMyeBaySelling ActiveList (price/watchers/days listed/condition/
+                   shipping charge/estimated fees+net, same logic as scripts/get_active.py;
+                   ad_rate/search_position aren't set here - ad_rate needs the
+                   sell.marketing OAuth scope, search_position comes from price_research.py)
   inventory value history <- recomputed from active listings
 
 Runs on a background schedule (see start_scheduler) and on demand via POST /ebay/sync.
 """
 
+import os
 import threading
 import time
 import uuid
@@ -18,7 +21,8 @@ from decimal import Decimal
 
 from ebaypricer.cards import enrich_rows
 from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
-from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders
+from ebaypricer.listing_economics import estimate_fees_and_net, shipping_charge_for_profile
+from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders, resolve_condition
 
 from dashboard.backend.config import (
     EBAY_PIPELINE_INTERVAL_HOURS,
@@ -26,6 +30,7 @@ from dashboard.backend.config import (
     EBAY_PROMOTION_INTERVAL_HOURS,
     EBAY_SYNC_DAYS,
     EBAY_SYNC_INTERVAL_HOURS,
+    EXCEL_PATH,
 )
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import get_access_token
@@ -46,17 +51,22 @@ _SOLD_MAP = {
     "Card": "card",
 }
 
-# Only columns the Trading API can supply; ad_rate/search_position/etc. keep
-# their last values (they come from the browser-extension CSV, not the API).
+# ad_rate needs the sell.marketing OAuth scope (not requested by default - see
+# EBAY_SCOPES) and search_position is written separately by price_research.py, so
+# those two keep whatever value they already have rather than getting reset here.
 _ACTIVE_MAP = {
     "Title": "title",
     "Card": "card",
+    "Condition": "condition",
     "SKU": "sku",
     "Price": "price",
+    "Shipping Charge": "shipping_charge",
     "Watchers": "watchers",
     "Days Listed": "days_listed",
     "Start Date": "start_date",
     "Quantity": "quantity",
+    "Estimated Fees": "estimated_fees",
+    "Estimated Net": "estimated_net",
 }
 
 _lock_guard = threading.Lock()
@@ -212,13 +222,20 @@ def _build_active_db_rows(user_id: str, raw_rows: list[dict]) -> list[dict]:
                 "item_id": _clean(r.get("Item ID")),
                 "title": _clean(r.get("Title")),
                 "card": _clean(r.get("Card")),
+                "condition": _clean(r.get("Condition")),
                 "sku": _clean(r.get("SKU")),
                 "price": _to_num(r.get("Price")),
+                "shipping_charge": _to_num(r.get("Shipping Charge")),
                 "watchers": _to_int(r.get("Watchers")),
                 "days_listed": _to_int(r.get("Days Listed")),
                 "start_date": _to_date(r.get("Start Date")),
                 "quantity": _to_int(r.get("Quantity")),
-                "last_checked": date.today(),
+                "estimated_fees": _to_num(r.get("Estimated Fees")),
+                "estimated_net": _to_num(r.get("Estimated Net")),
+                # No "last_checked" here on purpose: it means "when pricing research
+                # last ran for this card", which is price_research.py's to set. It was
+                # previously listed here but _ACTIVE_MAP omits it, so _upsert_rows never
+                # wrote it - dead code that read as though it worked.
             }
         )
     return rows
@@ -244,6 +261,14 @@ def sync_user_ebay_data(user_id: uuid.UUID) -> dict:
 
         sold_raw = _fetch_sold_rows(token, start_dt, now)
         active_raw = fetch_active_listings(token)
+        for row in active_raw:
+            row["Condition"] = resolve_condition(row.get("Title", ""), row["Item ID"], token)
+            row["Shipping Charge"] = shipping_charge_for_profile(row.get("Shipping Profile"))
+            try:
+                price = float(row.get("Price") or 0)
+            except (TypeError, ValueError):
+                price = 0.0
+            row["Estimated Fees"], row["Estimated Net"] = estimate_fees_and_net(price)
         enrich_rows(active_raw, title_key="Title")
 
         sold_rows = _build_sold_db_rows(key, sold_raw)
@@ -302,6 +327,18 @@ def sync_user_ebay_data(user_id: uuid.UUID) -> dict:
                 "UPDATE ebay_connections SET last_synced_at = %s, sync_status = %s WHERE user_id = %s",
                 [now, "ok", key],
             )
+
+        # Refresh suggestions off the snapshots we already have (no eBay calls), so
+        # newly-synced listings and the daily days_listed drift are reflected without
+        # waiting for the next shared price-research round.
+        suggestions = {}
+        try:
+            from dashboard.backend.services.price_research import recompute_suggestions
+
+            suggestions = recompute_suggestions(user_id=key)
+        except Exception as e:
+            print(f"[sync] suggestion recompute failed: {e}")
+
         return {
             "status": "ok",
             "sold_line_items": len(sold_raw),
@@ -309,6 +346,7 @@ def sync_user_ebay_data(user_id: uuid.UUID) -> dict:
             "active_listings": count_active,
             "inventory_value": float(total["v"]),
             "inventory_listings": total["n"],
+            "suggestions": suggestions,
             "synced_at": now.isoformat(),
         }
     except Exception as e:
@@ -359,12 +397,16 @@ def _scheduler_loop() -> None:
         try:
             if now >= next_pipeline:
                 next_pipeline = now + pipeline_interval
-                try:
-                    from dashboard.backend.services.pipeline_runner import run_pipeline_once
+                if os.path.exists(EXCEL_PATH):
+                    try:
+                        from dashboard.backend.services.pipeline_runner import run_pipeline_once
 
-                    run_pipeline_once()
-                except Exception as e:
-                    print(f"[scheduler] pipeline round failed: {e}")
+                        run_pipeline_once()
+                    except Exception as e:
+                        print(f"[scheduler] pipeline round failed: {e}")
+                # else: legacy Excel-based pipeline isn't reachable from this environment
+                # (e.g. a container without the Google Drive mount) - the per-user OAuth
+                # sync below already covers sold orders + active listings without it.
             if now >= next_ebay:
                 next_ebay = now + ebay_interval
                 sync_all_users()

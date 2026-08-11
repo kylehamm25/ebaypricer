@@ -36,75 +36,16 @@ def _buying_options_filter() -> str:
     return f"buyingOptions:{{{BUYING_OPTIONS}}}"
 
 
-def search_sold_listings(query: str, days_back: int = 30, _retries: int = 0) -> list[dict]:
-    token = get_ebay_token()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-EBAY-C-MARKETPLACE-ID": "EBAY_US",
-        "Content-Type": "application/json",
-    }
-
-    date_from = (
-        datetime.now(timezone.utc) - timedelta(days=days_back)
-    ).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-    params = {
-        "q": _build_query(query),
-        "filter": f"{_buying_options_filter()},soldDate:[{date_from}]",
-        "sort": "newlyListed",
-        "limit": str(LISTING_LIMIT),
-    }
-
-    resp = requests.get(
-        "https://api.ebay.com/buy/browse/v1/item_summary/search",
-        headers=headers,
-        params=params,
-        timeout=15,
-    )
-
-    if resp.status_code == 429:
-        if _retries >= MAX_RATE_LIMIT_RETRIES:
-            resp.raise_for_status()
-        log.warning("Rate limited — sleeping 60s before retry (%d/%d)", _retries + 1, MAX_RATE_LIMIT_RETRIES)
-        time.sleep(60)
-        return search_sold_listings(query, days_back, _retries=_retries + 1)
-
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("itemSummaries", [])
-
-
-def parse_item(item: dict, card_query: str) -> dict | None:
-    try:
-        price_info = item.get("price", {})
-        price = float(price_info.get("value", 0))
-        if price <= 0:
-            return None
-
-        buying_options = item.get("buyingOptions", [])
-        if "FIXED_PRICE" in buying_options:
-            listing_type = "BIN"
-        elif "AUCTION" in buying_options:
-            listing_type = "Auction"
-        else:
-            listing_type = "Unknown"
-
-        sold_date = item.get("itemEndDate") or item.get("itemCreationDate", "")
-
-        return {
-            "item_id":      item.get("itemId", ""),
-            "card_query":   card_query,
-            "title":        item.get("title", ""),
-            "price":        price,
-            "currency":     price_info.get("currency", "USD"),
-            "condition":    item.get("condition", "UNKNOWN"),
-            "listing_type": listing_type,
-            "sold_date":    sold_date,
-            "url":          item.get("itemWebUrl", ""),
-            "pulled_at":    datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception:
-        return None
+# NOTE: there used to be a search_sold_listings()/parse_item() pair here that called
+# eBay's Browse API (buy/browse/v1/item_summary/search) with a "soldDate:[...]" filter
+# to try to search sold/completed items. That filter isn't a real Browse API filter -
+# eBay silently ignores it and returns ordinary ACTIVE listings (verified: identical
+# item IDs to a plain active search, live buyingOptions present, no soldDate/
+# itemEndDate field in the response). The Browse API only ever searches currently
+# active listings; there is no "sold" search on it. Real sold comps require eBay's
+# Marketplace Insights API (restricted-access, requires separate approval) - until
+# that's available, sold/market pricing comes from ebaypricer.cards.lookup_market_price
+# (TCGdex/TCGPlayer) instead. Don't recreate a "sold" search against this endpoint.
 
 
 def init_db(path: str) -> sqlite3.Connection:

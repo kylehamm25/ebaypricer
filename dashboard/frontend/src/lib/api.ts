@@ -22,10 +22,18 @@ export async function apiText(path: string): Promise<string> {
 }
 
 export async function apiPost(path: string, body?: unknown): Promise<unknown> {
+  return send('POST', path, body)
+}
+
+export async function apiPut(path: string, body?: unknown): Promise<unknown> {
+  return send('PUT', path, body)
+}
+
+async function send(method: string, path: string, body?: unknown): Promise<unknown> {
   const h = await headers()
   if (body !== undefined) h['Content-Type'] = 'application/json'
   const res = await fetch(`${BASE}${path}`, {
-    method: 'POST',
+    method,
     headers: h,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })

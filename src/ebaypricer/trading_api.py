@@ -288,6 +288,20 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
     )
     shipping_profile = shipping_profile_el.text if shipping_profile_el is not None and shipping_profile_el.text else ""
 
+    # eBay only fills in ShippingServiceCost for Calculated-shipping listings that have
+    # package weight/dimensions set; listings missing those come back with an empty
+    # <ShippingServiceOptions/> and no cost - callers fall back to shipping_charge_for_profile.
+    shipping_cost_el = item_el.find(
+        f"{{{NS}}}ShippingDetails/{{{NS}}}ShippingServiceOptions/{{{NS}}}ShippingServiceCost"
+    )
+    shipping_cost = (
+        float(shipping_cost_el.text)
+        if shipping_cost_el is not None and shipping_cost_el.text
+        else None
+    )
+    shipping_type_el = item_el.find(f"{{{NS}}}ShippingDetails/{{{NS}}}ShippingType")
+    shipping_type = shipping_type_el.text if shipping_type_el is not None and shipping_type_el.text else ""
+
     rows.append({
         "Item ID":            item_id,
         "Title":              title,
@@ -299,6 +313,8 @@ def _parse_active_item(item_el, rows: list, now: datetime) -> None:
         "Start Date":         start_date,
         "Quantity":           qty_available,
         "Shipping Profile":   shipping_profile,
+        "Shipping Cost":      shipping_cost,
+        "Shipping Type":      shipping_type,
     })
 
 
@@ -423,11 +439,12 @@ def revise_item_price(item_id: str, new_price: float, access_token: str) -> None
     """Updates an active listing's price via the Trading API. Raises EbayReviseError
     with eBay's own message on failure (e.g. item already ended, price out of the
     range eBay allows for a revision). Requires a token with the sell.inventory
-    (not .readonly) scope."""
-    headers = _trading_headers(access_token)
-    headers["X-EBAY-API-CALL-NAME"] = "ReviseItem"
+    (not .readonly) scope.
+
+    Best Offer thresholds deliberately cannot ride along in this call - see
+    revise_price_with_best_offer for why they have to move in a separate one."""
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<ReviseItemRequest xmlns="{NS}">
+<ReviseFixedPriceItemRequest xmlns="{NS}">
   <RequesterCredentials>
     <eBayAuthToken>{access_token}</eBayAuthToken>
   </RequesterCredentials>
@@ -435,12 +452,94 @@ def revise_item_price(item_id: str, new_price: float, access_token: str) -> None
     <ItemID>{item_id}</ItemID>
     <StartPrice>{new_price:.2f}</StartPrice>
   </Item>
-</ReviseItemRequest>"""
+</ReviseFixedPriceItemRequest>"""
+    _send_revise(xml, access_token)
+
+
+def revise_best_offer_thresholds(
+    item_id: str, auto_accept_price: float, minimum_offer_price: float, access_token: str
+) -> None:
+    """Updates only a listing's Best Offer auto-accept/auto-decline thresholds, leaving
+    price untouched. Ordering relative to the price change matters - see
+    revise_price_with_best_offer."""
+    xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<ReviseFixedPriceItemRequest xmlns="{NS}">
+  <RequesterCredentials>
+    <eBayAuthToken>{access_token}</eBayAuthToken>
+  </RequesterCredentials>
+  <Item>
+    <ItemID>{item_id}</ItemID>
+    <BestOfferDetails>
+      <BestOfferEnabled>true</BestOfferEnabled>
+    </BestOfferDetails>
+    <BestOfferAutoAcceptPrice>{auto_accept_price:.2f}</BestOfferAutoAcceptPrice>
+    <MinimumBestOfferPrice>{minimum_offer_price:.2f}</MinimumBestOfferPrice>
+  </Item>
+</ReviseFixedPriceItemRequest>"""
+    _send_revise(xml, access_token)
+
+
+def revise_price_with_best_offer(
+    item_id: str,
+    new_price: float,
+    offer_threshold: float,
+    access_token: str,
+    current_price: float | None = None,
+) -> str | None:
+    """Moves a listing's price and its Best Offer auto-accept/auto-decline thresholds to
+    new values, sequencing the two calls so eBay's validation passes.
+
+    eBay validates each side against what is *currently live* on the listing, never
+    against the other new value in the same request, so price and thresholds can never
+    move together in one call. Cutting the price while the old (higher) auto-decline is
+    still live is rejected with "Auto decline amount cannot be greater than or equal to
+    the Buy It Now price", and so is raising the thresholds before the higher price is
+    live. The fix is to move whichever side gains slack first: thresholds down before a
+    price cut, price up before a threshold raise.
+
+    current_price is what we believe is live; when it is unknown we assume a cut, which
+    is the common case. If that guess is wrong the first call fails harmlessly and the
+    price still goes through.
+
+    Returns None when both landed, or eBay's message when only the price did (Best Offer
+    may simply not be enabled on the listing). Raises EbayReviseError if the price
+    itself could not be applied."""
+    if current_price is None or new_price < current_price:
+        try:
+            revise_best_offer_thresholds(item_id, offer_threshold, offer_threshold, access_token)
+        except EbayReviseError as e:
+            revise_item_price(item_id, new_price, access_token)
+            return str(e)
+        revise_item_price(item_id, new_price, access_token)
+        return None
+
+    revise_item_price(item_id, new_price, access_token)
+    try:
+        revise_best_offer_thresholds(item_id, offer_threshold, offer_threshold, access_token)
+    except EbayReviseError as e:
+        return str(e)
+    return None
+
+
+def _send_revise(xml: str, access_token: str) -> None:
+    headers = _trading_headers(access_token)
+    headers["X-EBAY-API-CALL-NAME"] = "ReviseFixedPriceItem"
     resp = requests.post(TRADING_URL, headers=headers, data=xml, timeout=15)
     resp.raise_for_status()
     root = ET.fromstring(resp.text)
     ack = _t(root, "Ack")
-    if ack not in ("Success", "Warning"):
-        long_msgs = [el.text for el in root.findall(f".//{{{NS}}}LongMessage") if el.text]
-        short_msgs = [el.text for el in root.findall(f".//{{{NS}}}ShortMessage") if el.text]
-        raise EbayReviseError("; ".join(long_msgs or short_msgs) or "eBay rejected the price revision")
+    if ack in ("Success", "Warning"):
+        return
+    # A failed response usually carries warning-severity notes alongside the error that
+    # actually blocked it (the business-policies advisory is on nearly every revision).
+    # Report only the blocking ones, or eBay's own text is more confusing than helpful.
+    msgs = [
+        long_msg
+        for err in root.findall(f".//{{{NS}}}Errors")
+        if _t(err, "SeverityCode") == "Error"
+        for long_msg in [_t(err, "LongMessage") or _t(err, "ShortMessage")]
+        if long_msg
+    ]
+    if not msgs:
+        msgs = [el.text for el in root.findall(f".//{{{NS}}}LongMessage") if el.text]
+    raise EbayReviseError("; ".join(msgs) or "eBay rejected the price revision")

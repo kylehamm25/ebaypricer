@@ -64,6 +64,23 @@ export interface ValueBucketResponse {
   total_value: number
 }
 
+export interface PriceChangeEntry extends Record<string, unknown> {
+  item_id: string
+  old_price: number | null
+  new_price: number
+  source: string
+  changed_at: string
+  title: string | null
+  card: string | null
+  current_price: number | null
+}
+
+export interface PriceChangesResponse {
+  days: number
+  cooldown_days: number
+  changes: PriceChangeEntry[]
+}
+
 export interface PriceComparison {
   card_query: string
   sold_weighted_avg: number | null
@@ -117,6 +134,8 @@ export interface ActiveMarketListing extends Record<string, unknown> {
   condition: string | null
   listing_type: string | null
   url?: string | null
+  shipping_cost?: number | null
+  shipping_cost_type?: string | null
   pulled_at?: string | null
 }
 
@@ -138,7 +157,12 @@ export interface PositionHistoryPoint {
  *  dashboard/backend/services/suggested_price.py; read-only for display. */
 export interface SuggestedPriceBasis {
   v: number
-  status: 'ok' | 'thin_comps' | 'no_comps'
+  status: 'ok' | 'cooldown' | 'thin_comps' | 'no_comps' | 'excluded'
+  matched_keyword?: string
+  /** status 'cooldown': this listing was repriced recently and is not re-suggested
+   *  until cooldown_days have passed. See REPRICE_COOLDOWN_DAYS in suggested_price.py. */
+  days_since_price_change?: number
+  cooldown_days?: number
   anchor_avg?: number
   anchor_floor?: number
   comps?: number
@@ -149,6 +173,14 @@ export interface SuggestedPriceBasis {
   w?: number
   condition?: string
   condition_mult?: number
+  /** What we charge the buyer for shipping, and the comp pool's average - the gap
+   *  between them shifts the target so it's positioned on total landed price
+   *  (item + shipping) rather than item price alone. */
+  shipping_charge?: number | null
+  comp_avg_shipping?: number | null
+  shipping_adjustment?: number
+  watchers?: number | null
+  watcher_pull?: number
   /** The model's true target before guardrails clamped it. */
   pre_guardrail?: number
   clamps?: string[]
@@ -198,4 +230,49 @@ export interface EbayStatus {
   token_expires_at: string | null
   last_synced_at: string | null
   sync_status: string | null
+}
+
+/** A buying lot, keyed by the SKU stamped on its listings and orders. Only `cost`,
+ *  `purchased_at`, `source` and `notes` are stored (table `lots`); every other
+ *  field is aggregated live from active_listings + sold_orders by routers/lots.py.
+ *  The profit fields are null until a cost is entered - never 0, which would read
+ *  as "broke even". */
+export interface Lot extends Record<string, unknown> {
+  sku: string
+  cost: number | null
+  purchased_at: string | null
+  source: string | null
+  notes: string | null
+  active_items: number
+  listed_value: number
+  sold_items: number
+  sold_gross: number
+  sold_net: number
+  /** Sold rows whose fee data hasn't arrived from the Finances API yet, so they
+   *  contribute nothing to sold_net. Shown as a caveat, not silently counted as 0. */
+  sold_missing_net: number
+  total_items: number
+  first_sale: string | null
+  last_sale: string | null
+  realized_profit: number | null
+  projected_profit: number | null
+  roi_pct: number | null
+  recouped_pct: number | null
+}
+
+export interface LotTotals {
+  cost: number
+  sold_net: number
+  listed_value: number
+  realized_profit: number
+  projected_profit: number
+  tracked_lots: number
+  untracked_lots: number
+}
+
+export interface LotsResponse {
+  lots: Lot[]
+  totals: LotTotals
+  /** False until db/migrations/0008_lots.sql has been run; costs can't be saved. */
+  cost_tracking_enabled: boolean
 }

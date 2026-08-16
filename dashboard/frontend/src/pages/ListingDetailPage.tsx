@@ -18,6 +18,7 @@ import {
   ExternalLink,
   ImageIcon,
   Loader2,
+  PackageSearch,
   Pencil,
   RefreshCw,
   TrendingDown,
@@ -29,7 +30,7 @@ import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { useChartCursor } from '../lib/theme'
-import { formatCurrency, formatInt, formatSuggestionReason } from '../lib/utils'
+import { formatCurrency, formatInt, formatSuggestionReason, toNumber } from '../lib/utils'
 import type {
   ActiveListing, CardPriceDetail, PositionHistoryPoint, PriceComparison, SuggestedPriceBasis,
 } from '../types'
@@ -52,12 +53,6 @@ function conditionClass(condition?: string) {
     CONDITION_STYLES[condition.toLowerCase()] ??
     'bg-slate-100 text-slate-600 dark:bg-neutral-700 dark:text-neutral-300 ring-1 ring-inset ring-slate-500/10'
   )
-}
-
-function toNumber(v: unknown): number | null {
-  if (v === null || v === undefined || v === '') return null
-  const n = Number(String(v).replace(/[^0-9.-]/g, ''))
-  return Number.isFinite(n) ? n : null
 }
 
 function formatShortDate(v: string | null | undefined) {
@@ -237,6 +232,8 @@ export function ListingDetailPage() {
   }
 
   const priceNum = toNumber(item.Price)
+  const shippingChargeNum = toNumber(item['Shipping Charge'])
+  const totalPriceNum = priceNum !== null ? priceNum + (shippingChargeNum ?? 0) : null
 
   // Canonical, backend-computed benchmark figures (price_research.py) instead of
   // re-deriving them client-side, so this page always agrees with the Active
@@ -252,6 +249,31 @@ export function ListingDetailPage() {
     comparison?.active_avg ?? (activePrices.length ? activePrices.reduce((a, b) => a + b, 0) / activePrices.length : null)
   const activeMin = activePrices.length ? Math.min(...activePrices) : null
   const activeMax = activePrices.length ? Math.max(...activePrices) : null
+
+  // Item price alone understates what a buyer actually pays - rank comps by the
+  // all-in total so the cheapest *landed* price surfaces first, not just cheapest item.
+  const compsWithTotal = recentActive.map((r) => {
+    const price = Number(r.price)
+    const hasPrice = Number.isFinite(price)
+    const shipping = r.shipping_cost != null ? Number(r.shipping_cost) : null
+    const hasShipping = shipping !== null && Number.isFinite(shipping)
+    return {
+      ...r,
+      _total: hasPrice ? price + (hasShipping ? shipping : 0) : null,
+      _hasShipping: hasShipping,
+    }
+  })
+  const sortedComps = [...compsWithTotal].sort((a, b) => {
+    if (a._total === null) return 1
+    if (b._total === null) return -1
+    return a._total - b._total
+  })
+  const bestTotal = sortedComps.length && sortedComps[0]._total !== null ? sortedComps[0]._total : null
+
+  const knownShippingCosts = compsWithTotal.filter((r) => r._hasShipping).map((r) => Number(r.shipping_cost))
+  const avgShipping = knownShippingCosts.length
+    ? knownShippingCosts.reduce((a, b) => a + b, 0) / knownShippingCosts.length
+    : null
 
   const rawItemId = typeof item['Item ID'] === 'string' ? item['Item ID'].trim() : ''
   const ebayUrl = rawItemId ? `https://www.ebay.com/itm/${rawItemId}` : null
@@ -477,6 +499,12 @@ export function ListingDetailPage() {
             <p className="text-xs text-slate-400">Shipping Charge</p>
             <p className="text-slate-700 dark:text-neutral-200 font-medium">{money(item['Shipping Charge'])}</p>
           </div>
+          <div>
+            <p className="text-xs text-slate-400">Total (incl. shipping)</p>
+            <p className="text-slate-700 dark:text-neutral-200 font-medium">
+              {totalPriceNum !== null ? formatCurrency(totalPriceNum) : '—'}
+            </p>
+          </div>
           {rankNum !== null && (
             <div>
               <p className="text-xs text-slate-400">Search Rank</p>
@@ -571,41 +599,82 @@ export function ListingDetailPage() {
       </div>
       </div>
 
-      {/* Active listings for this card (competing listings currently on eBay) */}
+      {/* Competing listings for this card, currently active on eBay */}
       <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
-        <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200 mb-1">Active Listings</h2>
+        <div className="mb-3">
+          <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">Competing Listings</h2>
+        </div>
         {cardLoading ? (
           <TableSkeleton rows={5} columns={[{ header: 'Title', width: 'w-72' }, { header: 'Price', width: 'w-16' }]} />
         ) : (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
               <KpiCard title="Active Count" value={int(recentActive.length)} />
               <KpiCard title="Active Avg" value={activeAvg !== null ? formatCurrency(activeAvg) : '—'} />
               <KpiCard title="Active Min" value={activeMin !== null ? formatCurrency(activeMin) : '—'} />
               <KpiCard title="Active Max" value={activeMax !== null ? formatCurrency(activeMax) : '—'} />
+              <KpiCard title="Avg Shipping" value={avgShipping !== null ? formatCurrency(avgShipping) : '—'} />
             </div>
-            {recentActive.length > 0 ? (
+            {sortedComps.length > 0 ? (
               <DataTable
                 columns={[
                   {
                     key: 'title',
-                    header: 'Title',
+                    header: 'Listing',
                     className: 'max-w-sm',
                     render: (r) => (
                       <div>
-                        <div className="truncate">{r.title as string}</div>
-                        <div className="text-xs text-slate-400">{formatShortDate(r.pulled_at as string)}</div>
+                        <div className="truncate font-medium text-slate-800 dark:text-neutral-100">{r.title as string}</div>
+                        <div className="text-[11px] text-slate-400">{formatShortDate(r.pulled_at as string)}</div>
                       </div>
                     ),
                   },
-                  { key: 'price', header: 'Price', className: 'w-20', render: (r) => formatCurrency(r.price as string) },
+                  {
+                    key: 'price',
+                    header: 'Price',
+                    className: 'w-20',
+                    render: (r) => <span className="tabular-nums">{formatCurrency(r.price as string)}</span>,
+                  },
+                  {
+                    key: 'shipping_cost',
+                    header: 'Shipping',
+                    className: 'w-24',
+                    // Browse API only returns this for listings it could estimate cost for
+                    // (and estimates against a default location, not this specific buyer) -
+                    // absent is shown as unknown rather than implying free shipping.
+                    render: (r) =>
+                      r.shipping_cost != null ? (
+                        <span className="tabular-nums text-slate-500 dark:text-neutral-400">{formatCurrency(r.shipping_cost as string)}</span>
+                      ) : (
+                        <span className="text-slate-300 dark:text-neutral-600" title="Shipping cost not returned for this listing">n/a</span>
+                      ),
+                  },
+                  {
+                    key: '_total',
+                    header: 'Total',
+                    className: 'w-28',
+                    render: (r) => {
+                      const total = r._total as number | null
+                      if (total === null) return <span className="text-slate-400">—</span>
+                      const isBest = bestTotal !== null && Math.abs(total - bestTotal) < 0.005
+                      return (
+                        <span
+                          className={`tabular-nums font-semibold ${isBest ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-800 dark:text-neutral-100'}`}
+                          title={isBest ? 'Lowest total price (item + shipping) among these comps' : undefined}
+                        >
+                          {formatCurrency(total)}
+                        </span>
+                      )
+                    },
+                  },
                   { key: 'url', header: '', className: 'w-8', render: renderListingLink },
                 ]}
-                data={recentActive as Record<string, unknown>[]}
+                data={sortedComps as Record<string, unknown>[]}
               />
             ) : (
-              <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-sm text-slate-400">
-                No other active listings found.
+              <div className="flex h-28 flex-col items-center justify-center gap-1.5 rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-slate-400">
+                <PackageSearch size={20} strokeWidth={1.5} />
+                <p className="text-sm">No other active listings found.</p>
               </div>
             )}
           </>

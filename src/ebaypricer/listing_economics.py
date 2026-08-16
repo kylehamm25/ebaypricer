@@ -14,6 +14,16 @@ def shipping_charge_for_profile(profile: str | None) -> float:
     return SHIPPING_PRICE_MAP.get((profile or "").strip().lower(), 0)
 
 
+def resolve_shipping_charge(shipping_cost: float | None, profile: str | None) -> float:
+    """Prefers eBay's own calculated ShippingServiceCost (Trading API GetMyeBaySelling)
+    when present; falls back to the static per-profile estimate for listings eBay
+    didn't return a cost for (Calculated shipping with no package weight/dimensions set
+    on the listing - see trading_api._parse_active_item)."""
+    if shipping_cost is not None:
+        return shipping_cost
+    return shipping_charge_for_profile(profile)
+
+
 def estimate_fees_and_net(price: float) -> tuple[float, float]:
     """Tiered net-percentage estimate of eBay/payment fees for an active (not yet
     sold) listing - real fees aren't known until Finances API data exists post-sale."""

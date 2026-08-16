@@ -10,7 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_active_listings, resolve_condition
 from ebaypricer.cards import enrich_rows
-from ebaypricer.listing_economics import estimate_fees_and_net, shipping_charge_for_profile
+from ebaypricer.listing_economics import estimate_fees_and_net, resolve_shipping_charge
 from ebaypricer.marketing_api import get_campaigns, get_ads
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT, SHADE_FILL,
@@ -117,7 +117,7 @@ def main():
         return
 
     for row in rows:
-        row["Shipping Charge"] = shipping_charge_for_profile(row.get("Shipping Profile"))
+        row["Shipping Charge"] = resolve_shipping_charge(row.get("Shipping Cost"), row.get("Shipping Profile"))
 
     enrich_rows(rows, title_key="Title")
 

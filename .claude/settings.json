@@ -1,0 +1,44 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/block-env-edits.ps1\"",
+            "timeout": 10,
+            "statusMessage": "Checking .env protection"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/guard-shell-commands.ps1\"",
+            "timeout": 10,
+            "statusMessage": "Checking pipeline and commit guards"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/remind-excel-columns.ps1\"",
+            "timeout": 10,
+            "statusMessage": "Checking Excel column mappings"
+          }
+        ]
+      }
+    ]
+  }
+}

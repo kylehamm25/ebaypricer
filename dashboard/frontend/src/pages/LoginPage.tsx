@@ -48,7 +48,7 @@ export function LoginPage() {
       </button>
       <div className="w-full max-w-sm bg-white dark:bg-neutral-800 rounded-xl p-8">
         <div className="mb-6 text-center">
-          <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">EbayPrice</h1>
+          <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100">EbayPricer</h1>
           <p className="text-sm text-slate-500 dark:text-neutral-400 mt-1">
             {mode === 'login' ? 'Sign in to your account' : 'Create an account'}
           </p>

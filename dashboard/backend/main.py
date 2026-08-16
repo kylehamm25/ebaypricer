@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from dashboard.backend.config import ALLOWED_ORIGINS, DEFAULT_USER_ID, FRONTEND_DIST
 from dashboard.backend.database import close_pool
-from dashboard.backend.routers import dashboard, sold, active, pricing, pipeline, promotion, ebay
+from dashboard.backend.routers import dashboard, sold, active, lots, pricing, pipeline, promotion, ebay
 from dashboard.backend.services.excel_sync import sync_excel
 from dashboard.backend.services.ebay_data import has_connections, start_scheduler
 from dashboard.backend.services.price_research import reconcile_stale_job_runs
@@ -43,6 +43,7 @@ app.add_middleware(
 app.include_router(dashboard.router)
 app.include_router(sold.router)
 app.include_router(active.router)
+app.include_router(lots.router)
 app.include_router(pricing.router)
 app.include_router(pipeline.router)
 app.include_router(promotion.router)

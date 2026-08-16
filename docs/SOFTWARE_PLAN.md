@@ -84,7 +84,8 @@
 |---|---|
 | `dashboard.py` | `GET /dashboard/kpis` — monthly KPIs (per-order deduped ship/fees), 30-day zero-filled trends, top items |
 | `sold.py` | `GET /sold/list` (page/card/dates/sort), `/sold/summary` (deduped per order; earnings = revenue - fees), `/sold/trends`, `/sold/by-card` |
-| `active.py` | `/active/list` (card/condition/sort incl. numeric CAST), `/item/{item_id}`, `/summary`, `/by-condition`, `/by-card-value`, `/value-buckets`, `/value-trend`, `/days-distribution` |
+| `active.py` | `/active/list` (card/sort incl. numeric CAST), `/item/{item_id}`, `/summary`, `/by-card-value`, `/value-buckets`, `/value-trend`, `/days-distribution` |
+| `lots.py` | `GET /lots` (per-SKU cost, sold net, listed value, profit), `PUT /lots/{sku}` (upsert cost) |
 | `pricing.py` | `/pricing/comparisons`, `/snapshots`, `/cards/{card_name}` (fuzzy match, 10 recent sold) |
 | `pipeline.py` | `/pipeline/status` (in-memory state + log mtime), `/logs`, `POST /run` (subprocess `scripts/main.py`) |
 | `promotion.py` | promotions endpoints |
@@ -118,6 +119,10 @@
 **`listing_positions`** — PK (`user_id, item_id, snapshot_date`); + `card_query text, position int, search_size int`
 
 **`ebay_connections`** — PK (`user_id`); `ebay_user_id text, refresh_token text (encrypted), scopes text, token_issued_at timestamptz, token_expires_at timestamptz, last_synced_at timestamptz, sync_status text`
+
+**`price_change_log`** (migration 0005) — `id` PK; `user_id uuid, item_id text, old_price numeric(10,2), new_price numeric(10,2), source text ('single'|'bulk'), changed_at timestamptz`. Append-only history of price revisions this app applied to live eBay listings — `active_listings.price` is overwritten in place, so nothing else records what a listing used to cost. Also drives the reprice cooldown: `suggested_price.py` declines to suggest for `REPRICE_COOLDOWN_DAYS` (5) after a change lands, so the model doesn't ask to re-edit a price that hasn't had time to work. Only *applied* changes are logged — a revision eBay rejected must not start a cooldown.
+
+**`lots`** (migration 0008) — PK (`user_id, sku`); `cost numeric(10,2), purchased_at date, source text, notes text, updated_at timestamptz`. The purchase cost of a buying lot, keyed by the SKU already stamped on its listings and orders (`PULL`, `NONTCG` and rows with no SKU are not purchased lots and are excluded from the page). Deliberately holds *only* what can't be derived — units sold, net proceeds, live items and current listed value are aggregated on read from `sold_orders` + `active_listings` by `routers/lots.py`, so a lot appears on the page as soon as its SKU exists in the data and there is no "create the lot first" step. Note the multi-item-order caveat recorded there: eBay reports order-level money on one row per order, so per-SKU net has to be allocated across the order's lines, never summed directly.
 
 ### 6.2 Shared tables (RLS: `authenticated` can SELECT; writes only via service role)
 `price_snapshots`, `active_price_snapshots`, `sold_listings` — same columns as Section 3, typed (`date`, `numeric`, `timestamptz` for `pulled_at`), UNIQUE constraints preserved. `card_queries` (from `cards.py` cache) optional.

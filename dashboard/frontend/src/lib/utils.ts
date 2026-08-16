@@ -24,6 +24,14 @@ export function formatInt(n: number | string | null | undefined): string {
   return v.toLocaleString()
 }
 
+/** Parses a possibly-formatted numeric field (e.g. a currency string with stray
+ *  characters) from an API row into a plain number, or null if it isn't one. */
+export function toNumber(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null
+  const n = Number(String(v).replace(/[^0-9.-]/g, ''))
+  return Number.isFinite(n) ? n : null
+}
+
 // NOTE: the suggested price is NOT computed here any more. It is computed once,
 // server-side, in dashboard/backend/services/suggested_price.py and stored on the
 // listing row - both pages just read `Suggested Price`. There used to be a
@@ -41,8 +49,17 @@ const CLAMP_LABELS: Record<string, string> = {
  *  only - it reformats what the backend already decided, it never recomputes. */
 export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undefined): string {
   if (!basis) return 'No suggestion available.'
+  if (basis.status === 'cooldown') {
+    const cooldown = basis.cooldown_days ?? 5
+    const since = basis.days_since_price_change
+    const remaining = since != null ? Math.max(1, Math.ceil(cooldown - since)) : cooldown
+    return `Repriced ${since != null ? `${Math.floor(since)}d ago` : 'recently'} — no new suggestion for another ${remaining}d, to give the new price time to work.`
+  }
   if (basis.status === 'thin_comps') return `Too few competitor listings (${basis.comps ?? 0}) to suggest a price.`
   if (basis.status === 'no_comps') return 'No competitor listings found for this card.'
+  if (basis.status === 'excluded') {
+    return `No suggestion for print-defect/novelty variants${basis.matched_keyword ? ` (matched "${basis.matched_keyword}")` : ''}.`
+  }
 
   const parts: string[] = []
   if (basis.days_listed != null) parts.push(`listed ${basis.days_listed}d`)
@@ -52,6 +69,13 @@ export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undef
   }
   if (basis.condition && basis.condition_mult != null && basis.condition_mult !== 1) {
     parts.push(`${basis.condition} ×${basis.condition_mult}`)
+  }
+  if (basis.shipping_adjustment && Math.abs(basis.shipping_adjustment) >= 0.01) {
+    const dir = basis.shipping_adjustment > 0 ? 'up' : 'down'
+    parts.push(`shipping-adjusted ${dir} ${formatCurrency(Math.abs(basis.shipping_adjustment))} vs comps' total price`)
+  }
+  if (basis.watchers && basis.watcher_pull) {
+    parts.push(`${basis.watchers} watchers holding price closer to current`)
   }
   for (const c of basis.clamps ?? []) {
     parts.push(CLAMP_LABELS[c] ?? c)

@@ -21,7 +21,7 @@ from decimal import Decimal
 
 from ebaypricer.cards import enrich_rows
 from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
-from ebaypricer.listing_economics import estimate_fees_and_net, shipping_charge_for_profile
+from ebaypricer.listing_economics import estimate_fees_and_net, resolve_shipping_charge
 from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders, resolve_condition
 
 from dashboard.backend.config import (
@@ -263,7 +263,7 @@ def sync_user_ebay_data(user_id: uuid.UUID) -> dict:
         active_raw = fetch_active_listings(token)
         for row in active_raw:
             row["Condition"] = resolve_condition(row.get("Title", ""), row["Item ID"], token)
-            row["Shipping Charge"] = shipping_charge_for_profile(row.get("Shipping Profile"))
+            row["Shipping Charge"] = resolve_shipping_charge(row.get("Shipping Cost"), row.get("Shipping Profile"))
             try:
                 price = float(row.get("Price") or 0)
             except (TypeError, ValueError):

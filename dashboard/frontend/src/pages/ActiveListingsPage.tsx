@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Loader2 } from 'lucide-react'
+import { Loader2, X } from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts'
@@ -11,7 +11,7 @@ import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { StageRefreshButton } from '../components/shared/StageRefreshButton'
 import { useChartCursor } from '../lib/theme'
-import { formatCurrency, formatInt, formatSuggestionReason } from '../lib/utils'
+import { formatCurrency, formatInt, formatSuggestionReason, toNumber } from '../lib/utils'
 import type {
   ActiveListing, ActiveSummary, PriceComparison, SuggestedPriceBasis, ValueBucketResponse,
 } from '../types'
@@ -19,8 +19,12 @@ import type {
 interface BulkPriceResult {
   applied: number
   failed: number
-  results: { item_id: string; status: string; error?: string }[]
+  results: { item_id: string; status: string; error?: string; offer_threshold?: number }[]
 }
+
+// Must stay <= MAX_BULK_ITEMS in dashboard/backend/routers/active.py - selections
+// larger than one chunk are split into sequential requests instead of erroring out.
+const BULK_CHUNK_SIZE = 100
 
 export function ActiveListingsPage() {
   const cursor = useChartCursor()
@@ -32,7 +36,6 @@ export function ActiveListingsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const page = Number(searchParams.get('page') ?? '1')
   const cardFilter = searchParams.get('card') ?? ''
-  const conditionFilter = searchParams.get('condition') ?? ''
   const sortBy = searchParams.get('sort_by') ?? 'Days Listed'
   const sortDir = (searchParams.get('sort_dir') === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc'
   const perPageOptions = [50, 100, 250, 500]
@@ -56,29 +59,36 @@ export function ActiveListingsPage() {
     const nextPage = typeof value === 'function' ? value(page) : value
     updateParams({ page: nextPage > 1 ? String(nextPage) : null })
   }
+  // Clicking the header a column is already sorted by flips direction; clicking a
+  // different one switches to it, defaulting to desc (matches the old dropdown default).
+  const handleSort = (key: string) => {
+    updateParams(
+      sortBy === key
+        ? { sort_dir: sortDir === 'desc' ? 'asc' : 'desc', page: null }
+        : { sort_by: key, sort_dir: 'desc', page: null }
+    )
+  }
 
   const listQuery = useQuery({
-    queryKey: ['active-list', page, cardFilter, conditionFilter, sortBy, sortDir, perPage],
+    queryKey: ['active-list', page, cardFilter, sortBy, sortDir, perPage],
     queryFn: () =>
       api(
         `/active/list?page=${page}&per_page=${perPage}` +
         (cardFilter ? `&card=${encodeURIComponent(cardFilter)}` : '') +
-        (conditionFilter ? `&condition=${encodeURIComponent(conditionFilter)}` : '') +
         `&sort_by=${encodeURIComponent(sortBy)}&sort_dir=${sortDir}`
       ),
+    // Sorting/paging/filtering only reorders the same listings, so keep showing the
+    // current rows while the new page loads instead of tearing the table down to a
+    // skeleton. The skeleton then only appears on the genuine first load.
+    placeholderData: keepPreviousData,
   })
-  const { data: rawList, isLoading: listLoading } = listQuery
-
-  const { data: conditions } = useQuery<{ condition: string; count: number }[]>({
-    queryKey: ['active-conditions'],
-    queryFn: () => api('/active/by-condition'),
-  })
+  const { data: rawList, isLoading: listLoading, isPlaceholderData } = listQuery
 
   const resetFilters = () => {
     setSearchParams({}, { replace: true })
   }
 
-  const hasFilters = !!(cardFilter || conditionFilter || sortBy !== 'Days Listed' || sortDir !== 'desc')
+  const hasFilters = !!(cardFilter || sortBy !== 'Days Listed' || sortDir !== 'desc')
 
   const { data: summary } = useQuery<ActiveSummary>({
     queryKey: ['active-summary'],
@@ -136,15 +146,48 @@ export function ActiveListingsPage() {
   // second click - these are live eBay listings.
   const selectedRows = (listData?.items ?? []).filter((r) => selected.has(r['Item ID'] as string))
 
+  const isPriceChanged = (r: ActiveListing) => {
+    const suggested = r['Suggested Price'] != null ? Number(r['Suggested Price']) : null
+    const current = r.Price != null ? Number(r.Price) : null
+    return suggested !== null && (current === null || Math.abs(suggested - current) >= 0.01)
+  }
+  const eligibleIds = (listData?.items ?? []).filter(isPriceChanged).map((r) => r['Item ID'] as string)
+  const allEligibleSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selected.has(id))
+  const toggleSelectAll = (checked: boolean) => {
+    const next = new Set(selected)
+    eligibleIds.forEach((id) => (checked ? next.add(id) : next.delete(id)))
+    setSelected(next)
+  }
+  const removeFromSelection = (id: string) => {
+    const next = new Set(selected)
+    next.delete(id)
+    setSelected(next)
+  }
+
+  const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
+
   const bulkMutation = useMutation({
-    mutationFn: () =>
-      apiPost('/active/bulk-price', {
-        items: selectedRows.map((r) => ({
-          item_id: r['Item ID'] as string,
-          price: Number(r['Suggested Price']),
-        })),
-      }) as Promise<BulkPriceResult>,
+    mutationFn: async () => {
+      const items = selectedRows.map((r) => ({
+        item_id: r['Item ID'] as string,
+        price: Number(r['Suggested Price']),
+      }))
+      const merged: BulkPriceResult = { applied: 0, failed: 0, results: [] }
+      setBulkProgress({ done: 0, total: items.length })
+      // Chunked so a selection over the backend's per-request cap (currently 100)
+      // still goes through, instead of the whole batch being rejected up front.
+      for (let i = 0; i < items.length; i += BULK_CHUNK_SIZE) {
+        const chunk = items.slice(i, i + BULK_CHUNK_SIZE)
+        const res = (await apiPost('/active/bulk-price', { items: chunk })) as BulkPriceResult
+        merged.applied += res.applied
+        merged.failed += res.failed
+        merged.results.push(...res.results)
+        setBulkProgress({ done: Math.min(i + BULK_CHUNK_SIZE, items.length), total: items.length })
+      }
+      return merged
+    },
     onSuccess: (res) => {
+      setBulkProgress(null)
       if (res.failed === 0) {
         setReviewOpen(false)
         setSelected(new Set())
@@ -153,6 +196,7 @@ export function ActiveListingsPage() {
       queryClient.invalidateQueries({ queryKey: ['active-summary'] })
       queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
     },
+    onError: () => setBulkProgress(null),
   })
 
   return (
@@ -163,7 +207,7 @@ export function ActiveListingsPage() {
           {selected.size > 0 && (
             <button
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
-              onClick={() => { bulkMutation.reset(); setReviewOpen(true) }}
+              onClick={() => { bulkMutation.reset(); setBulkProgress(null); setReviewOpen(true) }}
             >
               Apply {selected.size} suggested {selected.size === 1 ? 'price' : 'prices'}
             </button>
@@ -174,7 +218,6 @@ export function ActiveListingsPage() {
             label="Refresh from eBay"
             onRefreshed={() => {
               queryClient.invalidateQueries({ queryKey: ['active-list'] })
-              queryClient.invalidateQueries({ queryKey: ['active-conditions'] })
               queryClient.invalidateQueries({ queryKey: ['active-summary'] })
               queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
               queryClient.invalidateQueries({ queryKey: ['active-value-buckets'] })
@@ -188,18 +231,35 @@ export function ActiveListingsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white dark:bg-neutral-800 rounded-xl p-5 max-w-2xl w-full max-h-[80vh] flex flex-col">
             <h2 className="text-lg font-bold text-slate-900 dark:text-neutral-100 mb-1">
-              Review price changes
+              Review price &amp; offer changes
             </h2>
             <p className="text-xs text-slate-500 dark:text-neutral-400 mb-4">
-              These will be applied to your live eBay listings.
+              These will be applied to your live eBay listings. Best Offer auto-accept and
+              minimum (auto-decline) thresholds are both set to 90% of the new price.
             </p>
             <div className="overflow-y-auto flex-1 -mx-1 px-1">
               <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-xs text-slate-400 dark:text-neutral-500">
+                    <th className="text-left font-medium pb-1 pr-3">Title</th>
+                    <th className="text-right font-medium pb-1 px-2" colSpan={3}>Price</th>
+                    <th className="text-right font-medium pb-1 pl-3">Offer threshold</th>
+                    <th className="pb-1" />
+                    <th className="pb-1" />
+                  </tr>
+                </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-neutral-700">
-                  {selectedRows.map((r) => {
+                  {[...selectedRows]
+                    .sort((a, b) => {
+                      const diffA = Math.abs(Number(a['Suggested Price']) - Number(a.Price))
+                      const diffB = Math.abs(Number(b['Suggested Price']) - Number(b.Price))
+                      return diffB - diffA
+                    })
+                    .map((r) => {
                     const id = r['Item ID'] as string
                     const from = Number(r.Price)
                     const to = Number(r['Suggested Price'])
+                    const offerThreshold = Math.round(to * 0.9 * 100) / 100
                     const result = bulkMutation.data?.results.find((x) => x.item_id === id)
                     return (
                       <tr key={id}>
@@ -209,15 +269,43 @@ export function ActiveListingsPage() {
                         <td className={`py-2 pl-1 text-right tabular-nums font-medium ${to < from ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
                           {formatCurrency(to)}
                         </td>
-                        <td className="py-2 pl-3 text-xs">
+                        <td className="py-2 pl-3 text-right tabular-nums text-slate-500 dark:text-neutral-400" title="Offers at/above this are auto-accepted; below it, auto-declined">
+                          {formatCurrency(offerThreshold)}
+                        </td>
+                        <td className="py-2 pl-3 text-xs max-w-[220px]">
                           {result?.status === 'ok' && <span className="text-emerald-600 dark:text-emerald-400">applied</span>}
-                          {result?.status === 'error' && <span className="text-rose-600 dark:text-rose-400" title={result.error}>failed</span>}
+                          {result?.status === 'partial' && (
+                            <span className="text-amber-600 dark:text-amber-400" title={result.error}>
+                              price applied, offer skipped
+                            </span>
+                          )}
+                          {result?.status === 'error' && (
+                            <span className="text-rose-600 dark:text-rose-400" title={result.error}>
+                              failed{result.error ? `: ${result.error}` : ''}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2 pl-2 text-right">
+                          {!bulkMutation.data && (
+                            <button
+                              onClick={() => removeFromSelection(id)}
+                              disabled={bulkMutation.isPending}
+                              className="p-1 rounded-md text-slate-300 hover:text-rose-600 hover:bg-rose-50 dark:text-neutral-600 dark:hover:text-rose-400 dark:hover:bg-rose-500/10 disabled:opacity-30"
+                              title="Remove from this batch"
+                              aria-label={`Remove ${r.Title as string} from batch`}
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
+              {selectedRows.length === 0 && (
+                <p className="text-center text-sm text-slate-400 py-6">No items left in this batch.</p>
+              )}
             </div>
             {bulkMutation.isError && (
               <p className="text-xs text-rose-600 dark:text-rose-400 mt-3">
@@ -240,10 +328,12 @@ export function ActiveListingsPage() {
               <button
                 className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 onClick={() => bulkMutation.mutate()}
-                disabled={bulkMutation.isPending || !!bulkMutation.data}
+                disabled={bulkMutation.isPending || !!bulkMutation.data || selectedRows.length === 0}
               >
                 {bulkMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-                {bulkMutation.isPending ? 'Applying...' : `Apply ${selectedRows.length}`}
+                {bulkMutation.isPending
+                  ? `Applying${bulkProgress ? ` ${bulkProgress.done}/${bulkProgress.total}` : '...'}`
+                  : `Apply ${selectedRows.length}`}
               </button>
             </div>
           </div>
@@ -329,37 +419,6 @@ export function ActiveListingsPage() {
           value={cardFilter}
           onChange={(e) => updateParams({ card: e.target.value, page: null })}
         />
-        <select
-          className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-2 py-1.5 text-sm bg-white"
-          value={sortBy}
-          onChange={(e) => updateParams({ sort_by: e.target.value, page: null })}
-        >
-          <option value="Days Listed">Sort: Days Listed</option>
-          <option value="Price">Sort: Price</option>
-          <option value="Watchers">Sort: Watchers</option>
-          <option value="Card">Sort: Card</option>
-          <option value="Search Position">Sort: Search Rank</option>
-          <option value="Condition">Sort: Condition</option>
-        </select>
-        <button
-          className={`border rounded-lg px-3 py-1.5 text-sm ${sortDir === 'desc' ? 'bg-slate-200 dark:bg-neutral-600 border-slate-300 dark:border-neutral-500' : 'border-slate-300 dark:border-neutral-600 bg-white dark:bg-neutral-800 text-slate-600 dark:text-neutral-300'}`}
-          title="Toggle sort direction"
-          onClick={() => updateParams({ sort_dir: sortDir === 'desc' ? 'asc' : 'desc', page: null })}
-        >
-          {sortDir === 'desc' ? '↓ Desc' : '↑ Asc'}
-        </button>
-        <select
-          className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-2 py-1.5 text-sm bg-white"
-          value={conditionFilter}
-          onChange={(e) => updateParams({ condition: e.target.value, page: null })}
-        >
-          <option value="">All Conditions</option>
-          {(conditions ?? []).map((c) => (
-            <option key={c.condition} value={c.condition}>
-              {c.condition} ({c.count})
-            </option>
-          ))}
-        </select>
         {hasFilters && (
           <button
             className="text-xs text-blue-600 hover:underline"
@@ -378,29 +437,33 @@ export function ActiveListingsPage() {
             { header: 'Title', width: 'w-44' },
             { header: 'Condition', width: 'w-20' },
             { header: 'Price', width: 'w-16' },
+            { header: 'Total', width: 'w-16' },
+            { header: 'Active Avg', width: 'w-14' },
+            { header: 'Suggested', width: 'w-14' },
             { header: 'Days', width: 'w-10' },
             { header: 'Watchers', width: 'w-12' },
             { header: 'Qty', width: 'w-8' },
             { header: 'Search Rank', width: 'w-14' },
-            { header: 'Active Avg', width: 'w-14' },
-            { header: 'Suggested', width: 'w-14' },
           ]}
         />
       ) : listData?.items ? (
         <>
+          <div className={isPlaceholderData ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
           <DataTable<ActiveListing>
             columns={[
               { key: 'sprite_url', header: '', render: (r) => r.sprite_url ? <img src={r.sprite_url as string} alt="" width={64} height={64} style={{ imageRendering: 'pixelated' }} /> : null, className: 'w-30' },
-              { key: 'Title', header: 'Title', className: 'max-w-sm truncate' },
-              { key: 'Condition', header: 'Condition' },
-              { key: 'Price', header: 'Price', render: (r) => formatCurrency(r.Price as string) },
-              { key: 'Days Listed', header: 'Days', render: (r) => formatInt(r['Days Listed'] as string) },
-              { key: 'Watchers', header: 'Watchers', render: (r) => formatInt(r.Watchers as string) },
-              { key: 'Quantity', header: 'Qty', render: (r) => formatInt(r.Quantity as string) },
+              { key: 'Title', header: 'Title', className: 'max-w-sm truncate', sortKey: 'Card' },
+              { key: 'Condition', header: 'Condition', sortKey: 'Condition' },
+              { key: 'Price', header: 'Price', render: (r) => formatCurrency(r.Price as string), sortKey: 'Price' },
               {
-                key: 'Search Position',
-                header: 'Search Rank',
-                render: (r) => r['Search Position'] ? formatInt(r['Search Position'] as string) : <span className="text-slate-400 text-xs">—</span>,
+                key: 'total',
+                header: 'Total',
+                render: (r) => {
+                  const price = toNumber(r.Price)
+                  if (price === null) return <span className="text-slate-400 text-xs">—</span>
+                  const shipping = toNumber(r['Shipping Charge']) ?? 0
+                  return formatCurrency(price + shipping)
+                },
               },
               {
                 key: 'active_avg',
@@ -413,9 +476,19 @@ export function ActiveListingsPage() {
               {
                 key: 'suggested',
                 header: 'Suggested',
+                sortKey: 'Suggested Price',
                 render: (r) => {
                   const suggested = r['Suggested Price'] != null ? Number(r['Suggested Price']) : null
-                  if (suggested === null) return <span className="text-slate-400 text-xs">—</span>
+                  if (suggested === null) {
+                    const basis = r['Suggested Price Basis'] as SuggestedPriceBasis | null
+                    // "held" distinguishes a recently-repriced listing (deliberately not
+                    // re-suggested yet) from one we simply have no suggestion for.
+                    return (
+                      <span className="text-slate-400 text-xs" title={formatSuggestionReason(basis)}>
+                        {basis?.status === 'cooldown' ? 'held' : '—'}
+                      </span>
+                    )
+                  }
                   const current = r.Price != null ? Number(r.Price) : null
                   const tone = current === null || current <= suggested ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'
                   const basis = r['Suggested Price Basis'] as SuggestedPriceBasis | null
@@ -428,19 +501,38 @@ export function ActiveListingsPage() {
                   )
                 },
               },
+              { key: 'Days Listed', header: 'Days', render: (r) => formatInt(r['Days Listed'] as string), sortKey: 'Days Listed' },
+              { key: 'Watchers', header: 'Watchers', render: (r) => formatInt(r.Watchers as string), sortKey: 'Watchers' },
+              { key: 'Quantity', header: 'Qty', render: (r) => formatInt(r.Quantity as string) },
+              {
+                key: 'Search Position',
+                header: 'Search Rank',
+                render: (r) => r['Search Position'] ? formatInt(r['Search Position'] as string) : <span className="text-slate-400 text-xs">—</span>,
+                sortKey: 'Search Position',
+              },
               {
                 key: 'select',
-                header: '',
-                className: 'w-8',
+                header: (
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4 cursor-pointer accent-blue-600"
+                    checked={allEligibleSelected}
+                    disabled={eligibleIds.length === 0}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => toggleSelectAll(e.target.checked)}
+                    aria-label="Select all suggested prices"
+                    title="Select all suggested prices"
+                  />
+                ),
+                className: 'w-10 pr-6',
+                stopRowClick: true,
                 render: (r) => {
-                  const suggested = r['Suggested Price'] != null ? Number(r['Suggested Price']) : null
-                  const current = r.Price != null ? Number(r.Price) : null
-                  const changed = suggested !== null && (current === null || Math.abs(suggested - current) >= 0.01)
-                  if (!changed) return null
+                  if (!isPriceChanged(r)) return null
                   const id = r['Item ID'] as string
                   return (
                     <input
                       type="checkbox"
+                      className="w-4 h-4 cursor-pointer accent-blue-600"
                       checked={selected.has(id)}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
@@ -458,7 +550,11 @@ export function ActiveListingsPage() {
             data={listData.items}
             keyField="Item ID"
             onRowClick={(r) => navigate(`/active/${encodeURIComponent(r['Item ID'] as string)}`)}
+            sortBy={sortBy}
+            sortDir={sortDir}
+            onSortChange={handleSort}
           />
+          </div>
           <div className="flex justify-center items-center pt-2 relative">
             <div className="flex gap-2 items-center">
               <button

@@ -10,6 +10,8 @@ import { DashboardPage } from './pages/DashboardPage'
 import { SoldOrdersPage } from './pages/SoldOrdersPage'
 import { ActiveListingsPage } from './pages/ActiveListingsPage'
 import { ListingDetailPage } from './pages/ListingDetailPage'
+import { LotsPage } from './pages/LotsPage'
+import { PriceLogPage } from './pages/PriceLogPage'
 import { SettingsPage } from './pages/SettingsPage'
 
 const queryClient = new QueryClient()
@@ -42,6 +44,8 @@ function AppRoutes() {
         <Route path="/sold" element={<SoldOrdersPage />} />
         <Route path="/active" element={<ActiveListingsPage />} />
         <Route path="/active/:itemId" element={<ListingDetailPage />} />
+        <Route path="/lots" element={<LotsPage />} />
+        <Route path="/log" element={<PriceLogPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
     </Routes>

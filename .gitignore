@@ -17,3 +17,4 @@ src/*.egg-info/
 *.log
 *.html
 node_modules
+.claude/settings.local.json

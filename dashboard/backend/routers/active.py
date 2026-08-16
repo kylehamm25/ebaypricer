@@ -3,14 +3,16 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from psycopg.errors import UndefinedTable
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
-from ebaypricer.trading_api import EbayReviseError, revise_item_price
+from ebaypricer.trading_api import EbayReviseError, revise_price_with_best_offer
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_token
+from dashboard.backend.services.suggested_price import REPRICE_COOLDOWN_DAYS
 from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
@@ -58,7 +60,6 @@ def get_active_listings(
     page: int = Query(1, ge=1),
     per_page: int = Query(50, ge=1, le=500),
     card: str = Query(None),
-    condition: str = Query(None),
     days_min: int = Query(None),
     days_max: int = Query(None),
     sort_by: str = Query("Days Listed"),
@@ -69,9 +70,6 @@ def get_active_listings(
     if card:
         where_clauses.append("card LIKE %s")
         params.append(f"%{card}%")
-    if condition:
-        where_clauses.append("condition = %s")
-        params.append(condition)
     if days_min is not None:
         where_clauses.append("days_listed >= %s")
         params.append(days_min)
@@ -83,24 +81,38 @@ def get_active_listings(
     sort_col = _SORT_COLS.get(sort_by, "days_listed")
     dir_sql = "ASC" if sort_dir == "asc" else "DESC"
 
+    offset = (page - 1) * per_page
+    # One round trip, not three. Re-sorting is the hottest path on this page and the
+    # DB is remote (~30ms each way), so the separate to_regclass probe and COUNT(*)
+    # were most of the click-to-repaint latency. The window count is evaluated before
+    # LIMIT, so it still yields the full filtered total.
     with get_db() as db:
-        if not _exists(db):
+        try:
+            rows = db.execute(
+                f"SELECT {_SELECT}, COUNT(*) OVER () AS _total FROM active_listings "
+                f"WHERE {where_sql} ORDER BY {sort_col} {dir_sql} LIMIT %s OFFSET %s",
+                params + [per_page, offset],
+            ).fetchall()
+        except UndefinedTable:
+            # Migration not applied yet - degrade rather than 500.
             return {"items": [], "total": 0, "page": page, "per_page": per_page}
-        total = db.execute(
-            f"SELECT COUNT(*) AS c FROM active_listings WHERE {where_sql}",
-            params,
-        ).fetchone()["c"]
-        offset = (page - 1) * per_page
-        rows = db.execute(
-            f"SELECT {_SELECT} FROM active_listings WHERE {where_sql} "
-            f"ORDER BY {sort_col} {dir_sql} LIMIT %s OFFSET %s",
-            params + [per_page, offset],
-        ).fetchall()
-    items = [dict(r) for r in rows]
-    for item in items:
+        # A window count needs at least one row; an empty page (out-of-range offset or
+        # a filter matching nothing) falls back to a plain COUNT so paging stays right.
+        if rows:
+            total = rows[0]["_total"]
+        else:
+            total = db.execute(
+                f"SELECT COUNT(*) AS c FROM active_listings WHERE {where_sql}", params
+            ).fetchone()["c"]
+
+    items = []
+    for row in rows:
+        item = dict(row)
+        item.pop("_total", None)
         title = item.get("Title", "")
         if title:
             item["sprite_url"] = get_sprite_url(title)
+        items.append(item)
     return {
         "items": items,
         "total": total,
@@ -192,6 +204,47 @@ class ReviseItemPrice(BaseModel):
     price: float
 
 
+# Best Offer auto-accept and auto-decline are both pinned to this share of the new
+# price: offers at or above it are auto-accepted, offers below it are auto-declined.
+OFFER_THRESHOLD_PCT = 0.9
+
+
+def _live_price(db, user_id: UUID, item_id: str) -> float | None:
+    """The price we last recorded for one of this user's listings, or None if the
+    listing isn't theirs. Feeds revise_price_with_best_offer, which needs to know
+    which direction the price is moving to order its two eBay calls correctly."""
+    row = db.execute(
+        "SELECT price FROM active_listings WHERE user_id = %s AND item_id = %s",
+        [user_id, item_id],
+    ).fetchone()
+    return None if row is None else (float(row["price"]) if row["price"] is not None else None)
+
+
+def _log_price_changes(rows: list[tuple]) -> None:
+    """Append applied price changes to price_change_log.
+    rows: [(user_id, item_id, old_price, new_price, source), ...]
+
+    Deliberately its own connection and transaction, not the caller's: the price is
+    already live on eBay by the time we get here, so a failure to write history (most
+    likely migration 0005 not applied yet) must not roll back the local UPDATE that
+    records it. Same reasoning as the job_runs write below.
+
+    This is also what feeds the reprice cooldown, so call it before any suggestion
+    recompute - otherwise the recompute runs against a log that doesn't yet know about
+    the change and re-suggests the listing we just repriced."""
+    if not rows:
+        return
+    try:
+        with get_db(read_only=False) as db, db.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO price_change_log (user_id, item_id, old_price, new_price, source) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                rows,
+            )
+    except Exception as e:  # history must never fail the actual revision
+        print(f"[price-log] failed to record {len(rows)} price change(s): {e}")
+
+
 def _owns_item(db, user_id: UUID, item_id: str) -> bool:
     return db.execute(
         "SELECT 1 FROM active_listings WHERE user_id = %s AND item_id = %s",
@@ -210,12 +263,16 @@ def revise_active_item_price(
     with get_db() as db:
         if not _owns_item(db, user_id, item_id):
             raise HTTPException(404, "Listing not found")
+        current_price = _live_price(db, user_id, item_id)
     try:
         token = get_access_token(user_id)
     except NotConnectedError:
         raise HTTPException(409, "eBay account not connected")
     try:
-        revise_item_price(item_id, body.price, token)
+        revise_price_with_best_offer(
+            item_id, body.price, round(body.price * OFFER_THRESHOLD_PCT, 2), token,
+            current_price=current_price,
+        )
     except EbayReviseError as e:
         raise HTTPException(422, str(e))
 
@@ -224,6 +281,7 @@ def revise_active_item_price(
             "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
             [body.price, user_id, item_id],
         )
+    _log_price_changes([(user_id, item_id, current_price, body.price, "single")])
     return {"status": "ok", "price": body.price}
 
 
@@ -245,8 +303,8 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
     """Apply several price revisions in one call (the review-then-confirm bulk flow).
 
     Each item is attempted independently and reported on individually - one listing
-    that eBay rejects must not silently discard the rest. Records a job_runs row, since
-    price revisions otherwise leave no audit trail anywhere."""
+    that eBay rejects must not silently discard the rest. Records a job_runs row for the
+    batch and a price_change_log row per applied change."""
     if not body.items:
         raise HTTPException(400, "No items supplied")
     if len(body.items) > MAX_BULK_ITEMS:
@@ -259,13 +317,14 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
 
     started = datetime.now(timezone.utc)
     results: list[dict] = []
+    changes: list[tuple] = []
     applied = 0
 
     with get_db() as db:
         owned = {
-            r["item_id"]
+            r["item_id"]: (float(r["price"]) if r["price"] is not None else None)
             for r in db.execute(
-                "SELECT item_id FROM active_listings WHERE user_id = %s", [user_id]
+                "SELECT item_id, price FROM active_listings WHERE user_id = %s", [user_id]
             ).fetchall()
         }
 
@@ -276,20 +335,36 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
         if item.item_id not in owned:
             results.append({"item_id": item.item_id, "status": "error", "error": "Listing not found"})
             continue
+        offer_threshold = round(item.price * OFFER_THRESHOLD_PCT, 2)
         try:
-            revise_item_price(item.item_id, item.price, token)
+            offer_error = revise_price_with_best_offer(
+                item.item_id, item.price, offer_threshold, token,
+                current_price=owned[item.item_id],
+            )
         except Exception as e:
             results.append({"item_id": item.item_id, "status": "error", "error": str(e)[:200]})
             continue
+        offer_applied = offer_error is None
+        offer_error = offer_error[:200] if offer_error else None
         with get_db(read_only=False) as db:
             db.execute(
                 "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
                 [item.price, user_id, item.item_id],
             )
         applied += 1
-        results.append({"item_id": item.item_id, "status": "ok", "price": item.price})
+        changes.append((user_id, item.item_id, owned[item.item_id], item.price, "bulk"))
+        results.append({
+            "item_id": item.item_id,
+            "status": "ok" if offer_applied else "partial",
+            "price": item.price,
+            "offer_threshold": offer_threshold if offer_applied else None,
+            **({"error": f"Price applied; offer thresholds not set: {offer_error}"} if not offer_applied else {}),
+        })
 
     failed = len(results) - applied
+    # Before the recompute below, so the suggestions it writes already see the cooldown.
+    _log_price_changes(changes)
+
     try:
         with get_db(read_only=False) as db:
             db.execute(
@@ -315,6 +390,40 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
     return {"applied": applied, "failed": failed, "results": results}
 
 
+@router.get("/price-changes")
+def list_price_changes(
+    days: int = Query(30, ge=1, le=365),
+    item_id: str | None = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    user_id: UUID = Depends(get_current_user_id),
+):
+    """Applied price changes for this user, newest first - the history behind the
+    reprice cooldown. Title/card are joined from active_listings and come back null for
+    listings that have since ended, since the log outlives the listing row."""
+    where = ["pcl.user_id = %s", "pcl.changed_at >= now() - make_interval(days => %s)"]
+    params: list = [user_id, days]
+    if item_id:
+        where.append("pcl.item_id = %s")
+        params.append(item_id)
+    params.append(limit)
+
+    with get_db() as db:
+        if not _exists(db, "price_change_log"):
+            return {"days": days, "cooldown_days": REPRICE_COOLDOWN_DAYS, "changes": []}
+        rows = db.execute(
+            f"""SELECT pcl.item_id, pcl.old_price, pcl.new_price, pcl.source, pcl.changed_at,
+                       al.title, al.card, al.price AS current_price
+                FROM price_change_log pcl
+                LEFT JOIN active_listings al
+                       ON al.user_id = pcl.user_id AND al.item_id = pcl.item_id
+                WHERE {' AND '.join(where)}
+                ORDER BY pcl.changed_at DESC
+                LIMIT %s""",
+            params,
+        ).fetchall()
+    return {"days": days, "cooldown_days": REPRICE_COOLDOWN_DAYS, "changes": [dict(r) for r in rows]}
+
+
 @router.get("/summary")
 def get_active_summary(user_id: UUID = Depends(get_current_user_id)):
     with get_db() as db:
@@ -338,22 +447,6 @@ def get_active_summary(user_id: UUID = Depends(get_current_user_id)):
             [user_id],
         ).fetchone()
     return dict(row)
-
-
-@router.get("/by-condition")
-def get_active_by_condition(user_id: UUID = Depends(get_current_user_id)):
-    with get_db() as db:
-        if not _exists(db):
-            return []
-        rows = db.execute(
-            """SELECT condition AS condition, COUNT(*) AS count
-               FROM active_listings
-               WHERE user_id = %s
-                 AND condition IS NOT NULL AND condition != ''
-               GROUP BY condition ORDER BY count DESC""",
-            [user_id],
-        ).fetchall()
-    return [dict(r) for r in rows]
 
 
 @router.get("/by-card-value")

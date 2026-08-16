@@ -1,7 +1,7 @@
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useRef } from 'react'
 import {
-  LayoutDashboard, ShoppingCart, Package, LogOut, Settings, Sun, Moon,
+  LayoutDashboard, ShoppingCart, Package, Boxes, History, LogOut, Settings, Sun, Moon,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { useAuth } from '../../lib/auth-context'
@@ -11,6 +11,8 @@ const links = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/sold', label: 'Sold Orders', icon: ShoppingCart },
   { to: '/active', label: 'Active Listings', icon: Package },
+  { to: '/lots', label: 'Lots', icon: Boxes },
+  { to: '/log', label: 'Price Log', icon: History },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 
@@ -38,7 +40,7 @@ export function Sidebar() {
   return (
     <aside className="w-56 bg-black text-white flex flex-col h-screen fixed left-0 top-0">
       <div className="p-4 border-b border-neutral-800">
-        <h1 className="text-lg font-bold">EbayPrice</h1>
+        <h1 className="text-lg font-bold">EbayPricer</h1>
         <p className="text-xs text-neutral-500">Dashboard</p>
       </div>
       <nav className="flex-1 p-2 space-y-1">

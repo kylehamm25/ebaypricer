@@ -222,16 +222,28 @@ def parse_active_item(item: dict, card_query: str) -> dict | None:
         else:
             listing_type = "Unknown"
 
+        # shippingOptions is part of the default item_summary/search response (no
+        # fieldgroups needed), but eBay estimates it against a default ship-to
+        # location rather than a specific buyer, and can omit it entirely - so this
+        # is a directional cost, not a guaranteed exact one. Only the first/cheapest
+        # option is kept, matching how the item is actually surfaced in search.
+        shipping_options = item.get("shippingOptions") or []
+        first_shipping = shipping_options[0] if shipping_options else {}
+        shipping_cost_info = first_shipping.get("shippingCost") or {}
+        shipping_cost = shipping_cost_info.get("value")
+
         return {
-            "item_id":      item.get("itemId", ""),
-            "card_query":   card_query,
-            "title":        item.get("title", ""),
-            "price":        price,
-            "currency":     price_info.get("currency", "USD"),
-            "condition":    item.get("condition", "UNKNOWN"),
-            "listing_type": listing_type,
-            "url":          item.get("itemWebUrl", ""),
-            "pulled_at":    datetime.now(timezone.utc).isoformat(),
+            "item_id":            item.get("itemId", ""),
+            "card_query":         card_query,
+            "title":              item.get("title", ""),
+            "price":              price,
+            "currency":           price_info.get("currency", "USD"),
+            "condition":          item.get("condition", "UNKNOWN"),
+            "listing_type":       listing_type,
+            "url":                item.get("itemWebUrl", ""),
+            "shipping_cost":      float(shipping_cost) if shipping_cost is not None else None,
+            "shipping_cost_type": first_shipping.get("shippingCostType", ""),
+            "pulled_at":          datetime.now(timezone.utc).isoformat(),
         }
     except Exception:
         return None

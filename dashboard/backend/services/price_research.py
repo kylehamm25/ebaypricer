@@ -30,7 +30,7 @@ same pattern as pipeline_runner.py's legacy pipeline lock (different key).
 import logging
 import threading
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from statistics import mean, stdev
 
 import psycopg
@@ -43,8 +43,10 @@ from ebaypricer.cards import lookup_market_price
 from dashboard.backend.config import DATABASE_URL
 from dashboard.backend.database import get_db
 from dashboard.backend.services.suggested_price import (
+    REPRICE_COOLDOWN_DAYS,
     Suggestion as SuggestionResult,
     compute_suggested_price,
+    excluded_title_keyword,
 )
 
 log = logging.getLogger(__name__)
@@ -205,11 +207,22 @@ def research_card_sold(card_query: str, today: date, force: bool = False) -> dic
 
 
 def _get_today_active_snapshot(conn, card_query: str, today: date) -> dict | None:
-    row = conn.execute(
-        "SELECT card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price "
-        "FROM active_price_snapshots WHERE card_query = %s AND snapshot_date = %s",
-        (card_query, today),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            "SELECT card_query, snapshot_date, sample_size, avg_price, min_price, max_price, "
+            "p25_price, avg_shipping "
+            "FROM active_price_snapshots WHERE card_query = %s AND snapshot_date = %s",
+            (card_query, today),
+        ).fetchone()
+    except psycopg.errors.UndefinedColumn:
+        # Migration 0007 hasn't been run yet - degrade rather than erroring every
+        # cache-hit lookup until it is; avg_shipping is simply absent from the result.
+        conn.rollback()
+        row = conn.execute(
+            "SELECT card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price "
+            "FROM active_price_snapshots WHERE card_query = %s AND snapshot_date = %s",
+            (card_query, today),
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -248,36 +261,77 @@ def _save_active_listings(conn, parsed_items: list[dict]) -> None:
             "condition": p["condition"],
             "listing_type": p["listing_type"],
             "url": p["url"],
+            "shipping_cost": p.get("shipping_cost"),
+            "shipping_cost_type": p.get("shipping_cost_type") or "",
             "pulled_at": _parse_iso(p["pulled_at"]),
         }
         for p in parsed_items
     ]
     with conn.cursor() as cur:
-        cur.executemany(
-            """INSERT INTO active_market_listings
-                   (item_id, card_query, title, price, currency, condition, listing_type, url, pulled_at)
-               VALUES (%(item_id)s, %(card_query)s, %(title)s, %(price)s, %(currency)s, %(condition)s,
-                       %(listing_type)s, %(url)s, %(pulled_at)s)
-               ON CONFLICT (item_id) DO UPDATE SET
-                   card_query = EXCLUDED.card_query, title = EXCLUDED.title, price = EXCLUDED.price,
-                   currency = EXCLUDED.currency, condition = EXCLUDED.condition,
-                   listing_type = EXCLUDED.listing_type, url = EXCLUDED.url, pulled_at = EXCLUDED.pulled_at""",
-            rows,
-        )
+        try:
+            cur.executemany(
+                """INSERT INTO active_market_listings
+                       (item_id, card_query, title, price, currency, condition, listing_type, url,
+                        shipping_cost, shipping_cost_type, pulled_at)
+                   VALUES (%(item_id)s, %(card_query)s, %(title)s, %(price)s, %(currency)s, %(condition)s,
+                           %(listing_type)s, %(url)s, %(shipping_cost)s, %(shipping_cost_type)s, %(pulled_at)s)
+                   ON CONFLICT (item_id) DO UPDATE SET
+                       card_query = EXCLUDED.card_query, title = EXCLUDED.title, price = EXCLUDED.price,
+                       currency = EXCLUDED.currency, condition = EXCLUDED.condition,
+                       listing_type = EXCLUDED.listing_type, url = EXCLUDED.url,
+                       shipping_cost = EXCLUDED.shipping_cost, shipping_cost_type = EXCLUDED.shipping_cost_type,
+                       pulled_at = EXCLUDED.pulled_at""",
+                rows,
+            )
+        except psycopg.errors.UndefinedColumn:
+            # Migration 0006 hasn't been run yet - degrade to the pre-shipping insert
+            # rather than failing every card's active research until it is.
+            conn.rollback()
+            log.warning("active_market_listings.shipping_cost missing - has migration 0006 been run?")
+            with conn.cursor() as cur2:
+                cur2.executemany(
+                    """INSERT INTO active_market_listings
+                           (item_id, card_query, title, price, currency, condition, listing_type, url, pulled_at)
+                       VALUES (%(item_id)s, %(card_query)s, %(title)s, %(price)s, %(currency)s, %(condition)s,
+                               %(listing_type)s, %(url)s, %(pulled_at)s)
+                       ON CONFLICT (item_id) DO UPDATE SET
+                           card_query = EXCLUDED.card_query, title = EXCLUDED.title, price = EXCLUDED.price,
+                           currency = EXCLUDED.currency, condition = EXCLUDED.condition,
+                           listing_type = EXCLUDED.listing_type, url = EXCLUDED.url, pulled_at = EXCLUDED.pulled_at""",
+                    rows,
+                )
 
 
 def _save_active_snapshot(conn, snapshot: dict) -> None:
-    conn.execute(
-        """INSERT INTO active_price_snapshots
-               (card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price)
-           VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
-                   %(max_price)s, %(p25_price)s)
-           ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
-               sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
-               min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
-               p25_price = EXCLUDED.p25_price""",
-        snapshot,
-    )
+    try:
+        conn.execute(
+            """INSERT INTO active_price_snapshots
+                   (card_query, snapshot_date, sample_size, avg_price, min_price, max_price,
+                    p25_price, avg_shipping)
+               VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
+                       %(max_price)s, %(p25_price)s, %(avg_shipping)s)
+               ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
+                   sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
+                   min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
+                   p25_price = EXCLUDED.p25_price, avg_shipping = EXCLUDED.avg_shipping""",
+            snapshot,
+        )
+    except psycopg.errors.UndefinedColumn:
+        # Migration 0007 hasn't been run yet - degrade to the pre-shipping insert
+        # rather than failing every card's active research until it is.
+        conn.rollback()
+        log.warning("active_price_snapshots.avg_shipping missing - has migration 0007 been run?")
+        conn.execute(
+            """INSERT INTO active_price_snapshots
+                   (card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price)
+               VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
+                       %(max_price)s, %(p25_price)s)
+               ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
+                   sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
+                   min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
+                   p25_price = EXCLUDED.p25_price""",
+            snapshot,
+        )
 
 
 def research_card_active(card_query: str, today: date, force: bool = False) -> dict | None:
@@ -339,6 +393,20 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
 
     sorted_prices = sorted(prices)
     cheapest = sorted_prices[:MAX_ACTIVE_MATCHES]
+
+    # Mean shipping cost among today's comp pool (not restricted to `cheapest` - it's
+    # a separate descriptive stat, not required to track the same subset the price
+    # anchors do). Feeds compute_suggested_price's total-price positioning: comparing
+    # our item price alone against comp item prices makes a $12 free-shipping listing
+    # look overpriced next to a $10-item/$5-shipping comp that's actually $3 more
+    # expensive landed. None (not 0) when no comp reported a cost, so the model can
+    # tell "no data" apart from "comps really do average $0 shipping".
+    shipping_costs = [
+        p["shipping_cost"] for p in parsed_items
+        if p.get("currency") == "USD" and p.get("shipping_cost") is not None
+    ]
+    avg_shipping = round(mean(shipping_costs), 2) if shipping_costs else None
+
     snapshot = {
         "card_query": card_query,
         "snapshot_date": today,
@@ -347,6 +415,7 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
         "min_price": round(min(cheapest), 2),
         "max_price": round(max(cheapest), 2),
         "p25_price": round(_percentile(cheapest, 0.25), 2),
+        "avg_shipping": avg_shipping,
     }
     with get_db(read_only=False) as conn:
         _save_active_snapshot(conn, snapshot)
@@ -425,36 +494,86 @@ def research_card_positions(conn, card_query: str, items: list[dict], today: dat
             )
 
 
-def _suggestion_for_row(row, active_snapshot: dict | None):
+def recent_price_changes(now: datetime) -> dict[tuple[str, str], datetime]:
+    """(user_id, item_id) -> when its price last changed, for changes still inside the
+    reprice cooldown window. Feeds _suggestion_for_row; anything older is irrelevant to
+    it, so the window is applied here rather than dragging the full history around.
+
+    Runs on its own connection and swallows failures: price_change_log arrives in
+    migration 0005, and a deployment that hasn't run it yet should lose the cooldown,
+    not the whole research run. An empty map just means "nothing is cooling down"."""
+    since = now - timedelta(days=REPRICE_COOLDOWN_DAYS)
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT user_id, item_id, max(changed_at) AS changed_at FROM price_change_log "
+                "WHERE changed_at >= %s GROUP BY user_id, item_id",
+                (since,),
+            ).fetchall()
+    except Exception as e:
+        log.warning("Reprice cooldown lookup failed (has migration 0005 been run?): %s", e)
+        return {}
+    return {(str(r["user_id"]), str(r["item_id"])): r["changed_at"] for r in rows}
+
+
+def _days_since_change(row, changes: dict[tuple[str, str], datetime], now: datetime) -> float | None:
+    changed_at = changes.get((str(row["user_id"]), str(row["item_id"])))
+    if changed_at is None:
+        return None
+    return (now - changed_at).total_seconds() / 86400
+
+
+def _suggestion_for_row(row, active_snapshot: dict | None, days_since_price_change: float | None = None):
     """Run the suggested-price model for one active_listings row. Falls back to
     min_price when p25_price is absent, so rows still get a sane suggestion before a
-    fresh research run has populated the newer column."""
-    if not active_snapshot:
-        return SuggestionResult(None, "no_comps", {"v": 1, "status": "no_comps", "comps": 0})
-    floor_anchor = active_snapshot.get("p25_price") or active_snapshot.get("min_price")
+    fresh research run has populated the newer column.
+
+    A missing snapshot is passed through as empty anchors rather than short-circuited
+    here, so the model still gets to apply the reprice cooldown - a listing repriced
+    yesterday should report that, not an incidental 'no comps'."""
+    matched_keyword = excluded_title_keyword(row.get("title"))
+    if matched_keyword:
+        return SuggestionResult(
+            None, "excluded",
+            {"v": 1, "status": "excluded", "matched_keyword": matched_keyword},
+        )
+    snapshot = active_snapshot or {}
+    floor_anchor = snapshot.get("p25_price") or snapshot.get("min_price")
     return compute_suggested_price(
         current_price=float(row["price"]) if row["price"] is not None else None,
-        anchor_avg=active_snapshot.get("avg_price"),
+        anchor_avg=snapshot.get("avg_price"),
         anchor_floor=floor_anchor,
-        comps=active_snapshot.get("sample_size"),
+        comps=snapshot.get("sample_size"),
         days_listed=row.get("days_listed"),
         rank=row.get("search_position"),
         condition=row.get("condition"),
         shipping_charge=float(row["shipping_charge"]) if row.get("shipping_charge") is not None else None,
+        # Mean shipping cost among today's comp pool - lets the model position on
+        # total landed price (item + shipping) rather than item price alone. None
+        # when no comp reported a cost (or migration 0007 hasn't been run), in which
+        # case compute_suggested_price treats it as "no adjustment" rather than free.
+        comp_avg_shipping=snapshot.get("avg_shipping"),
+        watchers=row.get("watchers"),
+        days_since_price_change=days_since_price_change,
     )
 
 
 def update_active_listing_derived_columns(
-    conn, card_query: str, sold_snapshot: dict | None, active_snapshot: dict | None, today: date
+    conn, card_query: str, sold_snapshot: dict | None, active_snapshot: dict | None, today: date,
+    price_changes: dict[tuple[str, str], datetime],
 ) -> int:
     """Apply this card's research to every user's matching active_listings rows in one pass
     (ports price_active_listings.py/avg_active_price.py::write_price_data).
 
     Also computes the stored suggested price. This runs immediately after
     research_card_positions() has written search_position in the same transaction, so
-    every model input (price, condition, days_listed, rank) is current and consistent."""
+    every model input (price, condition, days_listed, rank) is current and consistent.
+
+    price_changes comes from recent_price_changes() and is passed in rather than looked
+    up here: `conn` is already a checked-out write connection, and taking a second one
+    from a 5-slot pool while holding it invites a deadlock under concurrency."""
     rows = conn.execute(
-        "SELECT user_id, item_id, price, condition, days_listed, search_position, shipping_charge "
+        "SELECT user_id, item_id, price, condition, days_listed, search_position, shipping_charge, watchers, title "
         "FROM active_listings WHERE card = %s",
         (card_query,),
     ).fetchall()
@@ -484,7 +603,7 @@ def update_active_listing_derived_columns(
             if target != 0:
                 price_accuracy = round((float(price) - target) / target, 4)
 
-        suggestion = _suggestion_for_row(r, active_snapshot)
+        suggestion = _suggestion_for_row(r, active_snapshot, _days_since_change(r, price_changes, now))
 
         updates.append(
             (
@@ -524,7 +643,22 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
     # DISTINCT ON picks each card's newest snapshot row.
     sql = f"""
         SELECT al.user_id, al.item_id, al.price, al.condition, al.days_listed,
-               al.search_position, al.shipping_charge,
+               al.search_position, al.shipping_charge, al.watchers, al.title,
+               s.avg_price, s.min_price, s.p25_price, s.sample_size, s.avg_shipping
+        FROM active_listings al
+        LEFT JOIN LATERAL (
+            SELECT avg_price, min_price, p25_price, sample_size, avg_shipping
+            FROM active_price_snapshots aps
+            WHERE aps.card_query = al.card
+            ORDER BY aps.snapshot_date DESC LIMIT 1
+        ) s ON true
+        {where}
+    """
+    # Pre-migration-0007 fallback: same query minus avg_shipping, so a deployment
+    # that hasn't run it yet degrades instead of failing every recompute.
+    sql_no_shipping = f"""
+        SELECT al.user_id, al.item_id, al.price, al.condition, al.days_listed,
+               al.search_position, al.shipping_charge, al.watchers, al.title,
                s.avg_price, s.min_price, s.p25_price, s.sample_size
         FROM active_listings al
         LEFT JOIN LATERAL (
@@ -536,10 +670,16 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
         {where}
     """
     now = datetime.now(timezone.utc)
-    computed = nulled = clamped = 0
+    computed = nulled = clamped = cooldown = 0
     updates = []
-    with get_db() as conn:
-        rows = conn.execute(sql, params).fetchall()
+    try:
+        with get_db() as conn:
+            rows = conn.execute(sql, params).fetchall()
+    except psycopg.errors.UndefinedColumn:
+        log.warning("active_price_snapshots.avg_shipping missing - has migration 0007 been run?")
+        with get_db() as conn:
+            rows = conn.execute(sql_no_shipping, params).fetchall()
+    price_changes = recent_price_changes(now)
 
     for r in rows:
         snapshot = None
@@ -549,10 +689,13 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
                 "min_price": r["min_price"],
                 "p25_price": r["p25_price"],
                 "sample_size": r["sample_size"],
+                "avg_shipping": r["avg_shipping"] if "avg_shipping" in r else None,
             }
-        suggestion = _suggestion_for_row(r, snapshot)
+        suggestion = _suggestion_for_row(r, snapshot, _days_since_change(r, price_changes, now))
         if suggestion.price is None:
             nulled += 1
+            if suggestion.status == "cooldown":
+                cooldown += 1
         else:
             computed += 1
             if suggestion.basis.get("clamps"):
@@ -567,7 +710,10 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
                    WHERE user_id = %s AND item_id = %s""",
                 updates,
             )
-    return {"rows": len(updates), "computed": computed, "null": nulled, "clamped": clamped}
+    return {
+        "rows": len(updates), "computed": computed, "null": nulled,
+        "clamped": clamped, "cooldown": cooldown,
+    }
 
 
 def refresh_card(card_query: str) -> dict:
@@ -591,10 +737,11 @@ def refresh_card(card_query: str) -> dict:
 
     updated_rows = 0
     if items:
+        price_changes = recent_price_changes(datetime.now(timezone.utc))
         with get_db(read_only=False) as conn:
             research_card_positions(conn, card_query, items, today)
             updated_rows = update_active_listing_derived_columns(
-                conn, card_query, sold_snapshot, active_snapshot, today
+                conn, card_query, sold_snapshot, active_snapshot, today, price_changes
             )
 
     return {
@@ -698,6 +845,10 @@ def run_shared_price_research(force: bool = False) -> dict:
 
         found_sold = found_active = errors = suggested_rows = 0
         timed_out = False
+        # Read once for the whole run rather than per card: the window is 5 days wide,
+        # so a change landing mid-run is already inside it and would only shift a
+        # suggestion that is being suppressed either way.
+        price_changes = recent_price_changes(started)
         for i, card in enumerate(cards):
             if (datetime.now(timezone.utc) - started).total_seconds() > MAX_RUN_SECONDS:
                 timed_out = True
@@ -732,7 +883,7 @@ def run_shared_price_research(force: bool = False) -> dict:
                     with get_db(read_only=False) as conn:
                         research_card_positions(conn, card, items, today)
                         suggested_rows += update_active_listing_derived_columns(
-                            conn, card, sold_snapshot, active_snapshot, today
+                            conn, card, sold_snapshot, active_snapshot, today, price_changes
                         )
             except Exception as e:
                 errors += 1

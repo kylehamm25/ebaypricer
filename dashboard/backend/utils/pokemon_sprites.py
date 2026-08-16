@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+from functools import lru_cache
 from typing import Optional
 
 import requests
@@ -174,6 +175,10 @@ class PokemonSpriteMapper:
     def __init__(self):
         self._name_to_id: dict[str, int] = {}
         self._pokemon_names: list[str] = []  # Sorted by length descending
+        # Match candidates, longest first, as (needle, name). `needle` is the cheap
+        # substring prefilter; see find_pokemon_in_title for why this matters.
+        self._match_names: list[tuple[str, str]] = []
+        self._match_names_no_hyphens: list[tuple[str, str]] = []
         self._loaded = False
 
     def ensure_loaded(self) -> None:
@@ -186,12 +191,20 @@ class PokemonSpriteMapper:
             if age_days < CACHE_TTL_DAYS:
                 print(f"  Loading Pokemon name->id mapping from cache ({int(age_days)} days old)...")
                 self._load_cache()
+                self._build_match_lists()
                 self._loaded = True
                 return
 
         print("  Fetching Pokemon name->id mapping from PokeAPI...")
         self._fetch_and_cache()
+        self._build_match_lists()
         self._loaded = True
+
+    def _build_match_lists(self) -> None:
+        """Precompute the per-pass candidate lists once, instead of per title."""
+        names = [n for n in self._pokemon_names if len(n) >= 3]
+        self._match_names = [(n, n) for n in names]
+        self._match_names_no_hyphens = [(n.replace("-", " "), n) for n in names]
 
     def _load_cache(self) -> None:
         with open(CACHE_FILE, encoding="utf-8") as f:
@@ -270,39 +283,30 @@ class PokemonSpriteMapper:
         if unown_match:
             return "unown"
 
+        # Each pass walks ~2600 names longest-first. Running a regex per name meant
+        # ~7800 pattern compiles per title (re's internal cache holds only 512, so it
+        # never hit) - ~26ms a title, i.e. over a second of CPU per 50-row page.
+        # `needle in haystack` is an exact prefilter: a \bname\b match implies the name
+        # is a plain substring, so the regex only runs for the handful that survive.
+        def _first_match(haystack: str, candidates: list[tuple[str, str]]) -> Optional[str]:
+            for needle, poke_name in candidates:
+                if needle in haystack and re.search(r"\b" + re.escape(needle) + r"\b", haystack):
+                    return poke_name
+            return None
+
         # Try exact matches for longest names first
-        for poke_name in self._pokemon_names:
-            # Skip very short names that might be false positives
-            if len(poke_name) < 3:
-                continue
-            
-            # Create pattern for word boundary match
-            # Handle names with hyphens/spaces
-            pattern = r"\b" + re.escape(poke_name) + r"\b"
-            if re.search(pattern, normalized_title):
-                return poke_name
+        match = _first_match(normalized_title, self._match_names)
+        if match:
+            return match
 
         # Try matching with common variations
         # Some titles might have "mr mime" instead of "mr-mime"
-        normalized_no_hyphens = normalized_title.replace("-", " ")
-        for poke_name in self._pokemon_names:
-            if len(poke_name) < 3:
-                continue
-            poke_no_hyphens = poke_name.replace("-", " ")
-            pattern = r"\b" + re.escape(poke_no_hyphens) + r"\b"
-            if re.search(pattern, normalized_no_hyphens):
-                return poke_name
+        match = _first_match(normalized_title.replace("-", " "), self._match_names_no_hyphens)
+        if match:
+            return match
 
         # Try matching without the 's (possessive) e.g. "Pikachu's" -> "pikachu"
-        normalized_no_apos = re.sub(r"'s\b", "", normalized_title)
-        for poke_name in self._pokemon_names:
-            if len(poke_name) < 3:
-                continue
-            pattern = r"\b" + re.escape(poke_name) + r"\b"
-            if re.search(pattern, normalized_no_apos):
-                return poke_name
-
-        return None
+        return _first_match(re.sub(r"'s\b", "", normalized_title), self._match_names)
 
     def get_sprite_url(self, title: str) -> Optional[str]:
         """Get the sprite URL for a Pokémon found in a title."""
@@ -349,6 +353,10 @@ def get_sprite_mapper() -> PokemonSpriteMapper:
     return _mapper
 
 
+# Titles are stable and repeat across every page, sort order and request, so the
+# mapping is memoized process-wide. Sized well above a full catalogue of listings;
+# the name->id map behind it only refreshes on restart anyway.
+@lru_cache(maxsize=20_000)
 def get_sprite_url(title: str) -> str:
     """Convenience function to get sprite URL from a title string.
     Returns Pikachu sprite as fallback if no Pokémon is found in title."""

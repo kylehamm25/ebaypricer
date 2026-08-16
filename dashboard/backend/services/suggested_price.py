@@ -10,7 +10,8 @@ The model in one sentence: price a fresh listing near what competitors are askin
 and the longer it sits unsold, the closer to the competitive floor it gets - adjusted
 for card condition, then clamped by guardrails.
 
-    anchors -> staleness/rank blend -> condition multiplier -> rounding -> guardrails
+    anchors -> staleness/rank blend -> condition multiplier -> shipping adjustment
+    -> watcher pull -> guardrails -> rounding
 
 Everything here is pure: no DB, no network, no clock. `compute_suggested_price` takes
 plain values and returns a `Suggestion` carrying the price plus every intermediate,
@@ -66,9 +67,31 @@ CONDITION_MULTIPLIER = {
     "poor": 0.35,
 }
 
+# --- Reprice cooldown -----------------------------------------------------------
+# After a price change is applied, this listing gets no new suggestion for this many
+# days. A price needs time to prove itself: the comp pool barely moves day to day, so
+# without a cooldown the model re-proposes essentially the same edit on every run, and
+# the change cap turns one intended reprice into a slow ratchet of daily nudges. The
+# staleness ramp also keeps climbing while a listing sits, so an untouched listing's
+# suggestion drifts down on its own - a listing repriced yesterday would be asked to
+# move again today for no new reason.
+#
+# Fed by price_change_log (see db/migrations/0005), which records only changes that
+# eBay actually accepted - a rejected revision must not start a cooldown.
+REPRICE_COOLDOWN_DAYS = 5
+
 # --- Sample size ----------------------------------------------------------------
 MIN_COMPS = 3           # below this we decline to suggest at all
 LOW_CONFIDENCE_COMPS = 6  # below this we suggest, but hedge toward the margin end
+
+# --- Watcher demand ---------------------------------------------------------------
+# Watchers are a direct demand signal this listing already has, independent of the
+# comp pool - a heavily-watched card shouldn't be repriced (up or down) as aggressively
+# as the staleness/rank/condition math alone would suggest, since it's already proving
+# itself. Pulls the target back toward current_price; saturates at WATCHER_SATURATION
+# so one viral outlier doesn't fully freeze the price.
+WATCHER_SATURATION = 5
+MAX_WATCHER_PULL = 0.6
 
 # --- Guardrails -----------------------------------------------------------------
 # Change cap: a suggestion is a next step, not a destination. Tiered like
@@ -80,9 +103,12 @@ LOW_CONFIDENCE_COMPS = 6  # below this we suggest, but hedge toward the margin e
 # boundary, making the condition ladder invisible in the output. Looser and a single
 # odd comp pool can propose a drastic reprice. Where the cap does bind, the basis
 # records `pre_guardrail` so the UI can show "step to $2.98 (target $1.32)".
+#
+# CHANGE_CAP_MAX is a hard ceiling regardless of price - no suggestion moves a
+# listing by more than $2 in one step, even a $200 card.
 CHANGE_CAP_PCT = 0.25
 CHANGE_CAP_MIN = 0.25
-CHANGE_CAP_MAX = 10.00
+CHANGE_CAP_MAX = 2.00
 
 ABSOLUTE_PRICE_FLOOR = 0.99
 
@@ -92,6 +118,24 @@ ABSOLUTE_PRICE_FLOOR = 0.99
 # proxies for it. Revisit if a real cost_basis column is ever added.
 MIN_NET_PROCEEDS = 1.00
 ASSUMED_SHIP_COST = 0.78  # eBay Standard Envelope rate, applied when buyer pays $0
+
+# --- Title exclusions ------------------------------------------------------------
+# Print-defect / novelty variants (holo bleed, swirl, miscut, error) trade on the
+# defect itself, not on the card's normal market - the comp pool (ordinary copies of
+# the same card) has nothing to say about what one of these is worth, so we decline
+# to suggest a price rather than silently pricing a defect card off normal comps.
+EXCLUDED_TITLE_KEYWORDS = ("holo bleed", "swirl", "miscut", "error")
+
+
+def excluded_title_keyword(title: str | None) -> str | None:
+    """Returns the matched keyword if `title` names a print-defect/novelty variant
+    that suggestions are declined for, else None."""
+    key = (title or "").lower()
+    for kw in EXCLUDED_TITLE_KEYWORDS:
+        if kw in key:
+            return kw
+    return None
+
 
 # --- Rounding -------------------------------------------------------------------
 # Card prices conventionally end .49/.99; matches how this inventory is already
@@ -105,7 +149,7 @@ SUB_PSYCH_STEP = 0.05
 class Suggestion:
     """Result of the model. `price is None` means we declined to suggest (see status)."""
     price: float | None
-    status: str  # "ok" | "thin_comps" | "no_comps"
+    status: str  # "ok" | "cooldown" | "excluded" | "thin_comps" | "no_comps"
     basis: dict = field(default_factory=dict)
 
 
@@ -170,14 +214,38 @@ def compute_suggested_price(
     rank: int | None,
     condition: str | None,
     shipping_charge: float | None = None,
+    comp_avg_shipping: float | None = None,
+    watchers: int | None = None,
+    days_since_price_change: float | None = None,
 ) -> Suggestion:
     """Suggest a price for one listing.
 
     anchor_avg   - mean competitor asking price (the margin end)
     anchor_floor - 25th-percentile competitor price (the competitive end)
+    shipping_charge   - what WE charge the buyer for shipping this listing.
+    comp_avg_shipping - mean shipping cost among today's comp pool, or None if no
+                   comp reported one. Both anchors above are competitor ITEM price,
+                   same as current_price is ours - comparing those alone ignores
+                   shipping, so a $12 free-shipping listing looks overpriced next to
+                   a $10-item/$5-shipping comp that's actually $3 more expensive
+                   landed. See the shipping-adjustment step below.
+    days_since_price_change - age of the last applied price change, or None if this
+                   listing has never been repriced through the app. Keeps this module
+                   clock-free: the caller reads price_change_log and does the
+                   subtraction, we only compare against REPRICE_COOLDOWN_DAYS.
     """
     basis: dict = {"v": 1}
     flags: list[str] = []
+
+    # Checked before the comp gates so the reason surfaced is the cooldown, which is
+    # the actionable one ("we changed this 2 days ago"), not an incidental thin-comps.
+    if days_since_price_change is not None and days_since_price_change < REPRICE_COOLDOWN_DAYS:
+        return Suggestion(None, "cooldown", {
+            **basis,
+            "status": "cooldown",
+            "days_since_price_change": round(days_since_price_change, 2),
+            "cooldown_days": REPRICE_COOLDOWN_DAYS,
+        })
 
     if anchor_avg is None or anchor_floor is None or not comps:
         return Suggestion(None, "no_comps", {**basis, "status": "no_comps", "comps": comps or 0})
@@ -220,6 +288,29 @@ def compute_suggested_price(
     if not known:
         flags.append("condition_unknown")
     target = blend * mult
+
+    # 4.4 Shipping-adjusted positioning. blend/target above are pegged to competitor
+    # ITEM price; shift by the gap between what comps charge for shipping on average
+    # and what we charge, so the target reflects total landed price instead. We
+    # charge more than average -> target comes down (our item price needs to be
+    # cheaper to match their total); we charge less/free -> target goes up. Skipped
+    # (0.0) when no comp reported a shipping cost - "no data" must not be treated as
+    # "comps ship free", which would push every target up.
+    shipping_adjustment = 0.0
+    if comp_avg_shipping is not None:
+        shipping_adjustment = float(comp_avg_shipping) - float(shipping_charge or 0)
+        target += shipping_adjustment
+
+    # 4.5 Watcher demand pull. A live demand signal the comp pool can't see - pulls the
+    # target back toward the current price rather than pushing it further, since the
+    # direction (up or down) the comps/staleness math wants to move is orthogonal to
+    # whether this specific listing is already working.
+    watcher_pull = 0.0
+    if current_price and watchers:
+        watcher_pull = _clamp(watchers / WATCHER_SATURATION, 0.0, MAX_WATCHER_PULL)
+        if watcher_pull > 0:
+            target = target * (1 - watcher_pull) + float(current_price) * watcher_pull
+
     pre_guardrail = round(target, 2)
 
     # 5/6/7. Guardrails, then rounding.
@@ -263,6 +354,11 @@ def compute_suggested_price(
         "w": round(w, 3),
         "condition": condition or "",
         "condition_mult": mult,
+        "shipping_charge": shipping_charge,
+        "comp_avg_shipping": comp_avg_shipping,
+        "shipping_adjustment": round(shipping_adjustment, 2),
+        "watchers": watchers,
+        "watcher_pull": round(watcher_pull, 3),
         "pre_guardrail": pre_guardrail,
         "clamps": clamps,
         "flags": flags,

@@ -24,6 +24,7 @@ function getTickInterval(dataLength: number, maxTicks = 10) {
 }
 
 interface SoldOrderItem extends Record<string, unknown> {
+  'Order ID': string
   'Item Title': string
   'Sale Date': string
   'Item Price': string
@@ -34,6 +35,57 @@ interface SoldOrderItem extends Record<string, unknown> {
   sprite_url?: string
 }
 
+/** Present only for rows in a multi-item order. `first` marks the row that opens
+ *  the run - it keeps its separator, the rest drop theirs. */
+type GroupPos = { first: boolean }
+
+/**
+ * Marks runs of adjacent rows that belong to the same order, so the rows of one
+ * multi-item order can be merged into a single block by dropping the separators
+ * between them.
+ *
+ * Adjacency-based on purpose: the backend orders by (sale_date, order_id, ...) so
+ * an order's rows arrive together, but if that ever stops holding — a different
+ * sort, or an order split across a page boundary — this finds shorter runs rather
+ * than merging rows that aren't actually neighbours.
+ */
+function groupRows(items: SoldOrderItem[]): Map<SoldOrderItem, GroupPos> {
+  // Keyed by the row object rather than its index, so lookups during render are
+  // O(1) instead of an indexOf scan.
+  const out = new Map<SoldOrderItem, GroupPos>()
+  let i = 0
+  while (i < items.length) {
+    const id = items[i]['Order ID']
+    let end = i
+    while (end + 1 < items.length && items[end + 1]['Order ID'] === id) end++
+    if (end > i) {
+      for (let k = i; k <= end; k++) out.set(items[k], { first: k === i })
+    }
+    i = end + 1
+  }
+  return out
+}
+
+/** Fees and earnings are reported once per ORDER, not per item, so continuation
+ *  rows of a multi-item order are legitimately blank. Explain that on hover
+ *  rather than showing a bare dash that reads like missing data. */
+function OrderLevelCell(
+  { row, field, grouped }: { row: SoldOrderItem; field: 'Total eBay Fees' | 'Order Earnings'; grouped: boolean }
+) {
+  const value = row[field]
+  if (value != null && value !== '') return <>{formatCurrency(value as string)}</>
+  return (
+    <span
+      className="text-slate-400 text-xs"
+      title={grouped
+        ? 'Counted once for the whole order — see the first row of this group'
+        : 'eBay has not reported this yet'}
+    >
+      —
+    </span>
+  )
+}
+
 export function SoldOrdersPage() {
   const cursor = useChartCursor()
   const queryClient = useQueryClient()
@@ -41,6 +93,10 @@ export function SoldOrdersPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const page = Number(searchParams.get('page') ?? '1')
   const cardFilter = searchParams.get('card') ?? ''
+  // Must stay within the `le` cap on /sold/list's per_page, or the request 422s.
+  const perPageOptions = [50, 100, 250, 500]
+  const rawPerPage = Number(searchParams.get('per_page') ?? '50')
+  const perPage = perPageOptions.includes(rawPerPage) ? rawPerPage : 50
 
   // Keeps filters/page in the URL so they survive navigating away and back
   // (the page component unmounts on route change and would otherwise lose
@@ -61,10 +117,10 @@ export function SoldOrdersPage() {
   }
 
   const { data: listData, isLoading } = useQuery({
-    queryKey: ['sold-list', page, cardFilter],
+    queryKey: ['sold-list', page, cardFilter, perPage],
     queryFn: () =>
       api<PaginatedResponse<SoldOrderItem>>(
-        `/sold/list?page=${page}&per_page=50${cardFilter ? `&card=${encodeURIComponent(cardFilter)}` : ''}`
+        `/sold/list?page=${page}&per_page=${perPage}${cardFilter ? `&card=${encodeURIComponent(cardFilter)}` : ''}`
       ),
   })
 
@@ -79,6 +135,9 @@ export function SoldOrdersPage() {
   })
 
   const totalPages = listData ? Math.ceil(listData.total / listData.per_page) : 0
+
+  const items = listData?.items ?? []
+  const groups = groupRows(items)
 
   const trendData = trends ?? []
   const tickInterval = getTickInterval(trendData.length, 10)
@@ -105,7 +164,15 @@ export function SoldOrdersPage() {
           <KpiCard title="Total Revenue" value={formatCurrency(summary.total_revenue)} />
           <KpiCard title="Shipping Collected" value={formatCurrency(summary.total_shipping)} />
           <KpiCard title="eBay Fees" value={formatCurrency(summary.total_fees)} />
-          <KpiCard title="Order Earnings" value={formatCurrency(summary.total_earnings)} />
+          <KpiCard
+            title="Order Earnings"
+            value={formatCurrency(summary.total_earnings)}
+            subtitle={
+              summary.orders_missing_net > 0
+                ? `${summary.orders_missing_net} order${summary.orders_missing_net === 1 ? '' : 's'} awaiting fee data`
+                : undefined
+            }
+          />
         </div>
       ) : (
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
@@ -173,29 +240,61 @@ export function SoldOrdersPage() {
               { key: 'Item Title', header: 'Title', className: 'max-w-sm truncate' },
               { key: 'Item Price', header: 'Price', render: (r) => formatCurrency(r['Item Price'] as string) },
               { key: 'Shipping', header: 'Shipping', render: (r) => formatCurrency(r['Shipping'] as string) },
-              { key: 'Total eBay Fees', header: 'Fees', render: (r) => formatCurrency(r['Total eBay Fees'] as string) },
-              { key: 'Order Earnings', header: 'Earnings', render: (r) => formatCurrency(r['Order Earnings'] as string) },
+              // Fees and earnings are order-level: eBay reports them on one row of a
+              // multi-item order, so the others are genuinely blank rather than
+              // missing. Say so on hover instead of leaving a bare dash.
+              {
+                key: 'Total eBay Fees',
+                header: 'Fees',
+                render: (r) => <OrderLevelCell row={r} field="Total eBay Fees" grouped={!!groups.get(r)} />,
+              },
+              {
+                key: 'Order Earnings',
+                header: 'Earnings',
+                render: (r) => <OrderLevelCell row={r} field="Order Earnings" grouped={!!groups.get(r)} />,
+              },
             ]}
-            data={listData.items}
+            data={items}
+            // Rows after the first in a multi-item order lose their separator, so
+            // the order reads as one block. Nothing else marks them.
+            hideRowDivider={(r) => {
+              const g = groups.get(r)
+              return !!g && !g.first
+            }}
           />
-          <div className="flex justify-center gap-2 items-center pt-2">
-            <button
-              className="px-3 py-1 text-sm border rounded-md disabled:opacity-30"
-              disabled={page <= 1}
-              onClick={() => setPage((p) => p - 1)}
-            >
-              Previous
-            </button>
-            <span className="text-sm text-slate-500 dark:text-neutral-400">
-              Page {page} of {totalPages}
-            </span>
-            <button
-              className="px-3 py-1 text-sm border rounded-md disabled:opacity-30"
-              disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </button>
+          <div className="flex justify-center items-center pt-2 relative">
+            <div className="flex gap-2 items-center">
+              <button
+                className="px-3 py-1 text-sm border rounded-md disabled:opacity-30"
+                disabled={page <= 1}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                Previous
+              </button>
+              <span className="text-sm text-slate-500 dark:text-neutral-400">
+                Page {page} of {totalPages}
+              </span>
+              <button
+                className="px-3 py-1 text-sm border rounded-md disabled:opacity-30"
+                disabled={page >= totalPages}
+                onClick={() => setPage((p) => p + 1)}
+              >
+                Next
+              </button>
+            </div>
+            <label className="absolute right-0 flex items-center gap-2 text-sm text-slate-500 dark:text-neutral-400">
+              Show
+              <select
+                className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-2 py-1 text-sm bg-white"
+                value={perPage}
+                onChange={(e) => updateParams({ per_page: e.target.value, page: null })}
+              >
+                {perPageOptions.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+              per page
+            </label>
           </div>
         </>
       ) : null}

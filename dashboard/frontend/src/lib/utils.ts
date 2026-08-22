@@ -24,6 +24,16 @@ export function formatInt(n: number | string | null | undefined): string {
   return v.toLocaleString()
 }
 
+/** Tailwind text colour for a profit/loss figure: green above zero, red below,
+ *  muted when there is no figure at all. Shared so every page colours money the
+ *  same way. */
+export function profitTone(v: number | null | undefined): string {
+  if (v == null) return 'text-slate-400'
+  if (v > 0) return 'text-emerald-600 dark:text-emerald-400'
+  if (v < 0) return 'text-rose-600 dark:text-rose-400'
+  return 'text-slate-500 dark:text-neutral-400'
+}
+
 /** Parses a possibly-formatted numeric field (e.g. a currency string with stray
  *  characters) from an API row into a plain number, or null if it isn't one. */
 export function toNumber(v: unknown): number | null {
@@ -43,6 +53,7 @@ const CLAMP_LABELS: Record<string, string> = {
   change_cap: 'limited by max change per step',
   net_floor: 'held at minimum profitable price',
   absolute_floor: 'held at minimum price',
+  ese_max_price: 'capped to stay under the eBay Standard Envelope $20 limit',
 }
 
 /** Human-readable explanation of a stored suggestion, for a tooltip. Presentation
@@ -54,6 +65,15 @@ export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undef
     const since = basis.days_since_price_change
     const remaining = since != null ? Math.max(1, Math.ceil(cooldown - since)) : cooldown
     return `Repriced ${since != null ? `${Math.floor(since)}d ago` : 'recently'} — no new suggestion for another ${remaining}d, to give the new price time to work.`
+  }
+  if (basis.status === 'comp_mismatch') {
+    const avg = basis.anchor_avg
+    const ratio = basis.anchor_ratio
+    const dir = ratio != null && ratio > 1 ? 'higher' : 'lower'
+    const times = ratio != null ? (ratio > 1 ? ratio : 1 / ratio).toFixed(1) : '?'
+    return `No suggestion — the competitor listings found for this card average ${
+      avg != null ? formatCurrency(avg) : 'far off'}, about ${times}× ${dir} than this listing's price.`
+      + ` That gap means the comps are almost certainly a different product (damage, a novelty print, a promo stamp), so they say nothing about what this is worth.`
   }
   if (basis.status === 'thin_comps') return `Too few competitor listings (${basis.comps ?? 0}) to suggest a price.`
   if (basis.status === 'no_comps') return 'No competitor listings found for this card.'

@@ -7,7 +7,7 @@ from psycopg.errors import UndefinedTable
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
-from ebaypricer.trading_api import EbayReviseError, revise_price_with_best_offer
+from ebaypricer.trading_api import EbayReviseError, revise_item_price
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
@@ -15,6 +15,7 @@ from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_
 from dashboard.backend.services.suggested_price import REPRICE_COOLDOWN_DAYS
 from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
+from ebaypricer.cards import image_url_for_query
 
 router = APIRouter(prefix="/api/v1/active", tags=["active"])
 
@@ -35,6 +36,9 @@ _SELECT = (
     'suggested_price_basis AS "Suggested Price Basis"'
 )
 
+# Values, not just column names - the last two are derived. Server-controlled, so
+# interpolating them into ORDER BY is safe; anything not in this dict falls back to
+# the default rather than reaching SQL.
 _SORT_COLS = {
     "Days Listed": "days_listed",
     "Watchers": "watchers",
@@ -43,7 +47,28 @@ _SORT_COLS = {
     "Card": "card",
     "Condition": "condition",
     "Suggested Price": "suggested_price",
+    # What the Total column shows. Deliberately NOT COALESCE(price, 0): a listing
+    # with no price renders as "-", so it should sort as unknown (NULLS LAST
+    # below), not as $0.00 alongside genuinely free items.
+    "Total": "(price + COALESCE(shipping_charge, 0))",
+    # The Active Avg column's value. It lives in the shared, per-card
+    # active_price_snapshots rather than on the listing row, hence the lateral
+    # join below - taking each card's newest snapshot, the same rule
+    # routers/pricing.py uses, so the sort agrees with the number on screen.
+    "Active Avg": "comp.active_avg",
 }
+
+# Each card's most recent competitor-price snapshot. LEFT so listings whose card
+# has never been researched still appear; their Active Avg sorts last.
+_COMP_JOIN = """
+LEFT JOIN LATERAL (
+    SELECT aps.avg_price AS active_avg
+    FROM active_price_snapshots aps
+    WHERE aps.card_query = active_listings.card
+    ORDER BY aps.snapshot_date DESC
+    LIMIT 1
+) comp ON true
+"""
 
 
 def _exists(db, table: str = "active_listings") -> bool:
@@ -68,7 +93,9 @@ def get_active_listings(
     where_clauses = ["user_id = %s"]
     params = [user_id]
     if card:
-        where_clauses.append("card LIKE %s")
+        # ILIKE, not LIKE: Postgres LIKE is case-sensitive, so searching "charizard"
+        # matched nothing while "Charizard" did. Card names are stored title-cased.
+        where_clauses.append("card ILIKE %s")
         params.append(f"%{card}%")
     if days_min is not None:
         where_clauses.append("days_listed >= %s")
@@ -89,8 +116,13 @@ def get_active_listings(
     with get_db() as db:
         try:
             rows = db.execute(
-                f"SELECT {_SELECT}, COUNT(*) OVER () AS _total FROM active_listings "
-                f"WHERE {where_sql} ORDER BY {sort_col} {dir_sql} LIMIT %s OFFSET %s",
+                f"SELECT {_SELECT}, COUNT(*) OVER () AS _total "
+                f"FROM active_listings {_COMP_JOIN} "
+                # NULLS LAST so a missing value never outranks a real one - without
+                # it Postgres puts NULLs first on DESC, so sorting by Search Rank or
+                # Active Avg led with every listing that has no value at all.
+                f"WHERE {where_sql} ORDER BY {sort_col} {dir_sql} NULLS LAST "
+                f"LIMIT %s OFFSET %s",
                 params + [per_page, offset],
             ).fetchall()
         except UndefinedTable:
@@ -155,9 +187,14 @@ def get_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
         if row is None:
             return None
         item = dict(row)
-    title = item.get("Title", "")
-    if title:
-        item["sprite_url"] = get_sprite_url(title)
+    # Card art. The species pixel sprite this endpoint used to return was dropped once
+    # real card art landed - it couldn't distinguish printings (every Charizard shares
+    # one sprite). get_sprite_url is still used by the list endpoint above.
+    # Resolved from card_query because that string carries the set NAME while the art
+    # CDN is keyed on set ID. None when the listing never matched a catalog card.
+    card_query = item.get("Card")
+    if card_query:
+        item["card_image_url"] = image_url_for_query(card_query)
     return item
 
 
@@ -204,15 +241,15 @@ class ReviseItemPrice(BaseModel):
     price: float
 
 
-# Best Offer auto-accept and auto-decline are both pinned to this share of the new
-# price: offers at or above it are auto-accepted, offers below it are auto-declined.
-OFFER_THRESHOLD_PCT = 0.9
+# Applying a price deliberately does NOT touch Best Offer auto-accept or minimum-offer
+# thresholds - those are the seller's to set on the listing and are left untouched.
+# There used to be an OFFER_THRESHOLD_PCT here pinning both to 90% of the new price.
 
 
 def _live_price(db, user_id: UUID, item_id: str) -> float | None:
     """The price we last recorded for one of this user's listings, or None if the
-    listing isn't theirs. Feeds revise_price_with_best_offer, which needs to know
-    which direction the price is moving to order its two eBay calls correctly."""
+    listing isn't theirs. Used as the `old_price` in price_change_log so the history
+    (and the reprice cooldown that reads it) knows what the change moved from."""
     row = db.execute(
         "SELECT price FROM active_listings WHERE user_id = %s AND item_id = %s",
         [user_id, item_id],
@@ -269,10 +306,7 @@ def revise_active_item_price(
     except NotConnectedError:
         raise HTTPException(409, "eBay account not connected")
     try:
-        revise_price_with_best_offer(
-            item_id, body.price, round(body.price * OFFER_THRESHOLD_PCT, 2), token,
-            current_price=current_price,
-        )
+        revise_item_price(item_id, body.price, token)
     except EbayReviseError as e:
         raise HTTPException(422, str(e))
 
@@ -335,17 +369,11 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
         if item.item_id not in owned:
             results.append({"item_id": item.item_id, "status": "error", "error": "Listing not found"})
             continue
-        offer_threshold = round(item.price * OFFER_THRESHOLD_PCT, 2)
         try:
-            offer_error = revise_price_with_best_offer(
-                item.item_id, item.price, offer_threshold, token,
-                current_price=owned[item.item_id],
-            )
+            revise_item_price(item.item_id, item.price, token)
         except Exception as e:
             results.append({"item_id": item.item_id, "status": "error", "error": str(e)[:200]})
             continue
-        offer_applied = offer_error is None
-        offer_error = offer_error[:200] if offer_error else None
         with get_db(read_only=False) as db:
             db.execute(
                 "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
@@ -353,12 +381,13 @@ def bulk_revise_prices(body: BulkPriceRequest, user_id: UUID = Depends(get_curre
             )
         applied += 1
         changes.append((user_id, item.item_id, owned[item.item_id], item.price, "bulk"))
+        # Only "ok" or "error" now. There used to be a "partial" for the case where the
+        # price landed but the Best Offer thresholds didn't; with a single price-only
+        # call there is no half-applied state left to report.
         results.append({
             "item_id": item.item_id,
-            "status": "ok" if offer_applied else "partial",
+            "status": "ok",
             "price": item.price,
-            "offer_threshold": offer_threshold if offer_applied else None,
-            **({"error": f"Price applied; offer thresholds not set: {offer_error}"} if not offer_applied else {}),
         })
 
     failed = len(results) - applied

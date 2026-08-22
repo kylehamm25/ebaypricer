@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -87,6 +88,11 @@ _PROMO_PREFIX_MAP: dict[str, tuple[str, int]] = {
 
 HEADERS = ["Card"]
 
+# How long a downloaded card catalog stays usable before ensure_loaded() refreshes it.
+# New sets and promos appear upstream far faster than this; a fortnight keeps recent
+# promos findable without downloading ~20k cards on any regular cadence.
+CACHE_MAX_AGE_DAYS = 14
+
 _PROMO_SET_TO_PREFIX = {
     "svp": "SVP",
 }
@@ -131,6 +137,39 @@ _REVERSE_RE = re.compile(r'\breverse\b', re.IGNORECASE)
 # Digit run not glued to other digits, allowing letter prefixes/suffixes,
 # e.g. matches "010" inside "SV010" or "45" inside "XY45".
 _BARE_NUM_RE = re.compile(r"(?<!\d)0*(\d{1,4})(?!\d)")
+
+
+# Symbols the catalog uses to mark card variants. Folded to the words people actually
+# type: nobody searches for "Pikachu δ" by pasting a delta.
+_SYMBOL_WORDS = {
+    "δ": " delta ", "α": " alpha ", "β": " beta ", "γ": " gamma ",
+    "★": " star ", "◇": " prism star ", "♂": " male ", "♀": " female ",
+}
+
+# Every dash variant the catalog contains, plus the plain hyphen. "HS—Undaunted" uses an
+# em dash (290 of them across the catalog - more common than accented characters), which
+# is not on a keyboard, so it has to compare equal to a space or a hyphen.
+_DASH_RE = re.compile("[\u2010-\u2015-]")
+
+
+def _fold(text: str) -> str:
+    """Reduce a string to what someone would plausibly type.
+
+    Strips the typographic differences between how the catalog stores a name and how it
+    gets typed: accents ("Pokémon" -> "pokemon"), dashes ("HS—Undaunted" -> "hs
+    undaunted"), and variant symbols ("Pikachu δ" -> "pikachu delta"). Applied to both
+    the search index and the query, so the two always meet in the same alphabet.
+    """
+    s = (text or "").lower()
+    for sym, word in _SYMBOL_WORDS.items():
+        if sym in s:
+            s = s.replace(sym, word)
+    # NFKD splits an accented character into base + combining mark; dropping the marks
+    # leaves the bare letter.
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    s = _DASH_RE.sub(" ", s)
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _norm(s: str) -> str:
@@ -312,15 +351,32 @@ class CardDatabase:
     name_to_card: dict[str, dict[str, Any]] = field(default_factory=dict)
     name_to_cards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     name_list_by_len: list[str] = field(default_factory=list)
+    # (name_lower, haystack, card) per printing, built once. Powers search_cards.
+    search_index: list[tuple[str, str, dict[str, Any]]] = field(default_factory=list)
     _loaded: bool = False
 
     def ensure_loaded(self) -> None:
         if self._loaded:
             return
         if os.path.isfile(CACHE_FILE):
-            age_s = time.time() - os.path.getmtime(CACHE_FILE)
-            print(f"  Loading card database from cache ({int(age_s // 86400)} days old) ...")
-            self._load_cache()
+            age_days = (time.time() - os.path.getmtime(CACHE_FILE)) / 86400
+            if age_days > CACHE_MAX_AGE_DAYS:
+                # Cards are added upstream constantly - new promo sets especially. This
+                # used to only rebuild when the file was MISSING, so a cache built once
+                # was kept forever: at 30 days old it had 165 Scarlet & Violet promos
+                # (SVP210 did not exist) and no Mega Evolution promo set at all, and
+                # those cards were simply unfindable.
+                print(f"  Card cache is {age_days:.0f} days old -- refreshing (~1 min) ...")
+                try:
+                    self._build_cache()
+                except Exception as e:
+                    # A refresh failure must not take the catalog down with it. The old
+                    # cache is still on disk and still mostly right.
+                    print(f"  Refresh failed ({e}) -- using the existing cache")
+                    self._load_cache()
+            else:
+                print(f"  Loading card database from cache ({age_days:.0f} days old) ...")
+                self._load_cache()
         else:
             print("  No card cache -- downloading from GitHub (~1 min) ...")
             self._build_cache()
@@ -336,6 +392,7 @@ class CardDatabase:
             sid = s["id"]
             sname = s.get("name", sid)
             series = s.get("series", "")
+            release = s.get("releaseDate", "")
             cards = self._fetch_set_cards(sid)
             for c in cards:
                 all_cards.append({
@@ -348,11 +405,18 @@ class CardDatabase:
                     "set_id": sid,
                     "set_name": sname,
                     "set_series": series,
+                    # "YYYY/MM/DD" from the set record. Cards carry no date of their own,
+                    # and search_cards needs one to put recent printings first.
+                    "set_release": release,
                 })
             if i % 25 == 0:
                 print(f"    ... {i}/{total} sets ({len(all_cards)} cards)")
-                self._save_cache(all_cards)
 
+        # Written once, at the end, and atomically (_save_cache writes a temp file then
+        # os.replace). Previously this also saved every 25 sets, which was fine when a
+        # build only ever ran against a missing cache - but now that age can trigger a
+        # rebuild, a mid-download failure would leave a TRUNCATED catalog carrying a
+        # fresh mtime, so it would look current and never retry.
         self._save_cache(all_cards)
         self.cards = all_cards
         print(f"    Cached {len(all_cards)} cards from {total} sets")
@@ -395,6 +459,81 @@ class CardDatabase:
                 self.name_list.append(c["name"])
 
         self.name_list_by_len = sorted(self.name_list, key=len, reverse=True)
+
+        # One lowercase haystack per printing, so search_cards can scan without
+        # rebuilding strings on every keystroke. Number is included twice - bare ("4")
+        # and set-qualified ("base-4") - because people search both ways.
+        for c in self.cards:
+            name_l = _fold(c.get("name") or "")
+            self.search_index.append((
+                name_l,
+                _fold(" ".join((
+                    c.get("name") or "",
+                    c.get("set_name") or "",
+                    c.get("set_series") or "",
+                    c.get("rarity") or "",
+                    c.get("number") or "",
+                    f"{c.get('set_id', '')}-{c.get('number', '')}",
+                ))),
+                c,
+            ))
+
+    def search_cards(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """Autocomplete over every printing. Purely local - reads the cached card DB and
+        makes no network call, which is what lets the valuation UI query on each
+        keystroke without touching a rate-limited API.
+
+        Every whitespace-separated token must appear somewhere in the printing's
+        haystack, so "charizard base", "charizard 4/102" and "gourgeist ex chaos" all
+        narrow the way a person expects. Ranking favours a name the query actually
+        starts, because "Charizard" should not be buried under "Charizard & Braixen".
+        """
+        q = _fold(query)
+        if not q:
+            return []
+        # Card numbers are PRINTED as "4/102" but stored as just "4", so reduce an
+        # x/y token to its numerator. Splitting on "/" instead would search for "102",
+        # which appears nowhere and silently returns nothing.
+        tokens = []
+        for raw in q.split():
+            m = re.fullmatch(r"([a-z]*\d+)\s*/\s*[a-z]*\d+", raw)
+            tokens.append(m.group(1) if m else raw)
+        if not tokens:
+            return []
+
+        # Tokens with digits are matched on a word boundary, alphabetic ones as a plain
+        # substring. A bare "4" as a substring hits any set/rarity that merely contains
+        # a 4, which buried the actual 4/102 Charizard; but partial words still need to
+        # match loosely so "chariz" finds Charizard while the user is still typing.
+        matchers = []
+        for t in tokens:
+            if any(ch.isdigit() for ch in t):
+                matchers.append(re.compile(rf"(?<![a-z0-9]){re.escape(t)}(?![a-z0-9])").search)
+            else:
+                matchers.append(lambda hay, t=t: t in hay)
+
+        scored: list[tuple[tuple, dict[str, Any]]] = []
+        for name_l, hay, card in self.search_index:
+            if not all(m(hay) for m in matchers):
+                continue
+            # Lower sorts first.
+            # Match quality still leads - a newer set must not float a worse name match
+            # above an exact one. Release date replaces the old alphabetical set tiebreak,
+            # so among equally good matches the most recent printing comes first.
+            rank = (
+                0 if name_l == q else 1 if name_l.startswith(tokens[0]) else 2,
+                0 if (card.get("number") or "").lower() in tokens else 1,
+                len(name_l),
+                _release_key(card),
+                card.get("number") or "",
+            )
+            scored.append((rank, card))
+            # Scanning all 20k printings is cheap, but building a huge list is not.
+            if len(scored) > 400:
+                break
+
+        scored.sort(key=lambda x: x[0])
+        return [c for _, c in scored[:limit]]
 
     def match(self, title: str) -> dict | None:
         result = self._match_by_number(title)
@@ -635,6 +774,146 @@ def format_card(match_result: dict | None, title: str | None = None) -> str | No
     if card_str and title and _REVERSE_RE.search(title):
         card_str += " Reverse"
     return card_str
+
+
+# Card art CDN. The cached card DB deliberately doesn't store the upstream `images`
+# field, but this CDN is addressable straight from set_id + number, so the URL is derived
+# instead of bloating (and forcing a rebuild of) the 4.2 MB cache. Verified across
+# vintage, modern, split-id, promo and letter-numbered promo sets.
+CARD_IMAGE_BASE = "https://images.pokemontcg.io"
+
+
+def _release_key(card: dict) -> int:
+    """Sort key placing recently released sets first.
+
+    Release dates are "YYYY/MM/DD", which is already lexicographically ordered, so the
+    punctuation is stripped and the result negated - Python sorts ascending, and negating
+    turns that into newest-first. Cards from a cache built before set_release existed
+    yield 0, which sorts AFTER every real date rather than jumping to the top.
+    """
+    raw = (card.get("set_release") or "").replace("/", "").replace("-", "")
+    return -int(raw) if raw.isdigit() else 0
+
+
+def card_image_url(card: dict | None) -> str | None:
+    """Art URL for a catalog card dict (needs set_id + number)."""
+    if not card:
+        return None
+    set_id, number = card.get("set_id"), card.get("number")
+    if not set_id or not number:
+        return None
+    return f"{CARD_IMAGE_BASE}/{set_id}/{number}.png"
+
+
+def find_catalog_card(card_query: str) -> dict | None:
+    """Resolve a flat card_query string back to the catalog entry it came from.
+
+    Needed because card_query carries the set NAME ("Base") while the art URL needs the
+    set ID ("base1"), and card_identity() only recovers the former. Matching is tolerant
+    of the two ways _fmt_card() rewrites things on the way out: it can insert a rarity
+    abbreviation into the name, and it prefixes promo numbers (catalog "46" is formatted
+    as "SVP46"), so the number is compared on its trailing digits as well as verbatim.
+    """
+    ident = card_identity(card_query)
+    if not ident or not ident.get("name"):
+        return None
+    db = get_db()
+
+    name = ident["name"]
+    candidates = db.name_to_cards.get(name) or []
+    if not candidates:
+        target = _norm_name(name)
+        candidates = [c for c in db.cards if _norm_name(c.get("name", "")) == target]
+    if not candidates:
+        return None
+
+    want_set = _norm_name(ident.get("set_name") or "")
+    want_num = (ident.get("number") or "").lower()
+    want_suffix = _numeric_suffix(want_num)
+
+    for card in candidates:
+        if _norm_name(card.get("set_name", "")) != want_set:
+            continue
+        num = (card.get("number") or "").lower()
+        if num == want_num or (want_suffix and _numeric_suffix(num) == want_suffix):
+            return card
+    return None
+
+
+def image_url_for_query(card_query: str) -> str | None:
+    """Art URL straight from a card_query string. None when the card can't be resolved."""
+    return card_image_url(find_catalog_card(card_query))
+
+
+# Pokemon Center is a distribution channel, not a set: its promos carry the same card
+# name and number as the ordinary print but trade separately. Detected off the whole
+# card_query rather than the parsed set name, because on a custom search the phrase can
+# land anywhere in the string the seller typed.
+_POKEMON_CENTER_RE = re.compile(r"pok[eé]mon\s*center|poke\s*center|pokecenter", re.IGNORECASE)
+
+
+def card_identity(card_query: str) -> dict | None:
+    """Structured identity behind a flat card_query string: name, set_name, number and
+    whether it's the reverse-holo print. Feeds comp_filter.evaluate_comp, which needs to
+    know what card we're actually pricing before it can judge a search result.
+
+    Prefers the same title-anchored match enrich_rows() stashed (see lookup_market_price
+    - re-deriving from the formatted string is lossy, because the bare number loses its
+    "x/y" anchor). Falls back to parsing the flat string for cards that predate the
+    cache, since a parsed identity still catches most mismatches and None disables every
+    identity-dependent check.
+    """
+    if not card_query:
+        return None
+
+    pokemon_center = bool(_POKEMON_CENTER_RE.search(card_query))
+
+    entry = _load_json(CARD_QUERY_LOOKUP).get(card_query)
+    if entry:
+        return {
+            "name": entry["name"],
+            "set_name": entry["set_name"],
+            "number": entry["number"],
+            "reverse": entry.get("variant") == "reverseHolofoil",
+            "pokemon_center": pokemon_center,
+            "parsed": True,
+        }
+
+    # Fallback: "<name> [RARITY] <number> <set name> [Reverse]". The number is the first
+    # token shaped like a card number, which is also what separates name from set - so
+    # "Charizard ex SIR 199 151" resolves to number 199 in set "151", not the reverse.
+    tokens = card_query.split()
+    reverse = bool(tokens) and tokens[-1].lower() == "reverse"
+    if reverse:
+        tokens = tokens[:-1]
+
+    abbrevs = {a.lower() for a in RARITY_ABBREV.values()}
+    for i, tok in enumerate(tokens):
+        if i == 0 or not re.fullmatch(r"[A-Za-z]{0,4}\d{1,4}", tok):
+            continue
+        name = " ".join(t for t in tokens[:i] if t.lower() not in abbrevs)
+        return {
+            "name": name,
+            "set_name": " ".join(tokens[i + 1:]),
+            "number": tok,
+            "reverse": reverse,
+            "pokemon_center": pokemon_center,
+            "parsed": True,
+        }
+
+    # Nothing structured to recover - a free-text search like "tornadus promo sealed"
+    # names no card number. Return the flags anyway rather than None: whether the search
+    # asked for a Pokemon Center print, or a reverse, is still knowable from the string
+    # and is still worth filtering comps on. Callers that need a real card check
+    # `parsed`, or simply find name/number empty and skip those checks.
+    return {
+        "name": "",
+        "set_name": "",
+        "number": "",
+        "reverse": reverse,
+        "pokemon_center": pokemon_center,
+        "parsed": False,
+    }
 
 
 def lookup_market_price(card_query: str) -> float | None:

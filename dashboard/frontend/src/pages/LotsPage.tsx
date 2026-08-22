@@ -1,67 +1,28 @@
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
-import { api, apiPut } from '../lib/api'
+import { useQuery } from '@tanstack/react-query'
+import { useNavigate } from 'react-router-dom'
+import { Pencil } from 'lucide-react'
+import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
+import { LotEditDialog } from '../components/shared/LotEditDialog'
+import { Money } from '../components/shared/Money'
 import { KpiSkeleton, TableSkeleton } from '../components/shared/Skeleton'
-import { formatCurrency, formatInt } from '../lib/utils'
+import { formatCurrency, formatInt, profitTone } from '../lib/utils'
 import type { Lot, LotsResponse } from '../types'
 
 type SortKey = 'sku' | 'cost' | 'total_items' | 'listed_value' | 'sold_net'
   | 'realized_profit' | 'projected_profit' | 'roi_pct'
 
-interface EditState {
-  sku: string
-  cost: string
-  purchased_at: string
-  source: string
-  notes: string
-}
-
-function profitTone(v: number | null | undefined) {
-  if (v == null) return 'text-slate-400'
-  if (v > 0) return 'text-emerald-600 dark:text-emerald-400'
-  if (v < 0) return 'text-rose-600 dark:text-rose-400'
-  return 'text-slate-500 dark:text-neutral-400'
-}
-
-function Money({ value, bold }: { value: number | null; bold?: boolean }) {
-  if (value == null) return <span className="text-slate-400 text-xs">—</span>
-  return (
-    <span className={`tabular-nums ${bold ? 'font-semibold' : ''} ${profitTone(value)}`}>
-      {value > 0 ? '+' : ''}{formatCurrency(value)}
-    </span>
-  )
-}
-
 export function LotsPage() {
-  const queryClient = useQueryClient()
-  const [editing, setEditing] = useState<EditState | null>(null)
+  const navigate = useNavigate()
+  const [editing, setEditing] = useState<Lot | null>(null)
   const [sortBy, setSortBy] = useState<SortKey>('sku')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
 
   const { data, isLoading, isError, error } = useQuery<LotsResponse>({
     queryKey: ['lots'],
     queryFn: () => api('/lots'),
-  })
-
-  const saveMutation = useMutation({
-    mutationFn: async (e: EditState) => {
-      const cost = e.cost.trim()
-      return apiPut(`/lots/${encodeURIComponent(e.sku)}`, {
-        // Empty clears the value rather than saving 0 - a lot with no cost yet is
-        // a different thing from a lot that cost nothing.
-        cost: cost === '' ? null : Number(cost),
-        purchased_at: e.purchased_at || null,
-        source: e.source.trim() || null,
-        notes: e.notes.trim() || null,
-      })
-    },
-    onSuccess: () => {
-      setEditing(null)
-      queryClient.invalidateQueries({ queryKey: ['lots'] })
-    },
   })
 
   const lots = useMemo(() => data?.lots ?? [], [data])
@@ -89,14 +50,6 @@ export function LotsPage() {
     if (key === sortBy) setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))
     else { setSortBy(key as SortKey); setSortDir('desc') }
   }
-
-  const openEdit = (lot: Lot) => setEditing({
-    sku: lot.sku,
-    cost: lot.cost != null ? String(lot.cost) : '',
-    purchased_at: lot.purchased_at ?? '',
-    source: lot.source ?? '',
-    notes: lot.notes ?? '',
-  })
 
   const totals = data?.totals
 
@@ -138,7 +91,7 @@ export function LotsPage() {
         <TableSkeleton
           rows={8}
           columns={[
-            { header: 'SKU', width: 'w-24' },
+            { header: 'Lot', width: 'w-40' },
             { header: 'Cost', width: 'w-16' },
             { header: 'Items', width: 'w-20' },
             { header: 'Listed Value', width: 'w-20' },
@@ -153,14 +106,21 @@ export function LotsPage() {
           columns={[
             {
               key: 'sku',
-              header: 'SKU',
+              header: 'Lot',
+              // Still sorted by SKU even when a title is showing: the codes run in
+              // purchase order (L0030 before L0041), which titles won't.
               sortKey: 'sku',
-              className: 'w-40',
+              className: 'w-52',
               render: (r) => (
                 <div>
-                  <div className="font-medium text-slate-800 dark:text-neutral-100">{r.sku}</div>
+                  <div className="font-medium text-slate-800 dark:text-neutral-100 truncate">
+                    {r.title || r.sku}
+                  </div>
                   <div className="text-xs text-slate-400 truncate">
-                    {[r.source, r.purchased_at].filter(Boolean).join(' · ') || '—'}
+                    {/* The SKU is the lot's identity, so it stays visible even when
+                        a title has taken the main line. */}
+                    {[r.title ? r.sku : null, r.source, r.purchased_at]
+                      .filter(Boolean).join(' · ') || '—'}
                   </div>
                 </div>
               ),
@@ -264,6 +224,17 @@ export function LotsPage() {
               header: '',
               className: 'w-12',
               stopRowClick: true,
+              render: (r) => (
+                <button
+                  type="button"
+                  aria-label={`Edit lot ${r.sku}`}
+                  title="Edit cost and details"
+                  className="text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
+                  onClick={() => setEditing(r)}
+                >
+                  <Pencil size={14} />
+                </button>
+              ),
             },
           ]}
           data={sorted}
@@ -271,7 +242,7 @@ export function LotsPage() {
           sortBy={sortBy}
           sortDir={sortDir}
           onSortChange={handleSort}
-          onRowClick={openEdit}
+          onRowClick={(r) => navigate(`/lots/${encodeURIComponent(r.sku)}`)}
         />
       ) : !isError ? (
         <div className="flex h-28 items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-sm text-slate-400">
@@ -285,92 +256,7 @@ export function LotsPage() {
         </p>
       )}
 
-      {editing && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="bg-white dark:bg-neutral-800 rounded-xl p-5 w-full max-w-md">
-            <h2 className="text-lg font-bold text-slate-900 dark:text-neutral-100 mb-1">
-              Lot {editing.sku}
-            </h2>
-            <p className="text-xs text-slate-500 dark:text-neutral-400 mb-4">
-              What you paid for the whole lot, not per card.
-            </p>
-
-            <div className="space-y-3">
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600 dark:text-neutral-300">Cost paid</span>
-                <div className="relative mt-1">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    autoFocus
-                    className="w-full border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 rounded-lg pl-7 pr-3 py-1.5 text-sm tabular-nums"
-                    value={editing.cost}
-                    placeholder="Leave blank if unknown"
-                    onChange={(e) => setEditing({ ...editing, cost: e.target.value })}
-                  />
-                </div>
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600 dark:text-neutral-300">Purchased</span>
-                <input
-                  type="date"
-                  className="mt-1 w-full border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm"
-                  value={editing.purchased_at}
-                  onChange={(e) => setEditing({ ...editing, purchased_at: e.target.value })}
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600 dark:text-neutral-300">Source</span>
-                <input
-                  type="text"
-                  className="mt-1 w-full border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm"
-                  value={editing.source}
-                  placeholder="Where you bought it"
-                  onChange={(e) => setEditing({ ...editing, source: e.target.value })}
-                />
-              </label>
-
-              <label className="block">
-                <span className="text-xs font-medium text-slate-600 dark:text-neutral-300">Notes</span>
-                <textarea
-                  rows={2}
-                  className="mt-1 w-full border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm resize-none"
-                  value={editing.notes}
-                  onChange={(e) => setEditing({ ...editing, notes: e.target.value })}
-                />
-              </label>
-            </div>
-
-            {saveMutation.isError && (
-              <p className="text-xs text-rose-600 dark:text-rose-400 mt-3">
-                {(saveMutation.error as Error).message}
-              </p>
-            )}
-
-            <div className="flex justify-end gap-2 pt-4">
-              <button
-                className="px-3 py-1.5 text-sm border border-slate-300 dark:border-neutral-600 rounded-lg text-slate-700 dark:text-neutral-200"
-                onClick={() => { saveMutation.reset(); setEditing(null) }}
-                disabled={saveMutation.isPending}
-              >
-                Cancel
-              </button>
-              <button
-                className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                onClick={() => saveMutation.mutate(editing)}
-                disabled={saveMutation.isPending}
-              >
-                {saveMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-                Save
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {editing && <LotEditDialog lot={editing} onClose={() => setEditing(null)} />}
     </div>
   )
 }

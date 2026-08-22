@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link2, Link2Off, Loader2, CheckCircle2 } from 'lucide-react'
 import { api, apiPost } from '../lib/api'
 import type { EbayStatus } from '../types'
+import { ApiUsageBar } from '../components/shared/ApiUsageBar'
 
 export function SettingsPage() {
   const [connecting, setConnecting] = useState(false)
@@ -127,6 +128,8 @@ export function SettingsPage() {
           </div>
         )}
       </div>
+
+      <ApiUsageBar />
     </div>
   )
 }

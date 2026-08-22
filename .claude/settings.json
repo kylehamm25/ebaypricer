@@ -36,6 +36,26 @@
             "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/remind-excel-columns.ps1\"",
             "timeout": 10,
             "statusMessage": "Checking Excel column mappings"
+          },
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/restart-dashboard.ps1\" -Mark",
+            "timeout": 10,
+            "statusMessage": "Noting backend change"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "& \"$($env:CLAUDE_PROJECT_DIR ?? '.')/.claude/hooks/restart-dashboard.ps1\" -Restart",
+            "timeout": 30,
+            "statusMessage": "Restarting dashboard"
           }
         ]
       }

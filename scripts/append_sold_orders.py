@@ -11,7 +11,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_sold_orders
-from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows, _closest_by_date
+from ebaypricer.finances import FinancesApiError, fetch_finance_fees, merge_fees_into_rows, _closest_by_date
 from ebaypricer.cards import enrich_rows
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT,
@@ -364,7 +364,14 @@ def main():
         print("No orders found")
         sys.exit(0)
 
-    append_rows_to_workbook(raw_rows, args.output, start_dt, token)
+    try:
+        append_rows_to_workbook(raw_rows, args.output, start_dt, token)
+    except FinancesApiError as e:
+        # fetch_finance_fees used to sys.exit(1) here. It now raises so the dashboard
+        # sync can catch it; this script still has to fail loudly and non-zero, because
+        # scripts/main.py chains the pipeline on exit codes.
+        print(f"ERROR: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

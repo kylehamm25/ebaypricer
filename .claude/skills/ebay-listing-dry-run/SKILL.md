@@ -21,9 +21,8 @@ the actual item IDs, the old value, the new value, and the count.
 Know these on sight. Anything reaching one of them is a live write.
 
 **Trading API — `ebaypricer/trading_api.py`**
-- `revise_item_price` → `ReviseFixedPriceItem`, changes a listing's price
-- `revise_best_offer_thresholds` → changes auto-accept / auto-decline
-- `revise_price_with_best_offer` → both, as two sequenced calls
+- `revise_item_price` → `ReviseFixedPriceItem`, changes a listing's price. The only
+  write here. Price and nothing else — Best Offer thresholds are never touched.
 
 **Marketing API — `ebaypricer/marketing_api.py`**
 - `bulk_update_bids` → up to 500 ad rates in one call (**spends money**)
@@ -64,26 +63,29 @@ bulk flow, not in the API. When driving them programmatically:
 4. **Apply**, in batches within the 100-item cap.
 5. **Verify** against `price_change_log`, which records only revisions eBay
    actually accepted, and reconcile per-item results — the bulk endpoint attempts
-   each item independently and returns `ok` / `partial` / `error` per item. A
-   `partial` means the price landed but Best Offer thresholds did not.
+   each item independently and returns `ok` / `error` per item. (There was once a
+   `partial` for a price that landed while its Best Offer thresholds didn't; with a
+   price-only revision there is no half-applied state left.)
 
-## The two-call ordering trap
+## Best Offer is not ours to touch
 
-Price and Best Offer thresholds **can never move in one call**. eBay validates
-each side against what is *currently live* on the listing, never against the other
-new value in the same request.
+Repricing changes the **price only**. Auto-accept and minimum-offer thresholds are
+the seller's own listing settings and are deliberately left alone. `OFFER_THRESHOLD_PCT`,
+`revise_best_offer_thresholds` and `revise_price_with_best_offer` were all removed;
+do not reintroduce them or derive a threshold from a price.
+
+Kept only because it would bite anyone who ever adds a *separate, deliberate*
+offer-threshold action: price and thresholds **can never move in one call**. eBay
+validates each side against what is *currently live* on the listing, never against
+the other new value in the same request.
 
 - Cutting the price while the old, higher auto-decline is still live →
   *"Auto decline amount cannot be greater than or equal to the Buy It Now price"*.
 - Raising thresholds before the higher price is live → same class of rejection.
 
-`revise_price_with_best_offer` handles this by moving whichever side gains slack
-first: **thresholds down before a price cut, price up before a threshold raise.**
-When `current_price` is unknown it assumes a cut (the common case); a wrong guess
-fails the first call harmlessly and the price still goes through.
-
-Always go through `revise_price_with_best_offer` rather than calling the two
-primitives yourself. If you must sequence them manually, replicate this ordering.
+The fix is two sequenced calls moving whichever side gains slack first: **thresholds
+down before a price cut, price up before a threshold raise.** Getting the order wrong
+is rejected outright, not silently ignored.
 
 ## Failure handling
 

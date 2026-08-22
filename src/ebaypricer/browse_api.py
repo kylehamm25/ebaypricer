@@ -7,6 +7,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from statistics import mean, stdev
 
+from urllib.parse import urlencode
+
 import requests
 
 from .auth import get_ebay_token
@@ -21,8 +23,20 @@ MAX_RATE_LIMIT_RETRIES = 3
 # Search configuration — toggle listing formats and graded exclusions here.
 # BUYING_OPTIONS: "FIXED_PRICE" (Buy It Now), "AUCTION", or both "FIXED_PRICE|AUCTION"
 BUYING_OPTIONS = "FIXED_PRICE"
-# EXCLUDED_TERMS: space-separated negative keywords appended to every query
-EXCLUDED_TERMS = "-PSA -BGS -CGC -SGC -graded -slab"
+# EXCLUDED_TERMS: space-separated negative keywords appended to every query.
+# The lot/bundle terms free up result slots that were being spent on multi-card
+# listings, which are never a comp for a single card. Verified against this seller's
+# own titles first: none contain any of these words, so they cannot hide our own
+# listing from the search-position lookup, which shares this function.
+EXCLUDED_TERMS = "-PSA -BGS -CGC -SGC -graded -slab -lot -bundle -playset -proxy -reprint"
+
+# eBay US leaf category for single trading cards ("CCG Individual Cards", under
+# Toys & Hobbies > Collectible Card Games). Verified empirically rather than assumed:
+# 49 of 50 results across two real card queries carry it, the one exception being a
+# non-sport card that was itself a mismatch. Constraining the search here is cheaper
+# and more reliable than filtering sealed product, supplies and other games out of the
+# results afterwards. Server-side filtering costs no extra API calls.
+CARD_CATEGORY_ID = "183454"
 
 
 def _build_query(query: str) -> str:
@@ -30,6 +44,23 @@ def _build_query(query: str) -> str:
     if len(words) > MAX_QUERY_WORDS:
         query = " ".join(words[:MAX_QUERY_WORDS])
     return f"{query} {EXCLUDED_TERMS}".strip()
+
+
+def web_search_url(query: str) -> str:
+    """The same search, as a link a person can open.
+
+    Mirrors what search_active_listings() asks the API for - identical truncated query,
+    identical negative keywords, same category, same Buy It Now restriction - so clicking
+    through shows the pool the comps were actually drawn from. Built here, beside those
+    constants, because a copy in the frontend would quietly stop matching the moment any
+    of them changed.
+    """
+    params = {"_nkw": _build_query(query), "_sacat": CARD_CATEGORY_ID}
+    # LH_BIN is the web equivalent of buyingOptions:{FIXED_PRICE}; only correct while
+    # that is what we actually filter on.
+    if BUYING_OPTIONS == "FIXED_PRICE":
+        params["LH_BIN"] = "1"
+    return "https://www.ebay.com/sch/i.html?" + urlencode(params)
 
 
 def _buying_options_filter() -> str:
@@ -184,6 +215,7 @@ def search_active_listings(query: str, limit: int = 5, offset: int = 0, _retries
     params = {
         "q": _build_query(query),
         "filter": _buying_options_filter(),
+        "category_ids": CARD_CATEGORY_ID,
         "limit": str(limit),
         "offset": str(offset),
     }

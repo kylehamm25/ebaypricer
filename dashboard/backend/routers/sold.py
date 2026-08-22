@@ -39,7 +39,8 @@ def _exists(db) -> bool:
 def get_sold_listings(
     user_id: UUID = Depends(get_current_user_id),
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=200),
+    # 500 to match /active/list, so both pages can offer the same page-size choices.
+    per_page: int = Query(50, ge=1, le=500),
     card: str = Query(None),
     date_from: str = Query(None),
     date_to: str = Query(None),
@@ -49,7 +50,9 @@ def get_sold_listings(
     where_clauses = ["user_id = %s"]
     params = [user_id]
     if card:
-        where_clauses.append("card LIKE %s")
+        # ILIKE, not LIKE: Postgres LIKE is case-sensitive, so searching "charizard"
+        # matched nothing while "Charizard" did. Card names are stored title-cased.
+        where_clauses.append("card ILIKE %s")
         params.append(f"%{card}%")
     if date_from:
         where_clauses.append("sale_date >= %s")
@@ -71,8 +74,20 @@ def get_sold_listings(
         ).fetchone()["c"]
         offset = (page - 1) * per_page
         rows = db.execute(
+            # The secondary keys keep a multi-item order's rows together and in a
+            # readable order, which is what lets the UI draw them as one group:
+            #   order_id                 - adjacency. Every row of an order shares
+            #                              one sale_date, so this never fights the
+            #                              primary sort under the default ordering.
+            #   (order_earnings IS NULL) - eBay reports order-level money on a single
+            #                              row of the order, and it is NOT always the
+            #                              lowest item_id (7 of 22 here). This floats
+            #                              that row to the top of its group so the
+            #                              group leads with its totals instead of
+            #                              showing them from somewhere in the middle.
             f"SELECT {_SELECT} FROM sold_orders WHERE {where_sql} "
-            f"ORDER BY {sort_col} {dir_sql} LIMIT %s OFFSET %s",
+            f"ORDER BY {sort_col} {dir_sql}, order_id, (order_earnings IS NULL), item_id "
+            f"LIMIT %s OFFSET %s",
             params + [per_page, offset],
         ).fetchall()
     items = [dict(r) for r in rows]
@@ -98,25 +113,44 @@ def get_sold_summary(user_id: UUID = Depends(get_current_user_id)):
                 "total_shipping": 0,
                 "total_fees": 0,
                 "total_earnings": 0,
+                "orders_missing_net": 0,
                 "avg_price": 0,
             }
+        # Order-level money (shipping, total_fees, order_earnings) sits on exactly ONE
+        # row of a multi-item order - see append_sold_orders.blank_order_level_
+        # continuation_rows - so every order-level figure is MAX(...) per order_id and
+        # only then summed. Line-level figures use quantity: item_price is eBay's
+        # TransactionPrice, which is PER UNIT, so a qty-3 line is 3 items and 3x the
+        # revenue. routers/lots.py aggregates the same way; these two must agree.
         row = db.execute(
-            """SELECT (SELECT COUNT(*) FROM sold_orders WHERE user_id = %s) AS total_items,
-                       COALESCE(ROUND(SUM(item_price), 2), 0) AS total_revenue,
-                       COALESCE((SELECT ROUND(SUM(s), 2) FROM (
-                                  SELECT order_id, MAX(shipping) AS s
-                                  FROM sold_orders WHERE user_id = %s GROUP BY order_id
-                                )), 0) AS total_shipping,
-                       COALESCE((SELECT ROUND(SUM(f), 2) FROM (
-                                  SELECT order_id, MAX(total_fees) AS f
-                                  FROM sold_orders WHERE user_id = %s GROUP BY order_id
-                                )), 0) AS total_fees,
-                       COALESCE(ROUND(AVG(item_price), 2), 0) AS avg_price
-                FROM sold_orders WHERE user_id = %s""",
-            [user_id, user_id, user_id, user_id],
+            """WITH per_order AS (
+                   SELECT order_id,
+                          MAX(shipping)       AS shipping,
+                          MAX(total_fees)     AS fees,
+                          MAX(order_earnings) AS net
+                   FROM sold_orders WHERE user_id = %(uid)s GROUP BY order_id
+               ),
+               lines AS (
+                   SELECT COALESCE(quantity, 1) AS qty,
+                          item_price * COALESCE(quantity, 1) AS line_gross
+                   FROM sold_orders WHERE user_id = %(uid)s
+               )
+               SELECT (SELECT COALESCE(SUM(qty), 0) FROM lines) AS total_items,
+                      (SELECT COALESCE(ROUND(SUM(line_gross), 2), 0) FROM lines) AS total_revenue,
+                      COALESCE(ROUND(SUM(shipping), 2), 0) AS total_shipping,
+                      COALESCE(ROUND(SUM(fees), 2), 0)     AS total_fees,
+                      COALESCE(ROUND(SUM(net), 2), 0)      AS total_earnings,
+                      COUNT(*) FILTER (WHERE net IS NULL)  AS orders_missing_net
+               FROM per_order""",
+            {"uid": user_id},
         ).fetchone()
     result = dict(row)
-    result["total_earnings"] = round(result["total_revenue"] - result["total_fees"], 2)
+    # total_earnings is now the real per-order net from the Finances API
+    # (totalFeeBasisAmount - fees - debits), NOT revenue-minus-fees. The old formula
+    # dropped shipping revenue and ignored refund debits, so the card labelled
+    # "Order Earnings" was showing a number that was not order earnings.
+    units = result["total_items"] or 0
+    result["avg_price"] = round(float(result["total_revenue"]) / units, 2) if units else 0
     return result
 
 
@@ -126,8 +160,9 @@ def get_sold_trends(user_id: UUID = Depends(get_current_user_id), days: int = 90
         if not _exists(db):
             return []
         rows = db.execute(
-            """SELECT sale_date AS date, COUNT(*) AS count,
-                       COALESCE(SUM(item_price), 0) AS revenue
+            """SELECT sale_date AS date,
+                       COALESCE(SUM(COALESCE(quantity, 1)), 0) AS count,
+                       COALESCE(SUM(item_price * COALESCE(quantity, 1)), 0) AS revenue
                 FROM sold_orders
                 WHERE user_id = %s
                   AND sale_date >= CURRENT_DATE - make_interval(days => %s)
@@ -178,9 +213,10 @@ def get_sold_by_card(user_id: UUID = Depends(get_current_user_id), min_sales: in
         if not _exists(db):
             return []
         rows = db.execute(
-            """SELECT card AS card_query, COUNT(*) AS count,
+            """SELECT card AS card_query,
+                       SUM(COALESCE(quantity, 1)) AS count,
                        ROUND(AVG(item_price), 2) AS avg_price,
-                       ROUND(SUM(item_price), 2) AS total_revenue
+                       ROUND(SUM(item_price * COALESCE(quantity, 1)), 2) AS total_revenue
                 FROM sold_orders
                 WHERE user_id = %s
                   AND card IS NOT NULL AND card != ''

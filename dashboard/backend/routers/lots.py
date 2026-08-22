@@ -10,11 +10,12 @@ from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from psycopg.errors import UndefinedTable
+from psycopg.errors import UndefinedColumn, UndefinedTable
 from pydantic import BaseModel, Field
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
+from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
 router = APIRouter(prefix="/api/v1/lots", tags=["lots"])
 
@@ -33,8 +34,8 @@ EXCLUDED_SKUS = ("PULL", "NONTCG", NO_SKU)
 # that one row, and gives the other lots in it nothing. So the order's net is split
 # across its lines in proportion to each line's share of the order's item value.
 # This conserves exactly: the allocated nets sum back to the reported order nets.
-_LOT_AGGREGATE_SQL = f"""
-WITH order_totals AS (
+_SOLD_LINES_CTE = f"""
+order_totals AS (
     SELECT order_id,
            MAX(order_earnings) AS order_net,
            SUM(item_price * COALESCE(quantity, 1)) AS order_gross
@@ -44,7 +45,12 @@ WITH order_totals AS (
 ),
 sold_lines AS (
     SELECT COALESCE(NULLIF(TRIM(s.sku), ''), '{NO_SKU}') AS sku,
+           s.order_id,
+           s.item_id,
+           s.item_title,
+           s.card,
            COALESCE(s.quantity, 1) AS qty,
+           s.item_price,
            s.item_price * COALESCE(s.quantity, 1) AS line_gross,
            CASE
                WHEN t.order_net IS NULL THEN NULL
@@ -55,7 +61,11 @@ sold_lines AS (
     FROM sold_orders s
     JOIN order_totals t ON t.order_id = s.order_id
     WHERE s.user_id = %(uid)s
-),
+)
+"""
+
+_LOT_AGGREGATE_SQL = f"""
+WITH {_SOLD_LINES_CTE},
 sold_agg AS (
     SELECT sku,
            SUM(qty) AS sold_items,
@@ -96,30 +106,76 @@ FROM active_agg a
 FULL OUTER JOIN sold_agg s ON s.sku = a.sku
 """
 
+# One lot's sold lines. line_net is the line's allocated share of its order's net
+# (see _SOLD_LINES_CTE), never the raw order-level figure - so these rows sum to
+# the same sold_net the lots list shows, and a multi-item order reads sensibly
+# line by line instead of putting the whole order's money on one row.
+_LOT_SOLD_SQL = f"""
+WITH {_SOLD_LINES_CTE}
+SELECT order_id, item_id, item_title, card, sale_date,
+       qty AS quantity, item_price, line_gross, line_net
+FROM sold_lines
+WHERE sku = %(sku)s
+ORDER BY sale_date DESC NULLS LAST, order_id, item_id
+"""
+
+# One lot's live listings. Same SKU normalisation as the aggregate above, so the
+# rows here are exactly the ones counted in active_items / listed_value.
+_LOT_ACTIVE_SQL = f"""
+SELECT item_id, title, card, condition, price, shipping_charge, quantity,
+       days_listed, watchers, start_date, estimated_net, suggested_price
+FROM active_listings
+WHERE user_id = %(uid)s
+  AND COALESCE(NULLIF(TRIM(sku), ''), '{NO_SKU}') = %(sku)s
+ORDER BY price DESC NULLS LAST, item_id
+"""
+
 
 def _f(value) -> float:
     """Numerics come back as Decimal; JSON wants float."""
     return float(value) if value is not None else 0.0
 
 
-def _fetch_costs(db, user_id: UUID) -> tuple[dict[str, dict], bool]:
-    """Cost rows keyed by SKU, plus whether migration 0008 has been run yet."""
-    try:
-        rows = db.execute(
-            "SELECT sku, cost, purchased_at, source, notes FROM lots WHERE user_id = %s",
-            [user_id],
-        ).fetchall()
-    except UndefinedTable:
-        return {}, False
-    return {r["sku"]: dict(r) for r in rows}, True
+def _fopt(value) -> float | None:
+    """Like _f, but keeps null null - a missing net is not a net of zero.
+
+    Rounded: the allocated line net is a division, so it arrives with far more
+    decimal places than money has.
+    """
+    return round(float(value), 2) if value is not None else None
+
+
+# `title` arrived in migration 0009, after 0008 was already applied, so it may not
+# exist yet. Widest column list first; the fallback drops title only.
+_LOT_COLUMNS = ("sku, title, cost, purchased_at, source, notes",
+                "sku, cost, purchased_at, source, notes")
+
+
+def _fetch_costs(user_id: UUID) -> tuple[dict[str, dict], bool]:
+    """Stored lot fields keyed by SKU, plus whether migration 0008 has been run.
+
+    Takes its own connection per attempt: a failed statement aborts the whole
+    transaction, so the fallback query cannot reuse the one that just errored.
+    """
+    for columns in _LOT_COLUMNS:
+        try:
+            with get_db() as db:
+                rows = db.execute(
+                    f"SELECT {columns} FROM lots WHERE user_id = %s", [user_id]
+                ).fetchall()
+            return {r["sku"]: dict(r) for r in rows}, True
+        except UndefinedTable:
+            return {}, False
+        except UndefinedColumn:
+            continue  # migration 0009 not run yet; retry without title
+    return {}, True
 
 
 @router.get("")
 def list_lots(user_id: UUID = Depends(get_current_user_id)):
-    with get_db() as db:
-        # Read costs first: an UndefinedTable aborts the transaction, so the
-        # aggregate below has to run on a clean one.
-        costs, cost_tracking_enabled = _fetch_costs(db, user_id)
+    # Read stored fields first, on their own connection - a missing table or column
+    # aborts the transaction, so the aggregate below needs a clean one.
+    costs, cost_tracking_enabled = _fetch_costs(user_id)
     with get_db() as db:
         try:
             rows = db.execute(
@@ -138,20 +194,93 @@ def list_lots(user_id: UUID = Depends(get_current_user_id)):
         ]
 
     lots = [_build_lot(dict(r), costs.get(r["sku"])) for r in rows]
-    lots += [
-        _build_lot(
-            {"sku": sku, "active_items": 0, "listed_value": 0, "sold_items": 0,
-             "sold_gross": 0, "sold_net": 0, "sold_missing_net": 0,
-             "first_sale": None, "last_sale": None},
-            costs[sku],
-        )
-        for sku in orphans
-    ]
+    lots += [_build_lot(_empty_agg(sku), costs[sku]) for sku in orphans]
     lots.sort(key=lambda x: x["sku"])
     return {
         "lots": lots,
         "totals": _totals(lots),
         "cost_tracking_enabled": cost_tracking_enabled,
+    }
+
+
+def _empty_agg(sku: str) -> dict:
+    """A lot with a cost recorded but nothing (any longer) listed or sold under it."""
+    return {"sku": sku, "active_items": 0, "listed_value": 0, "sold_items": 0,
+            "sold_gross": 0, "sold_net": 0, "sold_missing_net": 0,
+            "first_sale": None, "last_sale": None}
+
+
+@router.get("/{sku}")
+def get_lot(sku: str, user_id: UUID = Depends(get_current_user_id)):
+    """One lot's summary plus the sold and active listings behind it."""
+    sku = sku.strip()
+    if not sku or sku in EXCLUDED_SKUS:
+        raise HTTPException(404, f"{sku or 'That SKU'} is not a purchased lot")
+
+    costs, cost_tracking_enabled = _fetch_costs(user_id)
+    with get_db() as db:
+        try:
+            # The whole-catalog aggregate, then the one row - rather than a
+            # SKU-filtered copy of it. There are a dozen lots, and this guarantees
+            # the header here shows exactly what the list row showed, including the
+            # cross-lot net allocation, which a filtered query would get wrong.
+            rows = db.execute(
+                _LOT_AGGREGATE_SQL,
+                {"uid": user_id, "excluded": list(EXCLUDED_SKUS)},
+            ).fetchall()
+            agg = next((dict(r) for r in rows if r["sku"] == sku), None)
+            sold = db.execute(_LOT_SOLD_SQL, {"uid": user_id, "sku": sku}).fetchall()
+            active = db.execute(_LOT_ACTIVE_SQL, {"uid": user_id, "sku": sku}).fetchall()
+        except UndefinedTable:
+            # Pre-migration-0001 install; nothing to aggregate yet.
+            agg, sold, active = None, [], []
+
+    if agg is None:
+        # No listing or order carries this SKU. That is still a real lot if a cost
+        # was saved against it - otherwise the SKU simply doesn't exist.
+        if sku not in costs:
+            raise HTTPException(404, f"No lot {sku}")
+        agg = _empty_agg(sku)
+
+    return {
+        "lot": _build_lot(agg, costs.get(sku)),
+        "sold": [_sold_row(dict(r)) for r in sold],
+        "active": [_active_row(dict(r)) for r in active],
+        "cost_tracking_enabled": cost_tracking_enabled,
+    }
+
+
+def _sold_row(row: dict) -> dict:
+    return {
+        "order_id": row["order_id"],
+        "item_id": row["item_id"],
+        "item_title": row["item_title"],
+        "card": row["card"],
+        "sale_date": _iso(row["sale_date"]),
+        "quantity": int(row["quantity"] or 1),
+        "item_price": _fopt(row["item_price"]),
+        "line_gross": _fopt(row["line_gross"]),
+        # Null, not 0: the Finances API hasn't reported this order's fees yet.
+        "line_net": _fopt(row["line_net"]),
+        "sprite_url": get_sprite_url(row["item_title"] or ""),
+    }
+
+
+def _active_row(row: dict) -> dict:
+    return {
+        "item_id": row["item_id"],
+        "title": row["title"],
+        "card": row["card"],
+        "condition": row["condition"],
+        "price": _fopt(row["price"]),
+        "shipping_charge": _fopt(row["shipping_charge"]),
+        "quantity": int(row["quantity"] or 1),
+        "days_listed": int(row["days_listed"]) if row["days_listed"] is not None else None,
+        "watchers": int(row["watchers"]) if row["watchers"] is not None else None,
+        "start_date": _iso(row["start_date"]),
+        "estimated_net": _fopt(row["estimated_net"]),
+        "suggested_price": _fopt(row["suggested_price"]),
+        "sprite_url": get_sprite_url(row["title"] or ""),
     }
 
 
@@ -162,6 +291,8 @@ def _build_lot(agg: dict, cost_row: dict | None) -> dict:
 
     lot = {
         "sku": agg["sku"],
+        # Absent (rather than None) when migration 0009 hasn't been run.
+        "title": (cost_row or {}).get("title"),
         "cost": cost,
         "purchased_at": _iso(cost_row.get("purchased_at")) if cost_row else None,
         "source": (cost_row or {}).get("source"),
@@ -220,10 +351,35 @@ def _totals(lots: list[dict]) -> dict:
 
 
 class LotUpdate(BaseModel):
+    title: str | None = Field(None, max_length=200)
     cost: float | None = Field(None, ge=0)
     purchased_at: date | None = None
     source: str | None = None
     notes: str | None = None
+
+
+_UPSERT_WITH_TITLE = """
+INSERT INTO lots (user_id, sku, title, cost, purchased_at, source, notes, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+ON CONFLICT (user_id, sku) DO UPDATE SET
+    title = EXCLUDED.title,
+    cost = EXCLUDED.cost,
+    purchased_at = EXCLUDED.purchased_at,
+    source = EXCLUDED.source,
+    notes = EXCLUDED.notes,
+    updated_at = now()
+"""
+
+_UPSERT_NO_TITLE = """
+INSERT INTO lots (user_id, sku, cost, purchased_at, source, notes, updated_at)
+VALUES (%s, %s, %s, %s, %s, %s, now())
+ON CONFLICT (user_id, sku) DO UPDATE SET
+    cost = EXCLUDED.cost,
+    purchased_at = EXCLUDED.purchased_at,
+    source = EXCLUDED.source,
+    notes = EXCLUDED.notes,
+    updated_at = now()
+"""
 
 
 @router.put("/{sku}")
@@ -235,20 +391,21 @@ def upsert_lot(sku: str, body: LotUpdate, user_id: UUID = Depends(get_current_us
     # cost saved here would be money recorded nowhere the user can see it again.
     if sku in EXCLUDED_SKUS:
         raise HTTPException(422, f"{sku} is not a purchased lot and isn't tracked here")
+
+    title = (body.title or "").strip() or None
+    common = [body.cost, body.purchased_at, body.source or None, body.notes or None]
     try:
         with get_db(read_only=False) as db:
-            db.execute(
-                """INSERT INTO lots (user_id, sku, cost, purchased_at, source, notes, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, now())
-                   ON CONFLICT (user_id, sku) DO UPDATE SET
-                       cost = EXCLUDED.cost,
-                       purchased_at = EXCLUDED.purchased_at,
-                       source = EXCLUDED.source,
-                       notes = EXCLUDED.notes,
-                       updated_at = now()""",
-                [user_id, sku, body.cost, body.purchased_at,
-                 body.source or None, body.notes or None],
+            db.execute(_UPSERT_WITH_TITLE, [user_id, sku, title] + common)
+    except UndefinedColumn:
+        # Migration 0009 not run. Everything else still saves; a title would be
+        # silently dropped, so that is refused loudly instead.
+        if title:
+            raise HTTPException(
+                503, "Lot titles need migration db/migrations/0009_lots_title.sql to be run first"
             )
+        with get_db(read_only=False) as db:
+            db.execute(_UPSERT_NO_TITLE, [user_id, sku] + common)
     except UndefinedTable:
         raise HTTPException(
             503, "Lot cost tracking needs migration db/migrations/0008_lots.sql to be run first"

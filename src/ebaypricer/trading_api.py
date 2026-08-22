@@ -441,8 +441,11 @@ def revise_item_price(item_id: str, new_price: float, access_token: str) -> None
     range eBay allows for a revision). Requires a token with the sell.inventory
     (not .readonly) scope.
 
-    Best Offer thresholds deliberately cannot ride along in this call - see
-    revise_price_with_best_offer for why they have to move in a separate one."""
+    Price only. Repricing deliberately no longer touches Best Offer auto-accept or
+    minimum-offer thresholds, so whatever the seller has set on the listing is left
+    exactly as it is. Do not re-add them here: eBay validates each side against what
+    is currently live, so they cannot ride along in this request anyway, and the
+    sequenced two-call version was removed on purpose."""
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <ReviseFixedPriceItemRequest xmlns="{NS}">
   <RequesterCredentials>
@@ -456,69 +459,13 @@ def revise_item_price(item_id: str, new_price: float, access_token: str) -> None
     _send_revise(xml, access_token)
 
 
-def revise_best_offer_thresholds(
-    item_id: str, auto_accept_price: float, minimum_offer_price: float, access_token: str
-) -> None:
-    """Updates only a listing's Best Offer auto-accept/auto-decline thresholds, leaving
-    price untouched. Ordering relative to the price change matters - see
-    revise_price_with_best_offer."""
-    xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<ReviseFixedPriceItemRequest xmlns="{NS}">
-  <RequesterCredentials>
-    <eBayAuthToken>{access_token}</eBayAuthToken>
-  </RequesterCredentials>
-  <Item>
-    <ItemID>{item_id}</ItemID>
-    <BestOfferDetails>
-      <BestOfferEnabled>true</BestOfferEnabled>
-    </BestOfferDetails>
-    <BestOfferAutoAcceptPrice>{auto_accept_price:.2f}</BestOfferAutoAcceptPrice>
-    <MinimumBestOfferPrice>{minimum_offer_price:.2f}</MinimumBestOfferPrice>
-  </Item>
-</ReviseFixedPriceItemRequest>"""
-    _send_revise(xml, access_token)
-
-
-def revise_price_with_best_offer(
-    item_id: str,
-    new_price: float,
-    offer_threshold: float,
-    access_token: str,
-    current_price: float | None = None,
-) -> str | None:
-    """Moves a listing's price and its Best Offer auto-accept/auto-decline thresholds to
-    new values, sequencing the two calls so eBay's validation passes.
-
-    eBay validates each side against what is *currently live* on the listing, never
-    against the other new value in the same request, so price and thresholds can never
-    move together in one call. Cutting the price while the old (higher) auto-decline is
-    still live is rejected with "Auto decline amount cannot be greater than or equal to
-    the Buy It Now price", and so is raising the thresholds before the higher price is
-    live. The fix is to move whichever side gains slack first: thresholds down before a
-    price cut, price up before a threshold raise.
-
-    current_price is what we believe is live; when it is unknown we assume a cut, which
-    is the common case. If that guess is wrong the first call fails harmlessly and the
-    price still goes through.
-
-    Returns None when both landed, or eBay's message when only the price did (Best Offer
-    may simply not be enabled on the listing). Raises EbayReviseError if the price
-    itself could not be applied."""
-    if current_price is None or new_price < current_price:
-        try:
-            revise_best_offer_thresholds(item_id, offer_threshold, offer_threshold, access_token)
-        except EbayReviseError as e:
-            revise_item_price(item_id, new_price, access_token)
-            return str(e)
-        revise_item_price(item_id, new_price, access_token)
-        return None
-
-    revise_item_price(item_id, new_price, access_token)
-    try:
-        revise_best_offer_thresholds(item_id, offer_threshold, offer_threshold, access_token)
-    except EbayReviseError as e:
-        return str(e)
-    return None
+# revise_best_offer_thresholds() and revise_price_with_best_offer() used to live here.
+# Repricing no longer touches Best Offer at all - the seller's own auto-accept and
+# minimum-offer settings are left alone - so both were removed rather than left as a
+# loaded gun for a future caller. Recoverable from git history (they were last present
+# in 10c96ff) if a deliberate, separate offer-threshold action is ever wanted; the
+# call-ordering constraint that made them tricky is written up in
+# .claude/skills/ebay-listing-dry-run/SKILL.md.
 
 
 def _send_revise(xml: str, access_token: str) -> None:

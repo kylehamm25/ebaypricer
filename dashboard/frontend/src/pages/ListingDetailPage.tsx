@@ -78,7 +78,7 @@ function renderListingLink(r: Record<string, unknown>) {
 
 function EmptyChart({ label }: { label: string }) {
   return (
-    <div className="flex h-[200px] flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-slate-400">
+    <div className="flex h-full min-h-[200px] flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-slate-400">
       <p className="text-sm">{label}</p>
     </div>
   )
@@ -338,17 +338,16 @@ export function ListingDetailPage() {
       {/* Header */}
       <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex flex-col justify-between">
         <div className="flex flex-wrap items-start gap-5">
-          {item.sprite_url ? (
+          {item.card_image_url ? (
             <img
-              src={item.sprite_url as string}
-              alt=""
-              width={96}
-              height={96}
-              style={{ imageRendering: 'pixelated' }}
-              className="shrink-0"
+              src={item.card_image_url}
+              alt={`${item.Card ?? item.Title} card`}
+              loading="lazy"
+              onError={(e) => { e.currentTarget.style.display = 'none' }}
+              className="w-48 aspect-[5/7] shrink-0 rounded-lg object-contain"
             />
           ) : (
-            <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-lg bg-slate-50 dark:bg-neutral-700/50 ring-1 ring-slate-200 dark:ring-neutral-600">
+            <div className="flex w-48 aspect-[5/7] shrink-0 items-center justify-center rounded-lg bg-slate-50 dark:bg-neutral-700/50 ring-1 ring-slate-200 dark:ring-neutral-600">
               <ImageIcon size={28} className="text-slate-300 dark:text-neutral-500" />
             </div>
           )}
@@ -537,7 +536,7 @@ export function ListingDetailPage() {
       </div>
 
       {/* Price history */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl p-4">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-4 flex flex-col">
         <div className="flex items-center justify-between mb-1">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">Price History</h2>
           {priceHistory.length > 0 && (
@@ -557,10 +556,16 @@ export function ListingDetailPage() {
           )}
         </div>
         {matchedNote && <p className="text-xs text-slate-400 mb-2">{matchedNote}</p>}
+        {/* Fills the column rather than sitting at a fixed height. This card is grid-
+            stretched alongside the header, so when the card image grew the header got
+            taller, the chart stayed at 220px and left dead space beneath it. min-h keeps
+            the original size on the single-column layout, where there is nothing to
+            stretch against. */}
+        <div className="flex-1 min-h-[220px]">
         {cardLoading ? (
           <ChartSkeleton height={220} />
         ) : priceHistory.length > 0 ? (
-          <ResponsiveContainer width="100%" height={220}>
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart data={priceHistory}>
               <CartesianGrid vertical={false} stroke="#f1f5f9" />
               <XAxis dataKey="date" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
@@ -596,6 +601,7 @@ export function ListingDetailPage() {
         ) : (
           <EmptyChart label="No price history." />
         )}
+        </div>
       </div>
       </div>
 

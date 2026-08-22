@@ -19,7 +19,7 @@ import type {
 interface BulkPriceResult {
   applied: number
   failed: number
-  results: { item_id: string; status: string; error?: string; offer_threshold?: number }[]
+  results: { item_id: string; status: string; error?: string }[]
 }
 
 // Must stay <= MAX_BULK_ITEMS in dashboard/backend/routers/active.py - selections
@@ -231,11 +231,11 @@ export function ActiveListingsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="bg-white dark:bg-neutral-800 rounded-xl p-5 max-w-2xl w-full max-h-[80vh] flex flex-col">
             <h2 className="text-lg font-bold text-slate-900 dark:text-neutral-100 mb-1">
-              Review price &amp; offer changes
+              Review price changes
             </h2>
             <p className="text-xs text-slate-500 dark:text-neutral-400 mb-4">
-              These will be applied to your live eBay listings. Best Offer auto-accept and
-              minimum (auto-decline) thresholds are both set to 90% of the new price.
+              These will be applied to your live eBay listings. Price only — Best Offer
+              auto-accept and minimum offer settings are left as they are.
             </p>
             <div className="overflow-y-auto flex-1 -mx-1 px-1">
               <table className="w-full text-sm">
@@ -243,7 +243,7 @@ export function ActiveListingsPage() {
                   <tr className="text-xs text-slate-400 dark:text-neutral-500">
                     <th className="text-left font-medium pb-1 pr-3">Title</th>
                     <th className="text-right font-medium pb-1 px-2" colSpan={3}>Price</th>
-                    <th className="text-right font-medium pb-1 pl-3">Offer threshold</th>
+                    <th className="text-right font-medium pb-1 pl-3">Avg listed</th>
                     <th className="pb-1" />
                     <th className="pb-1" />
                   </tr>
@@ -259,8 +259,13 @@ export function ActiveListingsPage() {
                     const id = r['Item ID'] as string
                     const from = Number(r.Price)
                     const to = Number(r['Suggested Price'])
-                    const offerThreshold = Math.round(to * 0.9 * 100) / 100
                     const result = bulkMutation.data?.results.find((x) => x.item_id === id)
+                    // Same source as the Active Avg column on the list behind this
+                    // modal: the mean of today's competitor listings for this card.
+                    // Here it's the sanity check on the new price - is it landing
+                    // near the market or well off it?
+                    const avgListed = getPricingForListing(r.Card as string | null)?.active_avg ?? null
+                    const vsAvgPct = avgListed ? Math.round(((to - avgListed) / avgListed) * 100) : null
                     return (
                       <tr key={id}>
                         <td className="py-2 pr-3 max-w-sm truncate text-slate-700 dark:text-neutral-200">{r.Title as string}</td>
@@ -269,16 +274,19 @@ export function ActiveListingsPage() {
                         <td className={`py-2 pl-1 text-right tabular-nums font-medium ${to < from ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
                           {formatCurrency(to)}
                         </td>
-                        <td className="py-2 pl-3 text-right tabular-nums text-slate-500 dark:text-neutral-400" title="Offers at/above this are auto-accepted; below it, auto-declined">
-                          {formatCurrency(offerThreshold)}
+                        <td
+                          className="py-2 pl-3 text-right tabular-nums text-slate-500 dark:text-neutral-400"
+                          title={
+                            avgListed
+                              ? `Average asking price across current competitor listings for this card.`
+                                + ` New price is ${vsAvgPct === 0 ? 'level with' : `${Math.abs(vsAvgPct as number)}% ${(vsAvgPct as number) > 0 ? 'above' : 'below'}`} it.`
+                              : 'No competitor listings found for this card'
+                          }
+                        >
+                          {avgListed ? formatCurrency(avgListed) : <span className="text-slate-400 text-xs">—</span>}
                         </td>
                         <td className="py-2 pl-3 text-xs max-w-[220px]">
                           {result?.status === 'ok' && <span className="text-emerald-600 dark:text-emerald-400">applied</span>}
-                          {result?.status === 'partial' && (
-                            <span className="text-amber-600 dark:text-amber-400" title={result.error}>
-                              price applied, offer skipped
-                            </span>
-                          )}
                           {result?.status === 'error' && (
                             <span className="text-rose-600 dark:text-rose-400" title={result.error}>
                               failed{result.error ? `: ${result.error}` : ''}
@@ -457,7 +465,11 @@ export function ActiveListingsPage() {
               { key: 'Price', header: 'Price', render: (r) => formatCurrency(r.Price as string), sortKey: 'Price' },
               {
                 key: 'total',
-                header: 'Total',
+                // normal-case on the label itself, not the cell: DataTable uppercases
+                // every th, and text-transform on a child wins over the inherited value
+                // regardless of how Tailwind happens to order the two utilities.
+                header: <span className="normal-case">Total</span>,
+                sortKey: 'Total',
                 render: (r) => {
                   const price = toNumber(r.Price)
                   if (price === null) return <span className="text-slate-400 text-xs">—</span>
@@ -467,7 +479,8 @@ export function ActiveListingsPage() {
               },
               {
                 key: 'active_avg',
-                header: 'Active Avg',
+                header: <span className="normal-case">Active Avg</span>,
+                sortKey: 'Active Avg',
                 render: (r) => {
                   const pricing = getPricingForListing(r.Card as string | null)
                   return pricing?.active_avg ? formatCurrency(pricing.active_avg) : <span className="text-slate-400 text-xs">—</span>

@@ -1,11 +1,43 @@
 import json
-import os
-import sys
 from datetime import datetime, timedelta, timezone
 
 import requests
 
 FINANCE_URL = "https://apiz.ebay.com/sell/finances/v1/transaction"
+
+
+class FinancesApiError(Exception):
+    """Finances API returned a non-200.
+
+    Raised rather than exiting. This module is imported by the dashboard's per-user
+    sync (dashboard/backend/services/ebay_data.py), and sys.exit raises SystemExit,
+    which inherits from BaseException - so it slipped straight past that caller's
+    `except Exception` handler, killing the sync WITHOUT ever writing the "error:"
+    status row that tells the user why their data stopped updating.
+
+    Mirrors marketing_api.MarketingApiError, which exists for the same reason.
+    """
+
+
+# --- Postage assumed when reconstructing net without a Finances gross figure -------
+# Only used by merge_fees_into_rows' fallback path, where eBay gave us the fees for an
+# order but no totalFeeBasisAmount to subtract them from. We then have to rebuild net
+# from the Trading API's Order Total, which means guessing what the LABEL cost us -
+# a number eBay never reports here.
+#
+# Free shipping means the buyer paid nothing and we absorbed the label. In the middle
+# band we assume a light-parcel label. Above it, we assume the postage we charged is
+# roughly what it cost us, and subtract the buyer-paid amount itself.
+#
+# NOTE: these do not match the eBay Standard Envelope rates used elsewhere
+# (listing_economics.SHIPPING_PRICE_MAP = 0.78, suggested_price.ESE_SHIPPING_RATES =
+# 0.78/1.36 and ASSUMED_SHIP_COST = 0.78) - each is exactly $0.04 lower. The reason for
+# that offset is not recorded anywhere and has not been verified against a real label
+# invoice; treat these as unaudited estimates. They only ever affect orders the
+# Finances API gave no gross for, so the primary path below is unaffected.
+FREE_SHIP_LABEL_COST = 0.74
+LIGHT_PARCEL_LABEL_COST = 1.32
+LIGHT_PARCEL_SHIPPING_MAX = 5.00
 
 
 def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, debug: bool = False):
@@ -42,8 +74,9 @@ def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, 
     while url:
         resp = requests.get(url, headers=headers, params=params if page == 1 else None, timeout=30)
         if resp.status_code != 200:
-            print(f"Finances API error ({resp.status_code}): {resp.text[:500]}")
-            sys.exit(1)
+            raise FinancesApiError(
+                f"Finances API error ({resp.status_code}): {resp.text[:500]}"
+            )
 
         data = resp.json()
 
@@ -218,9 +251,9 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
                     expenses = total_fees + (debit or 0.0)
                     earnings = order_total - expenses
                     if shipping == 0.0:
-                        earnings -= 0.74
-                    elif 0.74 < shipping < 5.00:
-                        earnings -= 1.32
+                        earnings -= FREE_SHIP_LABEL_COST
+                    elif FREE_SHIP_LABEL_COST < shipping < LIGHT_PARCEL_SHIPPING_MAX:
+                        earnings -= LIGHT_PARCEL_LABEL_COST
                     else:
                         earnings -= shipping
                     row["Order Earnings"] = round(earnings, 2)

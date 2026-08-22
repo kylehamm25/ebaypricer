@@ -19,6 +19,10 @@ interface DataTableProps<T> {
   onToggleExpand?: (key: string) => void
   renderExpanded?: (item: T) => ReactNode
   onRowClick?: (item: T) => void
+  /** Omit the separator above this row, merging it into the row above - used to
+   *  show consecutive rows as one block. Never applies to the first row, which
+   *  has no separator anyway. */
+  hideRowDivider?: (item: T, index: number) => boolean
   hideHeader?: boolean
   sortBy?: string
   sortDir?: 'asc' | 'desc'
@@ -33,6 +37,7 @@ export function DataTable<T extends Record<string, unknown>>({
   onToggleExpand,
   renderExpanded,
   onRowClick,
+  hideRowDivider,
   hideHeader = false,
   sortBy,
   sortDir = 'desc',
@@ -87,17 +92,22 @@ export function DataTable<T extends Record<string, unknown>>({
             </tr>
           </thead>
         )}
-        <tbody className="divide-y divide-slate-100 dark:divide-neutral-700">
+        {/* The row separator is a per-row border rather than `divide-y` on the
+            tbody: divide-y's selector outranks a single utility class, so a row
+            could not opt out of it. Here an omitted row simply never gets the
+            class, which is what hideRowDivider needs. */}
+        <tbody>
           {data.map((item, i) => {
             const key = item[keyField || 'id'] as string || i.toString()
             const isExpanded = expandedRows.has(key)
+            const divider = i > 0 && !hideRowDivider?.(item, i)
             return (
               // Keyed on the row's own id, not the index: without a key on the
               // fragment React can't match rows across renders, so re-sorting
               // rebuilt every row's DOM instead of reordering it.
               <Fragment key={key}>
                 <tr
-                  className={`hover:bg-slate-50 dark:hover:bg-neutral-700/50 transition-colors ${isExpanded ? 'bg-blue-50 dark:bg-neutral-700/40' : ''} ${onRowClick ? 'cursor-pointer' : ''}`}
+                  className={`hover:bg-slate-50 dark:hover:bg-neutral-700/50 transition-colors ${divider ? 'border-t border-slate-100 dark:border-neutral-700' : ''} ${isExpanded ? 'bg-blue-50 dark:bg-neutral-700/40' : ''} ${onRowClick ? 'cursor-pointer' : ''}`}
                   onClick={() => (onRowClick ? onRowClick(item) : onToggleExpand?.(key))}
                 >
                   {columns.map((col) => (

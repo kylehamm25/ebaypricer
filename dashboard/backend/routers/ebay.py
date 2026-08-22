@@ -1,4 +1,5 @@
 import threading
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,8 +18,42 @@ from dashboard.backend.services.ebay_oauth import (
     get_connection_status,
 )
 from dashboard.backend.services.promotion_boost import run_user_promotion_boost
+from ebaypricer.developer_api import fetch_rate_limits
 
 router = APIRouter(prefix="/api/v1/ebay", tags=["ebay"])
+
+# Reading the quota is itself a metered eBay call, so a widget polling it must not hit
+# eBay every time. Five minutes is well inside the daily window these limits reset on,
+# and the numbers only move when a job or a valuation lookup runs.
+_RATE_LIMIT_TTL_S = 300
+_rate_limit_cache: dict = {"at": 0.0, "data": []}
+_rate_limit_lock = threading.Lock()
+
+
+@router.get("/rate-limits")
+def get_rate_limits(user_id: uuid.UUID = Depends(get_current_user_id)):
+    """Today's eBay API quota for the APIs this app uses.
+
+    Read from eBay rather than hardcoded: the limits vary by API and by account
+    standing, so a number baked into this repo would be a guess. Returns an empty list
+    if eBay is unreachable - the caller renders nothing rather than an error.
+    """
+    now = time.monotonic()
+    with _rate_limit_lock:
+        cached = _rate_limit_cache
+        if cached["data"] and now - cached["at"] < _RATE_LIMIT_TTL_S:
+            return {"limits": cached["data"], "cached": True}
+
+    data = fetch_rate_limits()
+    with _rate_limit_lock:
+        # Only overwrite on success: a transient failure should keep showing the last
+        # good reading rather than blanking the bar.
+        if data:
+            _rate_limit_cache["at"] = now
+            _rate_limit_cache["data"] = data
+        else:
+            data = _rate_limit_cache["data"]
+    return {"limits": data, "cached": False}
 
 
 @router.get("/connect-url")

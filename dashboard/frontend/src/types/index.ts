@@ -22,7 +22,10 @@ export interface SoldSummary {
   total_revenue: number
   total_shipping: number
   total_fees: number
+  /** Real per-order net from the Finances API (gross - fees - debits), not revenue minus fees. */
   total_earnings: number
+  /** Orders whose fee data hasn't posted yet, so they contribute 0 to total_earnings. */
+  orders_missing_net: number
   avg_price: number
 }
 
@@ -157,7 +160,7 @@ export interface PositionHistoryPoint {
  *  dashboard/backend/services/suggested_price.py; read-only for display. */
 export interface SuggestedPriceBasis {
   v: number
-  status: 'ok' | 'cooldown' | 'thin_comps' | 'no_comps' | 'excluded'
+  status: 'ok' | 'cooldown' | 'thin_comps' | 'no_comps' | 'excluded' | 'comp_mismatch'
   matched_keyword?: string
   /** status 'cooldown': this listing was repriced recently and is not re-suggested
    *  until cooldown_days have passed. See REPRICE_COOLDOWN_DAYS in suggested_price.py. */
@@ -165,6 +168,12 @@ export interface SuggestedPriceBasis {
   cooldown_days?: number
   anchor_avg?: number
   anchor_floor?: number
+  /** status 'comp_mismatch': anchor_avg / current_price, when that ratio exceeded
+   *  MAX_ANCHOR_RATIO in either direction and the comp pool was judged to be a
+   *  different product. */
+  anchor_ratio?: number
+  max_anchor_ratio?: number
+  current_price?: number
   comps?: number
   days_listed?: number | null
   rank?: number | null
@@ -179,6 +188,11 @@ export interface SuggestedPriceBasis {
   shipping_charge?: number | null
   comp_avg_shipping?: number | null
   shipping_adjustment?: number
+  /** Buyer-paid shipping matches an eBay Standard Envelope rate, so the suggestion
+   *  is not allowed to raise the price past ese_max_price (ESE only carries items
+   *  declared at $20 or under). Shows up in `clamps` as 'ese_max_price' when it bound. */
+  ese_shipping?: boolean
+  ese_max_price?: number
   watchers?: number | null
   watcher_pull?: number
   /** The model's true target before guardrails clamped it. */
@@ -212,7 +226,10 @@ export interface ActiveListing extends Record<string, unknown> {
   'Suggested Price': number | string | null
   'Suggested Price At': string | null
   'Suggested Price Basis': SuggestedPriceBasis | null
+  /** Pokemon species pixel sprite, matched off the listing title. */
   sprite_url?: string
+  /** Actual card art, resolved from the card_query. Null when the listing never matched a catalog card. */
+  card_image_url?: string | null
 }
 
 export interface PipelineStatus {
@@ -239,6 +256,9 @@ export interface EbayStatus {
  *  as "broke even". */
 export interface Lot extends Record<string, unknown> {
   sku: string
+  /** Human-readable name for the lot ("Estate collection, 2500 bulk"). Undefined
+   *  rather than null when migration 0009 hasn't been run. */
+  title?: string | null
   cost: number | null
   purchased_at: string | null
   source: string | null
@@ -275,4 +295,97 @@ export interface LotsResponse {
   totals: LotTotals
   /** False until db/migrations/0008_lots.sql has been run; costs can't be saved. */
   cost_tracking_enabled: boolean
+}
+
+/** A sold line on the lot detail page. `line_net` is this line's allocated share
+ *  of its order's net (see routers/lots.py), not the order-level figure - null
+ *  while the Finances API hasn't reported the order's fees yet. */
+export interface LotSoldRow extends Record<string, unknown> {
+  order_id: string
+  item_id: string
+  item_title: string | null
+  card: string | null
+  sale_date: string | null
+  quantity: number
+  item_price: number | null
+  line_gross: number | null
+  line_net: number | null
+  sprite_url?: string
+}
+
+/** A live listing on the lot detail page - the same rows counted in the lot's
+ *  active_items / listed_value. */
+export interface LotActiveRow extends Record<string, unknown> {
+  item_id: string
+  title: string | null
+  card: string | null
+  condition: string | null
+  price: number | null
+  shipping_charge: number | null
+  quantity: number
+  days_listed: number | null
+  watchers: number | null
+  start_date: string | null
+  estimated_net: number | null
+  suggested_price: number | null
+  sprite_url?: string
+}
+
+export interface LotDetailResponse {
+  lot: Lot
+  sold: LotSoldRow[]
+  active: LotActiveRow[]
+  cost_tracking_enabled: boolean
+}
+
+export interface CardHit {
+  card_query: string
+  name: string
+  set_name: string
+  number: string
+  rarity: string
+  set_series: string
+  /** Derived from set_id + number, not stored - may 404 for the odd set, so render defensively. */
+  image_url: string | null
+}
+
+export interface CardValue {
+  card_query: string
+  active_avg: number | null
+  active_p25: number | null
+  active_min: number | null
+  active_max: number | null
+  comps: number | null
+  avg_shipping: number | null
+  /** What comp_filter dropped and why. Null means this snapshot predates comp filtering. */
+  pool_quality: { in: number; kept: number; dropped: number; reasons: Record<string, number>; soft_restored: boolean; identified: boolean } | null
+  snapshot_date: string | null
+  market_price: number | null
+  /** eBay search that produced these comps, for eyeballing the pool. Null for manual rows. */
+  search_url: string | null
+  /** Pokemon species sprite parsed from the query text. Used for custom searches, which
+   *  have no card art. Falls back to Pikachu when nothing parses. */
+  sprite_url: string | null
+  condition: string | null
+  condition_mult: number
+  condition_known: boolean
+  adjusted_value: number | null
+  estimated_fees: number | null
+  estimated_net: number | null
+  /** 'manual' = priced by hand, no comps and no condition multiplier applied. */
+  status: 'ok' | 'no_comps' | 'not_found' | 'manual'
+}
+
+export interface RateLimit {
+  name: string
+  used: number
+  limit: number
+  remaining: number
+  pct: number
+  reset: string | null
+}
+
+export interface RateLimitsResponse {
+  limits: RateLimit[]
+  cached: boolean
 }

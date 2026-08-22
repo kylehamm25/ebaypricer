@@ -38,7 +38,8 @@ import requests
 from psycopg.types.json import Json
 
 from ebaypricer.browse_api import OUTLIER_SIGMA, parse_active_item, search_active_listings
-from ebaypricer.cards import lookup_market_price
+from ebaypricer.cards import card_identity, lookup_market_price
+from ebaypricer.comp_filter import filter_comps
 
 from dashboard.backend.config import DATABASE_URL
 from dashboard.backend.database import get_db
@@ -54,7 +55,16 @@ log = logging.getLogger(__name__)
 _RESEARCH_LOCK_KEY = 727002
 _LOCAL_GUARD = threading.Lock()
 
-MAX_ACTIVE_MATCHES = 15
+# How many results to ask Browse for when building a comp pool. Comfortably more than
+# we expect to keep, because comp_filter discards ~17% of a pool on average and up to
+# 80% for reverse-holo cards (whose searches return mostly regular prints) - fetching
+# exactly the number we want to keep leaves too little after filtering. This is a
+# bigger `limit` on the SAME single call per card, not an extra call; see the
+# ebay-api-rate-limits skill on calls-per-card being the thing that matters.
+ACTIVE_FETCH_LIMIT = 30
+# Upper bound on how many surviving comps feed one snapshot's aggregates. Defensive
+# only - the pool can never exceed what we fetched.
+MAX_POOL_SIZE = ACTIVE_FETCH_LIMIT
 MAX_REPORTED_POSITION = 50
 # Wall-clock budget for one run. Each card's API calls are individually bounded
 # (requests timeout=15s, capped 429 retries in browse_api.py), but a long tail of
@@ -228,8 +238,9 @@ def _get_today_active_snapshot(conn, card_query: str, today: date) -> dict | Non
 
 def _percentile(sorted_values: list[float], pct: float) -> float:
     """Nearest-rank percentile of an already-sorted list. Used for the p25 floor
-    anchor: with ~15 comps that is the 4th-cheapest, i.e. "cheaper than 75% of the
-    market" - competitive without chasing a single (possibly junk) cheapest listing."""
+    anchor: "cheaper than 75% of the market" - competitive without chasing a single
+    (possibly junk) cheapest listing. Rank-based, so it holds its meaning now that
+    comp_filter makes the surviving pool size vary card to card."""
     if not sorted_values:
         raise ValueError("empty list")
     idx = max(0, min(len(sorted_values) - 1, int(round(pct * (len(sorted_values) - 1)))))
@@ -302,36 +313,45 @@ def _save_active_listings(conn, parsed_items: list[dict]) -> None:
                 )
 
 
+_SNAPSHOT_COLUMNS = (
+    "card_query", "snapshot_date", "sample_size", "avg_price", "min_price", "max_price", "p25_price"
+)
+# Columns introduced by later migrations, newest first. Each is dropped from the INSERT
+# if the database doesn't have it yet, so a deployment that hasn't pasted a migration
+# degrades to storing less rather than failing every card's research. Replaces what had
+# become a hand-written fallback branch per migration.
+#   avg_shipping  -> 0007
+#   pool_quality  -> 0010
+_OPTIONAL_SNAPSHOT_COLUMNS = ("pool_quality", "avg_shipping")
+
+
 def _save_active_snapshot(conn, snapshot: dict) -> None:
-    try:
-        conn.execute(
-            """INSERT INTO active_price_snapshots
-                   (card_query, snapshot_date, sample_size, avg_price, min_price, max_price,
-                    p25_price, avg_shipping)
-               VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
-                       %(max_price)s, %(p25_price)s, %(avg_shipping)s)
-               ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
-                   sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
-                   min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
-                   p25_price = EXCLUDED.p25_price, avg_shipping = EXCLUDED.avg_shipping""",
-            snapshot,
-        )
-    except psycopg.errors.UndefinedColumn:
-        # Migration 0007 hasn't been run yet - degrade to the pre-shipping insert
-        # rather than failing every card's active research until it is.
-        conn.rollback()
-        log.warning("active_price_snapshots.avg_shipping missing - has migration 0007 been run?")
-        conn.execute(
-            """INSERT INTO active_price_snapshots
-                   (card_query, snapshot_date, sample_size, avg_price, min_price, max_price, p25_price)
-               VALUES (%(card_query)s, %(snapshot_date)s, %(sample_size)s, %(avg_price)s, %(min_price)s,
-                       %(max_price)s, %(p25_price)s)
-               ON CONFLICT (card_query, snapshot_date) DO UPDATE SET
-                   sample_size = EXCLUDED.sample_size, avg_price = EXCLUDED.avg_price,
-                   min_price = EXCLUDED.min_price, max_price = EXCLUDED.max_price,
-                   p25_price = EXCLUDED.p25_price""",
-            snapshot,
-        )
+    params = dict(snapshot)
+    if "pool_quality" in params:
+        params["pool_quality"] = Json(params["pool_quality"])
+
+    optional = [c for c in _OPTIONAL_SNAPSHOT_COLUMNS if c in params]
+    while True:
+        cols = list(_SNAPSHOT_COLUMNS) + optional
+        placeholders = ", ".join(f"%({c})s" for c in cols)
+        updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "card_query" and c != "snapshot_date")
+        try:
+            conn.execute(
+                f"""INSERT INTO active_price_snapshots ({", ".join(cols)})
+                    VALUES ({placeholders})
+                    ON CONFLICT (card_query, snapshot_date) DO UPDATE SET {updates}""",
+                params,
+            )
+            return
+        except psycopg.errors.UndefinedColumn:
+            conn.rollback()
+            if not optional:
+                raise
+            missing = optional.pop(0)
+            log.warning(
+                "active_price_snapshots.%s missing - has the migration that adds it been run?",
+                missing,
+            )
 
 
 def research_card_active(card_query: str, today: date, force: bool = False) -> dict | None:
@@ -345,7 +365,7 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
             return existing
 
     try:
-        items = search_active_listings(card_query, limit=MAX_ACTIVE_MATCHES)
+        items = search_active_listings(card_query, limit=ACTIVE_FETCH_LIMIT)
     except requests.RequestException as e:
         log.error("eBay API error researching active '%s': %s", card_query, e)
         return None
@@ -373,10 +393,28 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
             len(competitor_items), card_query,
         )
 
+    # Persist the RAW pool (pre comp-filter) - active_market_listings is the record of
+    # what Browse actually returned, and keeping the rejects is what makes it possible
+    # to audit the filter later and measure a rule change against real history. Only
+    # the aggregates below are computed from the filtered pool.
     if parsed_items:
         with get_db(read_only=False) as conn:
             _save_active_listings(conn, parsed_items)
     time.sleep(0.5)
+
+    # Drop results that aren't the card we're pricing: graded slabs, multi-card lots,
+    # print-defect one-offs, foreign-market/Japanese prints, and wrong prints. Browse
+    # matches words, not identity, so an unfiltered pool for "Charmander 46 Base" ran
+    # $0.99-$1500 on a card we list at $5.24. See ebaypricer/comp_filter.py.
+    identity = card_identity(card_query)
+    parsed_items, pool_quality = filter_comps(parsed_items, identity)
+    if pool_quality["dropped"]:
+        log.info(
+            "Comp filter '%s': kept %d/%d (%s)%s",
+            card_query, pool_quality["kept"], pool_quality["in"],
+            ", ".join(f"{k}={v}" for k, v in sorted(pool_quality["reasons"].items())),
+            " [soft drops restored - pool too thin]" if pool_quality["soft_restored"] else "",
+        )
 
     prices = [p["price"] for p in parsed_items if p.get("currency") == "USD"]
     if not prices:
@@ -391,12 +429,17 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
             if filtered:
                 prices = filtered
 
-    sorted_prices = sorted(prices)
-    cheapest = sorted_prices[:MAX_ACTIVE_MATCHES]
+    # The whole surviving pool, not a cheapest-N slice. Fetching ACTIVE_FETCH_LIMIT
+    # results and then averaging only the cheapest MAX_ACTIVE_MATCHES of them would bias
+    # every anchor downward and quietly re-cut every price. Historically these were the
+    # same number, so the slice was inert and the aggregate has always meant "mean of
+    # the pool" - keep it that way and let comp_filter, not price rank, decide
+    # membership. Capped so a pathologically large pool can't skew the run.
+    pool = sorted(prices)[:MAX_POOL_SIZE]
 
-    # Mean shipping cost among today's comp pool (not restricted to `cheapest` - it's
-    # a separate descriptive stat, not required to track the same subset the price
-    # anchors do). Feeds compute_suggested_price's total-price positioning: comparing
+    # Mean shipping cost among today's comp pool (a separate descriptive stat, computed
+    # over the same filtered items). Feeds compute_suggested_price's total-price
+    # positioning: comparing
     # our item price alone against comp item prices makes a $12 free-shipping listing
     # look overpriced next to a $10-item/$5-shipping comp that's actually $3 more
     # expensive landed. None (not 0) when no comp reported a cost, so the model can
@@ -410,12 +453,13 @@ def research_card_active(card_query: str, today: date, force: bool = False) -> d
     snapshot = {
         "card_query": card_query,
         "snapshot_date": today,
-        "sample_size": len(cheapest),
-        "avg_price": round(mean(cheapest), 2),
-        "min_price": round(min(cheapest), 2),
-        "max_price": round(max(cheapest), 2),
-        "p25_price": round(_percentile(cheapest, 0.25), 2),
+        "sample_size": len(pool),
+        "avg_price": round(mean(pool), 2),
+        "min_price": round(min(pool), 2),
+        "max_price": round(max(pool), 2),
+        "p25_price": round(_percentile(pool, 0.25), 2),
         "avg_shipping": avg_shipping,
+        "pool_quality": pool_quality,
     }
     with get_db(read_only=False) as conn:
         _save_active_snapshot(conn, snapshot)

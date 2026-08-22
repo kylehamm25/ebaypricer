@@ -136,8 +136,9 @@ def get_dashboard_kpis(
             month_filter = "to_char(sale_date, 'YYYY-MM') = %s"
 
             row = db.execute(
-                f"""SELECT (SELECT COUNT(*) FROM sold_orders WHERE user_id = %s AND {month_filter}) AS items,
-                           (SELECT COALESCE(ROUND(SUM(item_price), 2), 0)
+                f"""SELECT (SELECT COALESCE(SUM(COALESCE(quantity, 1)), 0)
+                            FROM sold_orders WHERE user_id = %s AND {month_filter}) AS items,
+                           (SELECT COALESCE(ROUND(SUM(item_price * COALESCE(quantity, 1)), 2), 0)
                             FROM sold_orders WHERE user_id = %s AND {month_filter}) AS rev,
                            COALESCE(ROUND(SUM(order_ship), 2), 0) AS ship,
                            COALESCE(ROUND(SUM(order_fees), 2), 0) AS fees
@@ -158,9 +159,10 @@ def get_dashboard_kpis(
 
             top_items = [
                 dict(r) for r in db.execute(
-                    f"""SELECT item_title AS title, COUNT(*) AS count,
+                    f"""SELECT item_title AS title,
+                               SUM(COALESCE(quantity, 1)) AS count,
                                ROUND(AVG(item_price), 2) AS avg_price,
-                               ROUND(SUM(item_price), 2) AS revenue
+                               ROUND(SUM(item_price * COALESCE(quantity, 1)), 2) AS revenue
                         FROM sold_orders
                         WHERE user_id = %s AND {month_filter}
                           AND item_title IS NOT NULL AND item_title != ''

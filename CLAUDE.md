@@ -1,7 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## What this is
 
 An automated eBay selling pipeline for a Pokemon card business, plus a dashboard to view the data. Two halves that share a database but run independently:
@@ -17,8 +15,7 @@ A third piece, `ebay-defaults-extension/`, is a standalone Chrome extension (van
 
 ### Pipeline (Python, from repo root)
 ```bash
-pip install -r requirements.txt
-pip install -e .                        # installs src/ebaypricer as editable package
+pip install -e .                        # required: installs src/ebaypricer as editable package
 python scripts/main.py                  # full pipeline, sequential, logs to logs/main.log
 python scripts/main.py --dry-run        # preview promotion changes only
 python scripts/gen_access_token.py      # one-time OAuth consent flow -> writes tokens to .env
@@ -28,18 +25,10 @@ No test suite exists in this repo currently.
 
 ### Dashboard backend (FastAPI, from repo root)
 ```bash
-pip install -r requirements-dashboard.txt
 python -m uvicorn dashboard.backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### Dashboard frontend (from `dashboard/frontend/`)
-```bash
-npm install
-npm run dev       # Vite dev server on :5173
-npm run build     # tsc -b && vite build -> dist/
-npm run lint      # oxlint
-npm run preview
-```
+Frontend commands are the standard `npm run` scripts in `dashboard/frontend/package.json`.
 
 ### Full stack shortcuts
 - `start-dashboard.bat` — starts backend (:8000) and frontend dev server (:5173) in separate windows, dev mode.
@@ -60,19 +49,12 @@ Pricing research exists **twice**, and new work belongs in the second one:
 
 Both still exist because the legacy path serves the single-user Excel workflow while connected users go through `services/ebay_data.py`. When changing pricing logic, change `price_research.py`; only touch the scripts if the Excel workflow specifically needs it. Shared numeric helpers live in `src/ebaypricer/listing_economics.py` (tiered fee/net estimation, `resolve_shipping_charge`) precisely so both paths agree. `resolve_shipping_charge` prefers eBay's own `ShippingServiceCost` when the Trading API returns one, falling back to the static per-profile estimate (`shipping_charge_for_profile`) for Calculated-shipping listings that don't have package weight/dimensions set — both `get_active.py` and `ebay_data.py` call it the same way.
 
-**eBay has no sold-comps API here.** The Browse API silently ignores the `soldDate` filter and returns ordinary active listings, so anything labeled "sold" from Browse is wrong. Sold-side research uses TCGdex/TCGPlayer market price via `ebaypricer.cards.lookup_market_price` (a single-point sample, `sample_size=1`), not eBay. Real sold comps would need eBay's Marketplace Insights API, which is restricted-access and not on this app's scopes. Don't "fix" this by reintroducing a Browse sold search. Active-listing search via Browse *is* real and is used as-is.
+**eBay has no sold-comps API here.** The Browse API silently ignores the `soldDate` filter and returns ordinary active listings, so anything labeled "sold" from Browse is wrong. Sold-side research uses TCGdex/TCGPlayer market price via `ebaypricer.cards.lookup_market_price` (a single-point sample, `sample_size=1`), not eBay. Real sold comps would need eBay's Marketplace Insights API, which is restricted-access and not on this app's scopes. Don't "fix" this by reintroducing a Browse sold search. Active-listing search via Browse *is* real — but its results are **not** usable as-is: Browse matches on words, not card identity, so a pool arrives mixed with graded slabs, multi-card lots, print-error one-offs, foreign/Japanese prints and wrong prints. `src/ebaypricer/comp_filter.py` screens them out before any aggregate is computed, and records what it dropped in `active_price_snapshots.pool_quality` (migration 0010). Add a new contamination rule there, not in the aggregation code.
 
 ### Suggested price model
-`dashboard/backend/services/suggested_price.py` is the single canonical pricing model. It is **pure** — no DB, no network, no clock — and returns a `Suggestion` carrying the price, a status, and every intermediate value, persisted to `active_listings.suggested_price_basis` so the UI can explain itself. The shape is:
+`dashboard/backend/services/suggested_price.py` is the single canonical pricing model, and it is **pure** — no DB, no network, no clock; callers pass clock-derived inputs in rather than letting the module read the time. Two prohibitions that outlive any detail: **don't reintroduce pricing math in the frontend** (a client-side `computeRecommendedPrice` used to produce different numbers on the list page vs. the detail page), and don't make the module impure to get at "now".
 
-```
-anchors -> staleness/rank blend -> condition multiplier -> shipping adjustment
--> watcher pull -> guardrails -> rounding
-```
-
-Keep it pure: callers pass in clock-derived inputs (e.g. `days_since_price_change`) rather than letting the module read the time. This replaced a client-side `computeRecommendedPrice` that produced different numbers on the list page vs. the detail page — **don't reintroduce pricing math in the frontend.** The tuning constants at the top of the file carry the reasoning for their values in comments; read them before adjusting.
-
-Notable inputs beyond the comp anchors: shipping adjustment repositions the target on total landed price (item + shipping) using `comp_avg_shipping` (mean shipping cost among today's comp pool, migration 0007) vs. what we charge; watcher pull dampens the move for listings with existing demand, saturating at `WATCHER_SATURATION`; `excluded_title_keyword()` declines to suggest at all for print-defect/novelty titles (holo bleed, swirl, miscut, error) since the normal comp pool says nothing about their value. `price_change_log` (migration 0005) records only price changes eBay actually accepted, and drives the reprice cooldown (`REPRICE_COOLDOWN_DAYS` = 5, status `"cooldown"`) so a listing isn't re-proposed the same edit before the last one had time to work.
+Everything else — the anchor pipeline, each guardrail and status, which inputs feed it, and what must never be reintroduced — lives in the **`ebay-pricing-rules` skill**, which loads on demand, plus the tuning-constant comments at the top of `suggested_price.py`. Read the skill before changing pricing logic, explaining a suggested price, or adding a pricing input. It is deliberately the only prose copy of the model, so nothing here can drift out of sync with the code.
 
 ### Background jobs, locks, and status
 Every long-running backend job follows one pattern: a process-local `threading.Lock` for fast rejection, a **Postgres advisory lock** for cross-process exclusion, and start/finish rows in the `job_runs` table so `/pipeline/status` and the per-page refresh buttons can report progress. Advisory-lock keys must be unique per job — currently `727001` (`pipeline_runner`), `727002` (`price_research`), `727003`/`727004` (`stage_runner` sold/active). Pick a new key for a new job.
@@ -87,16 +69,10 @@ Job entry points:
 - `services/promotion_boost.py` — per-user ad-rate boosting using each user's own token.
 
 ### Pipeline data flow (legacy)
-`scripts/main.py` runs five sub-scripts in order, stopping on failure except the last (best-effort):
-```
-append_sold_orders → get_active → price_active_listings → avg_active_price → auto_boost_promotion
-```
-- **append_sold_orders.py** — pulls orders via Trading API, enriches with Finances API fee data, dedupes by (Item ID, Sale Date), appends to the Excel "Sold Orders" sheet. Multi-item orders: order-level totals only appear on the first row.
-- **get_active.py** — refreshes the Excel "Active Listings" sheet from the Trading API; estimates fees via `listing_economics`, pulls ad rates from the Marketing API, and preserves existing analytics columns across runs.
-- **price_active_listings.py** / **avg_active_price.py** — superseded by `price_research.py`; see above.
-- **auto_boost_promotion.py** — raises promoted-listing ad rates for stale inventory (every 10 unsold days, +1%, capped); refuses to run on non-Cost-Per-Sale campaigns.
+`scripts/main.py` chains five sub-scripts over the Excel workbook. The per-script
+detail lives in `scripts/CLAUDE.md`, which loads when you work in that directory.
 
-Shared library in `src/ebaypricer/`: `auth.py` (OAuth token refresh, persisted to `.env`), `trading_api.py`, `browse_api.py`, `marketing_api.py`, `finances.py`, `cards.py` (Pokemon card DB, fuzzy matching, TCGdex market price; caches in `data/`), `listing_economics.py`, `excel.py` (workbook styling), `paths.py` (all file paths — `PROJECT_ROOT`, `DB_PATH`, cache files; import from here rather than hardcoding paths).
+Shared library in `src/ebaypricer/`: `auth.py` (OAuth token refresh, persisted to `.env`), `trading_api.py`, `browse_api.py`, `marketing_api.py`, `finances.py`, `cards.py` (Pokemon card DB, fuzzy matching, TCGdex market price, `card_identity()`; caches in `data/`), `comp_filter.py` (pure comp-pool screening — see above), `listing_economics.py`, `excel.py` (workbook styling), `paths.py` (all file paths — `PROJECT_ROOT`, `DB_PATH`, cache files; import from here rather than hardcoding paths).
 
 Local SQLite lives at `db/pokemon_prices.db`. Some tables are shared marketplace data (`price_snapshots`, `active_snapshots`, `sold_listings`), rebuilt/appended incrementally; others mirror the workbook and get dropped/recreated each sync — see `docs/SOFTWARE_PLAN.md` §3 for the full schema and which tables are "shared" vs "user-owned" in the Supabase target.
 
@@ -106,20 +82,17 @@ FastAPI app in `dashboard/backend/main.py`. On startup: reconciles orphaned `job
 - `database.py` — psycopg3 connection pool (`get_db()`), defaults to read-only transactions. The pool is small (5); never take a second connection while holding one (pass data down instead — see `update_active_listing_derived_columns`).
 - `config.py` — all env vars, read through `_env()` which strips surrounding quotes (needed because Docker `--env-file` keeps them). Env vars are organized by migration phase — check `.env.example` for the phase each one belongs to before adding new config.
 - `auth.py` — Supabase JWT verification (`get_current_user_id`), tries ES256-via-JWKS first, falls back to legacy HS256-via-shared-secret. When `AUTH_REQUIRED` is unset, falls back to `DEFAULT_USER_ID` for local single-user dev.
-- `routers/` — one file per resource (`dashboard`, `sold`, `active`, `lots`, `pricing`, `pipeline`, `promotion`, `ebay`). `active.py` is the largest: listing list/detail, per-listing and bulk price apply (which write `price_change_log` and, via `trading_api.revise_price_with_best_offer`, also move the listing's Best Offer auto-accept/auto-decline thresholds), per-card refresh, price-change history (`GET /active/price-changes`), and the analytics aggregations. `pricing.py` and `promotion.py` are still mounted but no frontend page currently calls them.
-- Best Offer thresholds can't move in the same Trading API call as price — eBay validates each side against what's currently live, so `revise_price_with_best_offer` sequences two `ReviseFixedPriceItem` calls, moving whichever side gains slack first (thresholds down before a price cut, price up before a threshold raise). Getting the order wrong is rejected outright, not silently ignored.
-- `routers/lots.py` — buying lots, grouped by the SKU already stamped on listings and orders (`L0030`, `L0041`, …). `PULL`, `NONTCG` and rows with no SKU aren't purchased lots and are excluded (`EXCLUDED_SKUS`) — but the filter is applied *after* the per-line allocation below, never before, or a mixed order's whole net lands on the one real lot in it. Only the purchase cost is stored (`lots`, migration 0008); units sold, net proceeds, live items and listed value are aggregated on read. **eBay puts order-level money on only one row of a multi-item order**, so `SUM(order_earnings)` grouped by SKU credits a whole mixed order to one lot and gives the others zero — the query instead splits each order's net across its lines by their share of order item value, which conserves exactly. Any new per-SKU or per-card money aggregate has the same trap.
+- `routers/` — one file per resource (`dashboard`, `sold`, `active`, `lots`, `pricing`, `pipeline`, `promotion`, `ebay`). `active.py` is the largest: listing list/detail, per-listing and bulk price apply (which write `price_change_log` and call `trading_api.revise_item_price`), per-card refresh, price-change history (`GET /active/price-changes`), and the analytics aggregations. `pricing.py` and `promotion.py` are still mounted but no frontend page currently calls them.
+- **Applying a price changes the price and nothing else.** Best Offer auto-accept and minimum-offer thresholds are the seller's to set on the listing; repricing must not read, write, or derive them. `revise_best_offer_thresholds` and `revise_price_with_best_offer` were deleted from `trading_api.py` for this reason, along with `OFFER_THRESHOLD_PCT` in `active.py` (which pinned both to 90% of the new price) and the bulk result's `"partial"` status (price landed, thresholds didn't — no longer a reachable state). Don't reintroduce any of it. If a deliberate, separate offer-threshold action is ever wanted, note that eBay validates each side against what's currently live, so price and thresholds can never move in one `ReviseFixedPriceItem` call — the ordering rules are written up in `.claude/skills/ebay-listing-dry-run/SKILL.md`.
+- `routers/lots.py` — buying lots, grouped by the SKU already stamped on listings and orders (`L0030`, `L0041`, …). `PULL`, `NONTCG` and rows with no SKU aren't purchased lots and are excluded (`EXCLUDED_SKUS`) — but the filter is applied *after* the per-line allocation below, never before, or a mixed order's whole net lands on the one real lot in it. Only the user-entered fields are stored (`lots`, migration 0008: title, cost, purchase date, source, notes — `title` came later in 0009, so both the read and the write degrade if that hasn't been run: costs still save and only a supplied title is refused). Units sold, net proceeds, live items and listed value are aggregated on read. **eBay puts order-level money on only one row of a multi-item order**, so `SUM(order_earnings)` grouped by SKU credits a whole mixed order to one lot and gives the others zero — the query instead splits each order's net across its lines by their share of order item value, which conserves exactly. Any new per-SKU or per-card money aggregate has the same trap. `GET /lots/{sku}` drills into one lot's sold and active listings and shares that allocation through `_SOLD_LINES_CTE`, so a sold line shows its allocated share of its order's net and the rows still sum to the figure the list page shows.
 - `services/ebay_client.py`, `ebay_oauth.py` — per-user eBay OAuth (PKCE). Refresh tokens are Fernet-encrypted at rest (`EBAY_TOKEN_ENCRYPTION_KEY`).
 - SQL is Postgres-flavored (the migration off SQLite is done at the DB layer); don't reintroduce SQLite-specific syntax (`?` params, `CAST(x AS REAL)`, `strftime`) in new queries — see the mapping rules in `docs/SOFTWARE_PLAN.md` §6.3 if porting old SQL.
 
 ### Dashboard frontend
-React 19 + TypeScript + Vite, Tailwind v4, TanStack Query, react-router-dom v7, Recharts, Supabase JS client for auth.
-- `lib/api.ts` — API client, base URL from `VITE_API_BASE` (defaults to local backend).
-- `lib/auth.tsx` / `auth-context.ts` — Supabase session provider; `App.tsx` gates all routes except `/login` behind a `Protected` wrapper.
-- `lib/theme.tsx` — light/dark theme context; components must handle both.
-- `pages/` — one file per route: Dashboard, SoldOrders, ActiveListings, ListingDetail, Lots (`/lots`, per-SKU cost/profit with an inline cost editor), PriceLog (`/log`, reads `GET /active/price-changes`), Settings, Login. (Standalone Pricing and Promotions pages were removed; that data now lives on the Active Listings and Dashboard pages.)
-- `components/shared/` — `DataTable`, `KpiCard`, `Skeleton`, `StageRefreshButton` (the page-level refresh control wired to `stage_runner`).
-- Linting is oxlint (`.oxlintrc.json`), not ESLint.
+React 19 + TypeScript + Vite, served by FastAPI in prod. Route map, shared
+components, the light/dark requirement, oxlint, and the "never compute a price in
+the frontend" rule are in `dashboard/frontend/CLAUDE.md`, which loads when you work
+in that directory.
 
 ## Working across the pipeline/dashboard boundary
 

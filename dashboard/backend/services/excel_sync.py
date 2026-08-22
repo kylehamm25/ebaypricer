@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 from datetime import date, datetime, timezone
@@ -7,6 +8,8 @@ from openpyxl import load_workbook
 
 from dashboard.backend.config import DEFAULT_USER_ID, EXCEL_PATH
 from dashboard.backend.database import get_db
+
+log = logging.getLogger(__name__)
 
 _SOLD_COLUMNS = {
     "Order ID": "order_id",
@@ -115,10 +118,17 @@ def _coerce(col: str, v):
     return _to_text(v)
 
 
-def _upsert_rows(conn, table: str, columns: dict[str, str], key_cols: list[str], rows: list[dict]) -> int:
+def _upsert_rows(conn, table: str, columns: dict[str, str], key_cols: list[str],
+                 rows: list[dict], skip_cols: set[str] | None = None) -> int:
+    """skip_cols: columns mapped here but absent from the sheet this run. They are left
+    out of the statement entirely rather than written as NULL - writing NULL would let a
+    column that merely went missing from the workbook ERASE good values already in
+    Postgres (this is what happened to ad_rate). Omitted columns keep whatever the row
+    already has; genuinely new rows just get the database default."""
     if not rows:
         return 0
-    all_cols = key_cols + [c for c in columns.values() if c not in key_cols]
+    skip = skip_cols or set()
+    all_cols = key_cols + [c for c in columns.values() if c not in key_cols and c not in skip]
     col_sql = ", ".join(all_cols)
     placeholders = ", ".join("%s" for _ in all_cols)
     updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in all_cols if c not in key_cols)
@@ -126,8 +136,16 @@ def _upsert_rows(conn, table: str, columns: dict[str, str], key_cols: list[str],
         f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) "
         f"ON CONFLICT ({', '.join(key_cols)}) DO UPDATE SET {updates}"
     )
+    # item.get(c), NOT item[c]. A row only carries keys for headers that were actually
+    # present in the sheet, and the sheet's schema is not guaranteed: get_active.py only
+    # writes "Ad Rate" for promoted listings, so the column disappears entirely whenever
+    # no listing is promoted or the Marketing API call fails. Indexing raised
+    # KeyError: 'ad_rate' from inside the shared transaction, which rolled back BOTH
+    # sheets - so one optional column going missing silently froze every sold order and
+    # active listing in Postgres while the workbook itself kept updating fine.
+    # Same "degrade rather than crash" rule the migrations follow.
     with conn.cursor() as cur:
-        cur.executemany(insert_sql, [tuple(item[c] for c in all_cols) for item in rows])
+        cur.executemany(insert_sql, [tuple(item.get(c) for c in all_cols) for item in rows])
     return len(rows)
 
 
@@ -153,6 +171,18 @@ def sync_excel(force: bool = False) -> dict:
             headers = [cell.value for cell in next(ws.iter_rows(min_row=1, max_row=1))]
             headers = [h.strip() if isinstance(h, str) else h for h in headers]
 
+            # Columns we map but the sheet doesn't have. These now sync as NULL rather
+            # than aborting (see _upsert_rows), so say so out loud - otherwise a column
+            # quietly vanishing from the workbook looks like data that simply stopped
+            # updating, with nothing anywhere explaining why.
+            missing = [h for h in col_map if h not in headers]
+            skip_cols = {col_map[h] for h in missing}
+            if missing:
+                log.warning(
+                    "%s: sheet is missing mapped column(s) %s - leaving existing values "
+                    "in place for them", sheet_name, ", ".join(missing),
+                )
+
             rows = []
             for row in ws.iter_rows(min_row=2, values_only=True):
                 if all(v is None for v in row):
@@ -169,7 +199,7 @@ def sync_excel(force: bool = False) -> dict:
             if not rows:
                 result[sheet_name] = "0 rows synced"
                 continue
-            count = _upsert_rows(conn, table, col_map, key_cols, rows)
+            count = _upsert_rows(conn, table, col_map, key_cols, rows, skip_cols)
             result[sheet_name] = f"{count} rows synced"
 
             if table == "active_listings":

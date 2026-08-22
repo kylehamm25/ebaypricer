@@ -10,8 +10,12 @@ The model in one sentence: price a fresh listing near what competitors are askin
 and the longer it sits unsold, the closer to the competitive floor it gets - adjusted
 for card condition, then clamped by guardrails.
 
-    anchors -> staleness/rank blend -> condition multiplier -> shipping adjustment
-    -> watcher pull -> guardrails -> rounding
+    anchors -> comp-pool sanity gate -> staleness/rank blend -> condition multiplier
+    -> shipping adjustment -> watcher pull -> guardrails -> rounding
+
+Declining is a real output: a comp pool more than MAX_ANCHOR_RATIO away from our own
+price is treated as a different product and yields no suggestion at all, rather than a
+price anchored on something unrelated.
 
 Everything here is pure: no DB, no network, no clock. `compute_suggested_price` takes
 plain values and returns a `Suggestion` carrying the price plus every intermediate,
@@ -29,6 +33,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ebaypricer.comp_filter import EXCLUDED_TITLE_KEYWORDS
 from ebaypricer.listing_economics import estimate_fees_and_net
 
 # --- Staleness ramp -------------------------------------------------------------
@@ -84,6 +89,34 @@ REPRICE_COOLDOWN_DAYS = 5
 MIN_COMPS = 3           # below this we decline to suggest at all
 LOW_CONFIDENCE_COMPS = 6  # below this we suggest, but hedge toward the margin end
 
+# --- Comp-pool sanity -----------------------------------------------------------
+# A comp pool that disagrees with our own price by more than this factor, in either
+# direction, is almost certainly not describing the same product - Browse matched on
+# the card name and picked up something else. Real examples this catches:
+#
+#   Charizard EX Promo Black Star XY17 *HP*  ours $12.99, comp avg $609.90  (47x)
+#   "Numel Peelable Ditto" novelty           ours $19.99, comp avg $1.63  (0.08x)
+#   Professor Kukui Regional Championship    ours  $6.99, comp avg $1.53  (0.22x)
+#   Charmander Crystal Guardians HP          ours  $5.49, comp avg $22.74  (4.1x)
+#
+# In each case the pool is ordinary copies of a card whose value is set by something
+# the pool can't see (damage, a novelty print, a championship stamp), so the anchor
+# is meaningless and a suggestion derived from it is worse than none.
+#
+# 3.5 was measured against the real distribution of comp_avg/current_price across this
+# inventory (212 listings with a usable pool): 157 sit between 0.8x and 2x and the
+# tails are thin. 3.5 withholds exactly the four listings above - 2% of the 189 that
+# carry a suggestion - and the nearest legitimate keeper sits at 3.12x, so there is
+# real margin on both sides. Tightening to 2.5 starts withholding plausible
+# "we're genuinely underpriced" cases (a NM PGO Charizard at 2.53x).
+#
+# The trade-off, deliberately taken: this trusts our own price as the sanity reference,
+# so a listing we have genuinely mispriced by >3.5x gets no suggestion - exactly the
+# one the model could have fixed. Declining is the safer direction (see the module
+# docstring: a wrong suggestion is worse than none), and the ratio is recorded in the
+# basis so the UI can say why.
+MAX_ANCHOR_RATIO = 3.5
+
 # --- Watcher demand ---------------------------------------------------------------
 # Watchers are a direct demand signal this listing already has, independent of the
 # comp pool - a heavily-watched card shouldn't be repriced (up or down) as aggressively
@@ -112,6 +145,31 @@ CHANGE_CAP_MAX = 2.00
 
 ABSOLUTE_PRICE_FLOOR = 0.99
 
+# --- eBay Standard Envelope ceiling ----------------------------------------------
+# ESE only carries items declared at $20 or under, and these are the buyer-paid
+# postage rates that identify a listing as using it (0.78 is the same rate as
+# ASSUMED_SHIP_COST above and listing_economics.SHIPPING_PRICE_MAP). Pricing such a
+# listing over the limit makes it ineligible: the seller then either absorbs a much
+# larger shipping cost or has to rebuild the listing on another service. A suggestion
+# that quietly triggers that is worse than simply not raising the price.
+#
+# This bites on the ratchet rather than on any single step. The change cap moves a
+# price by at most $2 at a time, so nothing jumps from $17.99 to $22.99 in one run -
+# it creeps there over several, and without a ceiling nothing stops it.
+#
+# Applied to INCREASES only. A listing already priced above the limit keeps its price
+# (see the max() at the call site): pulling it down to $19.99 would be a real price
+# cut the model never argued for on the merits.
+ESE_SHIPPING_RATES = (0.78, 1.36)
+ESE_MAX_PRICE = 19.99
+
+
+def uses_ese_shipping(shipping_charge: float | None) -> bool:
+    """True when buyer-paid shipping matches an eBay Standard Envelope rate."""
+    if shipping_charge is None:
+        return False
+    return round(float(shipping_charge), 2) in ESE_SHIPPING_RATES
+
 # Net floor. NOTE: this repo has no cost basis - no COGS column, and shipping_charge
 # is what the *buyer* pays (0 on free-shipping listings, where we actually absorb the
 # label cost). So "never sell at a loss" is not computable; these are deliberate
@@ -124,7 +182,13 @@ ASSUMED_SHIP_COST = 0.78  # eBay Standard Envelope rate, applied when buyer pays
 # defect itself, not on the card's normal market - the comp pool (ordinary copies of
 # the same card) has nothing to say about what one of these is worth, so we decline
 # to suggest a price rather than silently pricing a defect card off normal comps.
-EXCLUDED_TITLE_KEYWORDS = ("holo bleed", "swirl", "miscut", "error")
+#
+# Defined in ebaypricer.comp_filter and imported rather than restated, because the same
+# list has to do the mirror-image job there: a defect listing is equally useless AS a
+# comp for an ordinary card. Two copies would drift, and a card excluded on one side
+# but not the other is exactly the inconsistency this model exists to remove.
+# (comp_filter additionally applies COMP_DEFECT_KEYWORDS to comps only - widening this
+# list would change which of OUR listings get declined, a separate decision.)
 
 
 def excluded_title_keyword(title: str | None) -> str | None:
@@ -149,7 +213,7 @@ SUB_PSYCH_STEP = 0.05
 class Suggestion:
     """Result of the model. `price is None` means we declined to suggest (see status)."""
     price: float | None
-    status: str  # "ok" | "cooldown" | "excluded" | "thin_comps" | "no_comps"
+    status: str  # "ok" | "cooldown" | "excluded" | "thin_comps" | "no_comps" | "comp_mismatch"
     basis: dict = field(default_factory=dict)
 
 
@@ -255,6 +319,24 @@ def compute_suggested_price(
     anchor_avg = float(anchor_avg)
     anchor_floor = float(anchor_floor)
 
+    # Comp-pool sanity gate. Runs after the sample-size gates (a 2-comp pool should
+    # report thin_comps, which is the more useful reason) and before any of the pricing
+    # math, so nothing downstream ever sees an anchor we've judged meaningless.
+    # Skipped when current_price is unknown - there is nothing to sanity-check against.
+    if current_price and current_price > 0:
+        anchor_ratio = anchor_avg / float(current_price)
+        if anchor_ratio > MAX_ANCHOR_RATIO or anchor_ratio < 1 / MAX_ANCHOR_RATIO:
+            return Suggestion(None, "comp_mismatch", {
+                **basis,
+                "status": "comp_mismatch",
+                "comps": comps,
+                "current_price": round(float(current_price), 2),
+                "anchor_avg": round(anchor_avg, 2),
+                "anchor_floor": round(anchor_floor, 2),
+                "anchor_ratio": round(anchor_ratio, 2),
+                "max_anchor_ratio": MAX_ANCHOR_RATIO,
+            })
+
     # 1. Staleness weight (primary driver)
     if days_listed is None:
         w_days = 0.0  # unknown age is treated as fresh; never punish missing data
@@ -342,6 +424,16 @@ def compute_suggested_price(
     if target < lower:
         target = psych_round(lower, direction="up")
 
+    # ESE ceiling, deliberately AFTER rounding. ESE_MAX_PRICE is itself a conventional
+    # price ending, so clamping to it can't produce an odd number, and going last means
+    # rounding cannot nudge back over the limit. `>= lower` keeps the profitable floor
+    # the harder constraint if the two ever conflict.
+    if uses_ese_shipping(shipping_charge):
+        ceiling = max(ESE_MAX_PRICE, float(current_price or 0))
+        if target > ceiling >= lower:
+            clamps.append("ese_max_price")
+            target = ceiling
+
     basis.update({
         "status": "ok",
         "anchor_avg": round(anchor_avg, 2),
@@ -362,5 +454,7 @@ def compute_suggested_price(
         "pre_guardrail": pre_guardrail,
         "clamps": clamps,
         "flags": flags,
+        "ese_shipping": uses_ese_shipping(shipping_charge),
+        "ese_max_price": ESE_MAX_PRICE,
     })
     return Suggestion(round(target, 2), "ok", basis)

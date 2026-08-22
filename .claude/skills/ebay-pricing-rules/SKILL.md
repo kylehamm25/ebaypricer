@@ -17,8 +17,26 @@ and the longer it sits unsold, the closer to the competitive floor it gets —
 adjusted for condition, then clamped.**
 
 ```
-anchors -> staleness/rank blend -> condition multiplier -> watcher pull -> guardrails -> rounding
+anchors -> comp sanity gate -> staleness/rank blend -> condition multiplier
+-> shipping adjustment -> watcher pull -> guardrails -> rounding
 ```
+
+## The inputs beyond the comp anchors
+
+- **Shipping adjustment** repositions the target on *total landed price* (item +
+  shipping): the anchors and our own price are both item-only, so a free-shipping
+  listing looks overpriced next to a cheaper item that charges for postage. Uses
+  `comp_avg_shipping`, the mean shipping cost across today's comp pool (migration
+  0007). `None` means "no comp reported one" and must not be read as "comps ship
+  free" — that would push every target up.
+- **Watcher pull** dampens the move for a listing that already has demand, pulling
+  the target back toward the current price and saturating at `WATCHER_SATURATION`
+  so one viral outlier can't freeze the price outright.
+- **`excluded_title_keyword()`** declines outright (status `excluded`) for
+  print-defect/novelty titles — those trade on the defect, and the ordinary comp
+  pool says nothing about their value. Same list `comp_filter` uses on comps.
+- **`price_change_log`** (migration 0005) records only price changes eBay actually
+  accepted, and drives the reprice cooldown.
 
 ## Invariants — do not break these
 
@@ -44,9 +62,18 @@ $2.98 instead of a real price ending. There is a round-up retry so rounding can
 never re-cross the hard floor.
 
 **Declining to suggest is a valid, meaningful output.** `price is None` with a
-`status` of `cooldown` / `excluded` / `thin_comps` / `no_comps`. Do not fill these
-with a fallback number — a wrong suggestion is worse than none, and the status is
-what the UI shows the user.
+`status` of `cooldown` / `excluded` / `thin_comps` / `no_comps` / `comp_mismatch`.
+Do not fill these with a fallback number — a wrong suggestion is worse than none,
+and the status is what the UI shows the user.
+
+**A comp pool wildly out of line with our own price is not usable.** Beyond
+`MAX_ANCHOR_RATIO` in either direction, Browse matched the card name but found a
+different product — damage, a novelty print, a promo stamp, something the pool
+cannot see — so the anchor is meaningless and the status is `comp_mismatch`. This
+deliberately trusts our own price as the reference, which means a genuinely
+mispriced listing gets no suggestion; that is the safe direction. Read the constant's
+comment before touching it: it was measured against the real ratio distribution,
+not chosen.
 
 ## The parts that surprise people
 
@@ -69,11 +96,29 @@ price feeds back as a lower "competitor" price on the next run and ratchets
 downward. If self-exclusion leaves fewer than 3 comps, the unfiltered pool is used
 instead — a band off 1–2 comps is worse than a slightly self-inflected one.
 
-**The comp pool is raw, ungraded, Buy It Now only.** `browse_api.py` pins
-`BUYING_OPTIONS = "FIXED_PRICE"` and appends `EXCLUDED_TERMS`
-(`-PSA -BGS -CGC -SGC -graded -slab`) to every query. Comps are therefore not
-comparable to graded-slab pricing, and the model must never be pointed at a graded
-listing and expected to be right.
+**The comp pool is raw, ungraded, English, single-card, Buy It Now only — and that
+takes two stages.** `browse_api.py` constrains the search itself: `BUYING_OPTIONS =
+"FIXED_PRICE"`, `CARD_CATEGORY_ID` (183454, CCG Individual Cards — verified against
+live results, not assumed), and `EXCLUDED_TERMS` negative keywords. But negative
+keywords only see the title, and eBay returns plenty that the query cannot exclude,
+so `comp_filter.py` screens the *results* before any aggregate is computed:
+
+- **hard** drops (never restored) — graded slabs (eBay's own `condition` field is the
+  reliable signal; a slab titled "TAG 9 - 936 - MINT" contains none of the negative
+  keywords), multi-card lots, print-defect one-offs, and foreign-market or
+  non-English prints.
+- **soft** drops (restored together if the pool falls below `MIN_FILTERED_COMPS`) —
+  name mismatch, card-number mismatch, reverse-holo mismatch, Shadowless/1st Edition.
+
+Comps are therefore not comparable to graded-slab pricing, and the model must never
+be pointed at a graded listing and expected to be right. Every run records what it
+dropped and why in `active_price_snapshots.pool_quality`; check that column before
+concluding a suggestion is wrong, and note `soft_restored: true`, which marks a pool
+whose anchors knowingly include comps we would rather have dropped.
+
+**Add contamination rules to `comp_filter.py`, not to the aggregation code.** It is
+pure (no DB, no network, no IO — the card's identity is resolved by
+`cards.card_identity()` and passed in), so a new rule is testable on plain dicts.
 
 **The floor anchor is p25, not min.** Cheapest-listing chasing tracks junk
 listings; the 25th percentile is "cheaper than 75% of the market". Falls back to
@@ -101,6 +146,9 @@ true break-even floor.
 
 - `ebaypricer/listing_economics.py` — tiered fee/net estimation, shared with the
   Excel pipeline so both paths agree.
-- Best Offer thresholds are pinned to `OFFER_THRESHOLD_PCT` (0.9) of the new price
-  in `routers/active.py` — auto-accept above, auto-decline below.
+- Best Offer is **out of scope for pricing**. Applying a price changes the price and
+  nothing else; auto-accept and minimum-offer thresholds belong to the seller and are
+  left untouched. `OFFER_THRESHOLD_PCT` (which pinned both to 0.9 of the new price)
+  and the two `revise_*best_offer*` helpers were removed. Never derive a threshold
+  from a suggested price.
 - Applying a price is a live marketplace write: see the `ebay-listing-dry-run` skill.

@@ -164,10 +164,18 @@ def main():
 
         row["Estimated Fees"], row["Estimated Net"] = estimate_fees_and_net(price)
 
-    rows = [{k: row[k] for k in COLUMN_ORDER if k in row} for row in rows]
+    # Every row carries every COLUMN_ORDER key, present or not, so the sheet's schema is
+    # fixed. It used to be read off rows[0] AFTER the sort below, which made the sheet's
+    # columns depend on whichever listing happened to sort first: "Ad Rate" is only set
+    # for promoted listings, so when the oldest listing wasn't promoted (or the Marketing
+    # API call failed) the column disappeared from the whole sheet. excel_sync then blew
+    # up mapping it and froze every active listing in Postgres.
+    rows = [{k: row.get(k) for k in COLUMN_ORDER} for row in rows]
 
-    rows.sort(key=lambda r: r.get("Days Listed", 0), reverse=True)
-    headers = list(rows[0].keys())
+    # `or 0` matters now that the key always exists: it can be None, and sorting None
+    # against ints raises TypeError.
+    rows.sort(key=lambda r: r.get("Days Listed") or 0, reverse=True)
+    headers = list(COLUMN_ORDER)
 
     if ws is None:
         ws = wb.create_sheet(SHEET_NAME)
@@ -178,7 +186,7 @@ def main():
     write_data_rows(ws, rows, headers)
 
     if existing_prices:
-        data_headers = list(rows[0].keys())
+        data_headers = list(COLUMN_ORDER)
         price_start_col = len(data_headers) + 1
         for col_name in PRICE_COLS_TO_SAVE:
             cell = ws.cell(row=1, column=price_start_col, value=col_name)

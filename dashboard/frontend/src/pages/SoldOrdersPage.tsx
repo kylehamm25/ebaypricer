@@ -3,6 +3,8 @@ import { useSearchParams } from 'react-router-dom'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
+import { CardArt, GridShell, ViewToggle } from '../components/shared/ViewToggle'
+import { GRID_CLASS, useViewPreference } from '../lib/view-preference'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { StageRefreshButton } from '../components/shared/StageRefreshButton'
@@ -32,6 +34,9 @@ interface SoldOrderItem extends Record<string, unknown> {
   'Total eBay Fees': string
   'Order Earnings': string
   Card?: string
+  /** Real card art, resolved server-side from Card. Null when the order line never
+   *  matched a catalog card - the sprite is the fallback. */
+  card_image_url?: string | null
   sprite_url?: string
 }
 
@@ -86,8 +91,55 @@ function OrderLevelCell(
   )
 }
 
+/** One sold line as a tile.
+ *
+ *  Shows the LINE's own money only - price and quantity. Fees and earnings are
+ *  order-level and sit on one row of a multi-item order, so a tile is the wrong
+ *  shape for them entirely: it has no neighbours to be "the first row of" and a
+ *  blank on the other tiles would read as missing data. A tile from a multi-item
+ *  order is badged instead, and the table is where the order-level figures live. */
+function SoldCard({ item, grouped }: { item: SoldOrderItem; grouped: boolean }) {
+  return (
+    <GridShell>
+      <div className="bg-slate-50 dark:bg-neutral-900/40">
+        <CardArt artUrl={item.card_image_url} className="w-full" />
+      </div>
+      <div className="flex flex-col gap-1 p-2">
+        <div
+          className="text-sm font-medium text-slate-800 dark:text-neutral-100 truncate"
+          title={item['Item Title'] as string}
+        >
+          {item['Item Title']}
+        </div>
+        <div className="text-xs text-slate-400 truncate">
+          {item['Sale Date']}
+          {grouped && (
+            <span
+              className="ml-1 text-slate-500 dark:text-neutral-400"
+              title="Part of a multi-item order — fees and earnings are reported for the whole order, see the table view"
+            >
+              · multi-item
+            </span>
+          )}
+        </div>
+        <div className="flex items-end justify-between gap-2">
+          <span className="text-sm tabular-nums text-slate-800 dark:text-neutral-100">
+            {formatCurrency(item['Item Price'] as string)}
+          </span>
+          {Number(item.Quantity) > 1 && (
+            <span className="text-xs tabular-nums text-slate-500 dark:text-neutral-400">
+              ×{Number(item.Quantity)}
+            </span>
+          )}
+        </div>
+      </div>
+    </GridShell>
+  )
+}
+
 export function SoldOrdersPage() {
   const cursor = useChartCursor()
+  const [view, chooseView] = useViewPreference('sold')
   const queryClient = useQueryClient()
 
   const [searchParams, setSearchParams] = useSearchParams()
@@ -216,6 +268,9 @@ export function SoldOrdersPage() {
         <span className="text-xs text-slate-400">
           {listData ? `${listData.total} orders` : ''}
         </span>
+        <div className="ml-auto">
+          <ViewToggle view={view} onChange={chooseView} />
+        </div>
       </div>
 
       {isLoading ? (
@@ -233,9 +288,34 @@ export function SoldOrdersPage() {
         />
       ) : listData ? (
         <>
+          {view === 'grid' ? (
+            items.length === 0 ? (
+              <div className="bg-white dark:bg-neutral-800 rounded-xl p-8 text-center text-slate-400 text-sm">
+                No data
+              </div>
+            ) : (
+              <div className={GRID_CLASS}>
+                {items.map((r) => (
+                  <SoldCard
+                    key={`${r['Order ID']}-${r['Item ID']}`}
+                    item={r}
+                    grouped={!!groups.get(r)}
+                  />
+                ))}
+              </div>
+            )
+          ) : (
           <DataTable<SoldOrderItem>
             columns={[
-              { key: 'sprite_url', header: '', render: (r) => r.sprite_url ? <img src={r.sprite_url as string} alt="" width={64} height={64} style={{ imageRendering: 'pixelated' }} /> : null, className: 'w-30' },
+              {
+                key: 'sprite_url',
+                header: '',
+                className: 'w-30',
+                // Real card art, sprite only as a fallback - see the Active page.
+                render: (r) => (
+                  <CardArt artUrl={r.card_image_url} className="w-16 rounded" />
+                ),
+              },
               { key: 'Sale Date', header: 'Date' },
               { key: 'Item Title', header: 'Title', className: 'max-w-sm truncate' },
               { key: 'Item Price', header: 'Price', render: (r) => formatCurrency(r['Item Price'] as string) },
@@ -262,6 +342,7 @@ export function SoldOrdersPage() {
               return !!g && !g.first
             }}
           />
+          )}
           <div className="flex justify-center items-center pt-2 relative">
             <div className="flex gap-2 items-center">
               <button

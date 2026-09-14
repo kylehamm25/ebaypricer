@@ -159,7 +159,7 @@ export function DashboardPage() {
           <KpiCard title="Items Sold" value={formatInt(data.sold_items)} />
           <KpiCard title="Total Revenue" value={formatCurrency(data.revenue)} />
           <KpiCard title="eBay Fees" value={formatCurrency(data.fees)} />
-          <KpiCard title="Order Earnings" value={formatCurrency(data.revenue - data.fees)} />
+          <KpiCard title="Order Earnings" value={formatCurrency(data.earnings)} />
           <KpiCard title="Active Listings" value={formatInt(data.active_listings)} />
         </div>
       </div>

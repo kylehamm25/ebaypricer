@@ -34,19 +34,19 @@ Know these on sight. Anything reaching one of them is a live write.
 - `POST /api/v1/ebay/promotion-boost`
 
 **Scripts**
-- `scripts/auto_boost_promotion.py` — raises real ad rates
-- `scripts/main.py` — runs the above as its final stage
+- `scripts/auto_boost_promotion.py` — raises real ad rates. Run only when the
+  user asks for it: it is no longer part of the pipeline, and nothing schedules
+  it. `scripts/main.py` does not write to eBay at all.
 
 ## Where a real dry run already exists
 
-`scripts/main.py` and `scripts/auto_boost_promotion.py` both accept
-`--dry-run`, which prints the intended promotion changes without applying them.
-**Always run with `--dry-run` first**, show the output, then re-run without it
-only after confirmation.
+`scripts/auto_boost_promotion.py` accepts `--dry-run`, which prints the intended
+promotion changes without applying them. **Always run with `--dry-run` first**,
+show the output, then re-run without it only after confirmation.
 
 A `PreToolUse` hook (`.claude/hooks/guard-shell-commands.ps1`) already intercepts
-these two scripts when `--dry-run` is absent and asks for approval. Treat that
-prompt as a backstop, not as the review — do the preview yourself first.
+that script when `--dry-run` is absent and asks for approval. Treat that prompt
+as a backstop, not as the review — do the preview yourself first.
 
 ## Where no dry run exists — you must construct one
 

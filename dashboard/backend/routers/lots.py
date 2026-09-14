@@ -15,6 +15,8 @@ from pydantic import BaseModel, Field
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
+from dashboard.backend.services.inventory_value import latest_snapshots, row_value
+from ebaypricer.cards import image_url_for_query
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
 
 router = APIRouter(prefix="/api/v1/lots", tags=["lots"])
@@ -131,6 +133,79 @@ ORDER BY price DESC NULLS LAST, item_id
 """
 
 
+# Cards bought under this lot that are still in the pile (table `inventory`,
+# migration 0011). Valued through services/inventory_value so a lot and the
+# Inventory page can never disagree about the same cards.
+#
+# Archived rows are excluded (migration 0014). Once a card has been listed it is
+# counted in this lot's listed_value from active_listings, and leaving it in the
+# unlisted column as well would count the same card twice in one lot's projection.
+#
+# Aggregated in Python rather than SQL because the value of a row is not a column:
+# it is a stated price, or a cached comp average scaled by the row's condition, and
+# that rule lives in one place on purpose.
+_UNLISTED_SQL = """
+SELECT id, card_query, name, condition, quantity, location, cost, manual_value,
+       COALESCE(NULLIF(TRIM(sku), ''), %(no_sku)s) AS sku
+FROM inventory
+WHERE user_id = %(uid)s AND archived_at IS NULL
+ORDER BY name, id
+"""
+
+# Degradation across two later migrations, tried widest first. Dropping the
+# archived filter is the LAST resort: on a database without 0014 no row can be
+# archived, so the filter is the thing that is meaningless there, not the data.
+_UNLISTED_SQL_VARIANTS = (
+    _UNLISTED_SQL,
+    _UNLISTED_SQL.replace(", manual_value", ""),
+    _UNLISTED_SQL.replace(" AND archived_at IS NULL", ""),
+    _UNLISTED_SQL.replace(", manual_value", "").replace(" AND archived_at IS NULL", ""),
+)
+
+
+def _unlisted_rows(db, user_id: UUID) -> list[dict]:
+    """Every unlisted row for this user, with its value resolved. Empty when
+    migration 0011 hasn't been run - a lot without an inventory table simply has no
+    unlisted stock to show, which is not an error."""
+    rows = None
+    for sql in _UNLISTED_SQL_VARIANTS:
+        try:
+            rows = [dict(r) for r in db.execute(
+                sql, {"uid": user_id, "no_sku": NO_SKU}).fetchall()]
+            break
+        except UndefinedColumn:
+            # Migration 0012 or 0014 not run. A failed statement aborts the
+            # transaction, so the retry needs a clean one.
+            db.rollback()
+        except UndefinedTable:
+            return []
+    if not rows:
+        return []
+
+    snaps = latest_snapshots(db, [r["card_query"] for r in rows if r["card_query"]])
+    for r in rows:
+        r.update(row_value(r, snaps.get(r["card_query"])))
+    return rows
+
+
+def _unlisted_by_sku(rows: list[dict]) -> dict[str, dict]:
+    """Rolled up per SKU. `value` counts only the rows that have one, and
+    `unvalued` says how many it left out - the same distinction the Inventory page
+    draws, because a pile of unpriced cards is not a pile worth nothing."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        agg = out.setdefault(r["sku"], {"entries": 0, "items": 0, "value": 0.0, "unvalued": 0})
+        agg["entries"] += 1
+        agg["items"] += int(r["quantity"] or 1)
+        if r["total_value"] is not None:
+            agg["value"] += r["total_value"]
+        else:
+            agg["unvalued"] += 1
+    for agg in out.values():
+        agg["value"] = round(agg["value"], 2)
+    return out
+
+
 def _f(value) -> float:
     """Numerics come back as Decimal; JSON wants float."""
     return float(value) if value is not None else 0.0
@@ -185,16 +260,20 @@ def list_lots(user_id: UUID = Depends(get_current_user_id)):
         except UndefinedTable:
             # Pre-migration-0001 install; nothing to aggregate yet.
             rows = []
+        unlisted = _unlisted_by_sku(_unlisted_rows(db, user_id))
         # A cost saved against a SKU that no longer has any listing or order would
-        # otherwise vanish along with the money it records, so keep it visible.
+        # otherwise vanish along with the money it records, so keep it visible. The
+        # same goes for a SKU only inventory knows about: cataloguing a lot before
+        # listing any of it is the normal order of events, and that lot has to be
+        # visible here from the moment its first card is entered.
         known = {r["sku"] for r in rows}
         orphans = [
-            sku for sku in costs
+            sku for sku in {*costs, *unlisted}
             if sku not in known and sku not in EXCLUDED_SKUS
         ]
 
-    lots = [_build_lot(dict(r), costs.get(r["sku"])) for r in rows]
-    lots += [_build_lot(_empty_agg(sku), costs[sku]) for sku in orphans]
+    lots = [_build_lot(dict(r), costs.get(r["sku"]), unlisted.get(r["sku"])) for r in rows]
+    lots += [_build_lot(_empty_agg(sku), costs.get(sku), unlisted.get(sku)) for sku in orphans]
     lots.sort(key=lambda x: x["sku"])
     return {
         "lots": lots,
@@ -234,19 +313,43 @@ def get_lot(sku: str, user_id: UUID = Depends(get_current_user_id)):
         except UndefinedTable:
             # Pre-migration-0001 install; nothing to aggregate yet.
             agg, sold, active = None, [], []
+        # Read for every SKU and filtered here, because the rollup on the list page
+        # is built the same way - so this lot's header and its rows always agree.
+        all_unlisted = _unlisted_rows(db, user_id)
+        unlisted_rows = [r for r in all_unlisted if r["sku"] == sku]
+        unlisted = _unlisted_by_sku(all_unlisted)
 
     if agg is None:
         # No listing or order carries this SKU. That is still a real lot if a cost
-        # was saved against it - otherwise the SKU simply doesn't exist.
-        if sku not in costs:
+        # was saved against it, or if unlisted stock is catalogued under it -
+        # otherwise the SKU simply doesn't exist.
+        if sku not in costs and sku not in unlisted:
             raise HTTPException(404, f"No lot {sku}")
         agg = _empty_agg(sku)
 
     return {
-        "lot": _build_lot(agg, costs.get(sku)),
+        "lot": _build_lot(agg, costs.get(sku), unlisted.get(sku)),
         "sold": [_sold_row(dict(r)) for r in sold],
         "active": [_active_row(dict(r)) for r in active],
+        "unlisted": [_unlisted_row(r) for r in unlisted_rows],
         "cost_tracking_enabled": cost_tracking_enabled,
+    }
+
+
+def _unlisted_row(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "card_query": row["card_query"],
+        "condition": row["condition"],
+        "quantity": int(row["quantity"] or 1),
+        "location": row["location"],
+        "cost": _fopt(row["cost"]),
+        "unit_value": row["unit_value"],
+        "total_value": row["total_value"],
+        "value_status": row["value_status"],
+        "card_image_url": image_url_for_query(row["card_query"]) if row.get("card_query") else None,
+        "sprite_url": get_sprite_url(row["card_query"] or row["name"] or ""),
     }
 
 
@@ -262,6 +365,9 @@ def _sold_row(row: dict) -> dict:
         "line_gross": _fopt(row["line_gross"]),
         # Null, not 0: the Finances API hasn't reported this order's fees yet.
         "line_net": _fopt(row["line_net"]),
+        # Real card art, resolved from the catalog identity the same way the
+        # listings pages do. None when the line never matched a card.
+        "card_image_url": image_url_for_query(row["card"]) if row.get("card") else None,
         "sprite_url": get_sprite_url(row["item_title"] or ""),
     }
 
@@ -280,11 +386,12 @@ def _active_row(row: dict) -> dict:
         "start_date": _iso(row["start_date"]),
         "estimated_net": _fopt(row["estimated_net"]),
         "suggested_price": _fopt(row["suggested_price"]),
+        "card_image_url": image_url_for_query(row["card"]) if row.get("card") else None,
         "sprite_url": get_sprite_url(row["title"] or ""),
     }
 
 
-def _build_lot(agg: dict, cost_row: dict | None) -> dict:
+def _build_lot(agg: dict, cost_row: dict | None, unlisted: dict | None = None) -> dict:
     cost = _f(cost_row["cost"]) if cost_row and cost_row["cost"] is not None else None
     sold_net = _f(agg["sold_net"])
     listed_value = _f(agg["listed_value"])
@@ -305,8 +412,16 @@ def _build_lot(agg: dict, cost_row: dict | None) -> dict:
         "sold_missing_net": int(agg["sold_missing_net"] or 0),
         "first_sale": _iso(agg.get("first_sale")),
         "last_sale": _iso(agg.get("last_sale")),
+        # Bought under this lot, catalogued, not listed yet. Counted separately from
+        # active_items because they are not on eBay and nobody can buy them.
+        "unlisted_items": int((unlisted or {}).get("items", 0)),
+        "unlisted_entries": int((unlisted or {}).get("entries", 0)),
+        "unlisted_value": round(float((unlisted or {}).get("value", 0.0)), 2),
+        # How many of those rows had no price to contribute. Without it the value
+        # above reads as "all the unlisted stock is worth this", which it is not.
+        "unlisted_unvalued": int((unlisted or {}).get("unvalued", 0)),
     }
-    lot["total_items"] = lot["active_items"] + lot["sold_items"]
+    lot["total_items"] = lot["active_items"] + lot["sold_items"] + lot["unlisted_items"]
 
     # Everything below needs a cost to mean anything, and a lot with no cost
     # entered yet is the normal starting state - so these stay null rather than
@@ -317,11 +432,15 @@ def _build_lot(agg: dict, cost_row: dict | None) -> dict:
         return lot
 
     # Realized = money actually banked against money spent. Projected additionally
-    # assumes every unsold item sells at its current asking price, which is
-    # optimistic (it ignores the fees those future sales will incur) - the UI
-    # labels it as such.
+    # assumes every card still in hand sells at what it is currently worth - both
+    # the listed ones at their asking price and the unlisted ones at their comp or
+    # stated value. Optimistic on two counts, which the UI labels as such: it takes
+    # no fees off either, and the unlisted half is not even on eBay yet, so its
+    # value is what the market asks for that card rather than a price anyone has
+    # agreed to pay. Rows with no price at all contribute nothing, so a lot whose
+    # unlisted stock is unpriced is understated rather than guessed at.
     lot["realized_profit"] = round(sold_net - cost, 2)
-    lot["projected_profit"] = round(sold_net + listed_value - cost, 2)
+    lot["projected_profit"] = round(sold_net + listed_value + lot["unlisted_value"] - cost, 2)
     lot["roi_pct"] = round((sold_net - cost) / cost * 100, 1)
     lot["recouped_pct"] = round(sold_net / cost * 100, 1)
     return lot
@@ -339,12 +458,17 @@ def _totals(lots: list[dict]) -> dict:
     cost = sum(x["cost"] for x in tracked)
     sold_net = sum(x["sold_net"] for x in tracked)
     listed_value = sum(x["listed_value"] for x in tracked)
+    unlisted_value = sum(x["unlisted_value"] for x in tracked)
     return {
         "cost": round(cost, 2),
         "sold_net": round(sold_net, 2),
         "listed_value": round(listed_value, 2),
+        "unlisted_value": round(unlisted_value, 2),
+        "unlisted_items": sum(x["unlisted_items"] for x in tracked),
         "realized_profit": round(sold_net - cost, 2),
-        "projected_profit": round(sold_net + listed_value - cost, 2),
+        # Sold + listed + unlisted, matching _build_lot so the total is the sum of
+        # the column above it.
+        "projected_profit": round(sold_net + listed_value + unlisted_value - cost, 2),
         "tracked_lots": len(tracked),
         "untracked_lots": len(lots) - len(tracked),
     }

@@ -19,7 +19,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
-from ebaypricer.cards import enrich_rows
+from ebaypricer.cards import card_number, enrich_rows
 from ebaypricer.finances import fetch_finance_fees, merge_fees_into_rows
 from ebaypricer.listing_economics import estimate_fees_and_net, resolve_shipping_charge
 from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders, resolve_condition
@@ -27,13 +27,13 @@ from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders, res
 from dashboard.backend.config import (
     EBAY_PIPELINE_INTERVAL_HOURS,
     EBAY_PRICE_RESEARCH_INTERVAL_HOURS,
-    EBAY_PROMOTION_INTERVAL_HOURS,
     EBAY_SYNC_DAYS,
     EBAY_SYNC_INTERVAL_HOURS,
     EXCEL_PATH,
 )
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import get_access_token
+from dashboard.backend.services.upsert_rules import existing_columns, set_clause
 
 _SOLD_MAP = {
     "Order ID": "order_id",
@@ -67,6 +67,11 @@ _ACTIVE_MAP = {
     "Quantity": "quantity",
     "Estimated Fees": "estimated_fees",
     "Estimated Net": "estimated_net",
+    # No raw eBay field behind this - derived from Card via cards.card_number(),
+    # purely so the Active Listings page can sort by card number in SQL (migration
+    # 0019). _upsert_rows drops it on an un-migrated database, same as any column
+    # `existing_columns` doesn't find.
+    "Number": "number",
 }
 
 _lock_guard = threading.Lock()
@@ -124,16 +129,23 @@ def _to_int(v):
 def _upsert_rows(conn, table: str, col_map: dict, key_cols: list[str], rows: list[dict]) -> int:
     if not rows:
         return 0
-    all_cols = key_cols + [c for c in col_map.values() if c not in key_cols]
+    # Every column in col_map has existed since migration 0001 except `number`
+    # (0019, active_listings) - filtered against the real schema, the same
+    # "degrade rather than crash" rule excel_sync.py's skip_cols follows, so an
+    # un-migrated database still syncs everything else instead of failing outright.
+    present = existing_columns(conn, table)
+    all_cols = key_cols + [c for c in col_map.values() if c not in key_cols and c in present]
     col_sql = ", ".join(all_cols)
     placeholders = ", ".join("%s" for _ in all_cols)
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in all_cols if c not in key_cols)
+    # set_clause, not a bare EXCLUDED assignment: a hand-corrected column stays put
+    # while its lock is set - see services/upsert_rules.py.
+    updates = ", ".join(set_clause(conn, table, c) for c in all_cols if c not in key_cols)
     insert_sql = (
         f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) "
         f"ON CONFLICT ({', '.join(key_cols)}) DO UPDATE SET {updates}"
     )
     with conn.cursor() as cur:
-        cur.executemany(insert_sql, [tuple(item[c] for c in all_cols) for item in rows])
+        cur.executemany(insert_sql, [tuple(item.get(c) for c in all_cols) for item in rows])
     return len(rows)
 
 
@@ -216,12 +228,14 @@ def _build_sold_db_rows(user_id: str, raw_rows: list[dict]) -> list[dict]:
 def _build_active_db_rows(user_id: str, raw_rows: list[dict]) -> list[dict]:
     rows = []
     for r in raw_rows:
+        card = _clean(r.get("Card"))
         rows.append(
             {
                 "user_id": user_id,
                 "item_id": _clean(r.get("Item ID")),
                 "title": _clean(r.get("Title")),
-                "card": _clean(r.get("Card")),
+                "card": card,
+                "number": card_number(card),
                 "condition": _clean(r.get("Condition")),
                 "sku": _clean(r.get("SKU")),
                 "price": _to_num(r.get("Price")),
@@ -386,11 +400,9 @@ def default_user_connected(default_user_id: str) -> bool:
 def _scheduler_loop() -> None:
     pipeline_interval = EBAY_PIPELINE_INTERVAL_HOURS * 3600
     ebay_interval = EBAY_SYNC_INTERVAL_HOURS * 3600
-    promotion_interval = EBAY_PROMOTION_INTERVAL_HOURS * 3600
     research_interval = EBAY_PRICE_RESEARCH_INTERVAL_HOURS * 3600
     next_pipeline = time.monotonic() + pipeline_interval  # first round after one interval
     next_ebay = time.monotonic()  # immediate round for status/token refresh
-    next_promotion = time.monotonic() + promotion_interval
     next_research = time.monotonic() + research_interval
     while True:
         now = time.monotonic()
@@ -410,14 +422,8 @@ def _scheduler_loop() -> None:
             if now >= next_ebay:
                 next_ebay = now + ebay_interval
                 sync_all_users()
-            if now >= next_promotion:
-                next_promotion = now + promotion_interval
-                try:
-                    from dashboard.backend.services.promotion_boost import run_all_users_promotion_boost
-
-                    run_all_users_promotion_boost()
-                except Exception as e:
-                    print(f"[scheduler] promotion boost round failed: {e}")
+            # No promotion round here on purpose: ad rates are only ever changed by
+            # a deliberate request (POST /ebay/promotion-boost), never on a timer.
             if now >= next_research:
                 next_research = now + research_interval
                 try:

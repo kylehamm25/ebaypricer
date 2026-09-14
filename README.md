@@ -41,7 +41,7 @@ Managing a high-volume Pokemon card inventory manually became increasingly time-
 All steps run sequentially via `scripts/main.py`:
 
 ```
-append_sold_orders → get_active → price_active_listings (sold avg) → avg_active_price (active avg + price accuracy) → auto_boost_promotion
+append_sold_orders → get_active → avg_active_price (active avg + price accuracy)
 ```
 
 Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scripts/run_hourly.sh` (anacron/cron).
@@ -72,14 +72,12 @@ Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scr
 
 ### `main.py` 
 
-The entry point for the full automation pipeline. Runs five sub-scripts sequentially, stopping on failure (except `auto_boost_promotion` which is best-effort). Supports `--dry-run` to preview promotion changes without applying them. All output is logged to `logs/main.log` with timestamps.
+The entry point for the full automation pipeline. Runs three sub-scripts sequentially, stopping on failure. Nothing in the chain writes to eBay - the `auto_boost_promotion` step was removed so an unattended run can never change ad rates. All output is logged to `logs/main.log` with timestamps.
 
 **Pipeline order:**
 1. `append_sold_orders.py` - import new sales
 2. `get_active.py` - refresh active listings
-3. `price_active_listings.py` - sold-price research
-4. `avg_active_price.py` - active-market comparison
-5. `auto_boost_promotion.py` - adjust ad rates
+3. `avg_active_price.py` - active-market comparison
 
 
 ### `append_sold_orders.py`
@@ -106,7 +104,7 @@ Fetches all current active listings from the Trading API, enriches them with car
 - Preserves cached card names across runs to maintain consistency.
 
 
-### `price_active_listings.py`
+### `price_active_listings.py` (no longer in the pipeline)
 
 For each unique card in the Active Listings sheet, searches eBay completed/sold listings via the Browse API, computes a weighted-average sold price, and writes analytics columns back to the sheet.
 
@@ -134,7 +132,9 @@ For each unique card, searches currently active eBay listings via the Browse API
 
 ### `auto_boost_promotion.py`
 
-Automatically increases promoted listing ad rates for stale inventory. Every 10 days an item has been listed without selling, its ad rate is bumped by 1% (computed via `marketing_api.compute_target_bid`), up to a configurable cap.
+Increases promoted listing ad rates for stale inventory. Every 10 days an item has been listed without selling, its ad rate is bumped by 1% (computed via `marketing_api.compute_target_bid`), up to a configurable cap.
+
+**Not part of the pipeline** - `main.py` used to run it last, and it was removed so ad spend never moves unattended. Run it by hand (with `--dry-run` first) when you actually want a boost.
 
 **Key behaviors:**
 - Default cap is 5.0%; items over $50 cap at 3.0%.
@@ -178,7 +178,7 @@ scripts/                 entry points
 ├── get_active.py
 ├── avg_active_price.py
 ├── price_active_listings.py
-├── auto_boost_promotion.py
+├── auto_boost_promotion.py   (manual only, not in the pipeline)
 ├── gen_access_token.py
 └── run_hourly.ps1
 ebay-defaults-extension/  Chrome extension for listing form defaults

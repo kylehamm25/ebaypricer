@@ -75,7 +75,6 @@ Two halves that share a database but run independently.
    │   2 get_active.py                    │           │
    │   3 price_active_listings.py         │           │
    │   4 avg_active_price.py              │           │
-   │   5 auto_boost_promotion.py          │           │
    └───────┬──────────────────┬───────────┘           │
            │                  │                       │
    ┌───────▼──────┐   ┌───────▼────────┐              │
@@ -201,8 +200,10 @@ aggregate/chart endpoints), `pricing`, `pipeline`, `promotion`, `ebay` (OAuth co
 (shared research + the orchestration), `suggested_price` (the pricing model), `promotion_boost`,
 `excel_sync`, `pipeline_runner`, `stage_runner`.
 
-**Scheduler** — one daemon thread ticking every 60s with four independent cadences: legacy
-pipeline (1h), per-user eBay sync (6h), price research (6h), promotion boost (24h). Each is
+**Scheduler** — one daemon thread ticking every 60s with three independent cadences: legacy
+pipeline (1h), per-user eBay sync (6h), price research (6h). Ad-rate boosting used to be a
+fourth (24h) and was deliberately removed: it spends money, so it now happens only on an
+explicit request. Each is
 wrapped so one failing round can't kill the loop.
 
 ---

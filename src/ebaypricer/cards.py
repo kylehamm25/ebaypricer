@@ -97,6 +97,40 @@ _PROMO_SET_TO_PREFIX = {
     "svp": "SVP",
 }
 
+# Cards the upstream pokemon-tcg-data repo (GITHUB_BASE) is simply missing. Found by
+# scanning each Black Star Promos series for a gap in its own numbering - swshp runs
+# 1-307 but only had 304 cards, with 299/300/301 absent between "Hisuian Zoroark
+# VSTAR Promo" (298) and "Klara Promo" (302). Verified against Pokemon's own TCG card
+# database (pokemon.com/us/pokemon-tcg/pokemon-cards/series/swshp/SWSH2{99,300,301}/,
+# duplicated by TCGplayer/Cardmarket/pkmn.gg) rather than guessed from the gap alone -
+# a wrong name here would be a wrong catalog entry, not just a missing one.
+#
+# Appended after every fetch in _build_cache() rather than hand-patched into
+# data/cards_cache.json, because that file is regenerated wholesale (14-day TTL, or a
+# manual rebuild) and a hand-edit would be silently lost on the next one. Safe to
+# leave in place if upstream ever adds these itself - _build_cache() below only
+# appends an id that didn't already come from the fetch.
+_MISSING_PROMO_CARDS: list[dict] = [
+    {
+        "id": "swshp-SWSH299", "name": "Jirachi V", "number": "SWSH299",
+        "rarity": "Promo", "supertype": "Pokémon", "subtypes": ["Basic", "V"],
+        "set_id": "swshp", "set_name": "SWSH Black Star Promos",
+        "set_series": "Sword & Shield", "set_release": "2019/11/15",
+    },
+    {
+        "id": "swshp-SWSH300", "name": "Unown V", "number": "SWSH300",
+        "rarity": "Promo", "supertype": "Pokémon", "subtypes": ["Basic", "V"],
+        "set_id": "swshp", "set_name": "SWSH Black Star Promos",
+        "set_series": "Sword & Shield", "set_release": "2019/11/15",
+    },
+    {
+        "id": "swshp-SWSH301", "name": "Lugia V", "number": "SWSH301",
+        "rarity": "Promo", "supertype": "Pokémon", "subtypes": ["Basic", "V"],
+        "set_id": "swshp", "set_name": "SWSH Black Star Promos",
+        "set_series": "Sword & Shield", "set_release": "2019/11/15",
+    },
+]
+
 RARITY_ABBREV = {
     "illustration rare": "IR",
     "special illustration rare": "SIR",
@@ -402,6 +436,11 @@ class CardDatabase:
                     "rarity": c.get("rarity", ""),
                     "supertype": c.get("supertype", ""),
                     "subtypes": c.get("subtypes", []),
+                    # Elemental type(s) - "Fire", "Grass", ... - present only on
+                    # Pokemon cards; Trainer and Energy cards carry none upstream.
+                    # Only card_type_label() reads this, to sort/group the Inventory
+                    # page by "Fire"/"Grass"/.../"Trainer"/"Energy".
+                    "types": c.get("types") or [],
                     "set_id": sid,
                     "set_name": sname,
                     "set_series": series,
@@ -411,6 +450,9 @@ class CardDatabase:
                 })
             if i % 25 == 0:
                 print(f"    ... {i}/{total} sets ({len(all_cards)} cards)")
+
+        have_ids = {c["id"] for c in all_cards}
+        all_cards.extend(c for c in _MISSING_PROMO_CARDS if c["id"] not in have_ids)
 
         # Written once, at the end, and atomically (_save_cache writes a temp file then
         # os.replace). Previously this also saved every 25 sets, which was fine when a
@@ -769,6 +811,48 @@ def _fmt_card(m: dict | None) -> str | None:
     return " ".join(parts)
 
 
+# The number token _fmt_card synthesizes above is how the card is CATALOGUED, which
+# is not always how it is SOLD. For the SVP promos the catalog stores a bare "13" and
+# _fmt_card renders "SVP13", but the number is printed on the card - and written in
+# listing titles - zero padded to three digits: "SVP 013", "SVP013". Searching the
+# catalogued form finds nothing at all.
+#
+# Measured against live Browse results (raw hits, same query otherwise):
+#     Miraidon SVP13   -> 0     Miraidon SVP013   -> 50
+#     Squirtle SVP48   -> 1     Squirtle SVP048   -> 40
+#     Tinkatink SVP25  -> 0     Tinkatink SVP025  -> 37
+#     Annihilape SVP32 -> 2     Annihilape SVP032 -> 40
+#
+# Padding is applied ONLY to the prefixes this module synthesizes
+# (_PROMO_SET_TO_PREFIX). SM/SWSH/XY/BW promo numbers arrive from the catalog already
+# in their printed form ("SM26"), and padding those is actively harmful - "Tsareena
+# SM26" returns 35 results, "Tsareena SM026" returns 0. SVP numbers of 100 and up are
+# already three digits, so this is a no-op for them, which is why only the low-numbered
+# SVP promos were ever affected.
+_SYNTHESIZED_PREFIXES = tuple(_PROMO_SET_TO_PREFIX.values())
+_PADDABLE_NUMBER_RE = re.compile(
+    rf"^({'|'.join(_SYNTHESIZED_PREFIXES)})(\d{{1,3}})$"
+)
+
+
+def searchable_card_query(card_query: str) -> str:
+    """A card_query rewritten the way sellers actually title the card.
+
+    card_query itself must never change - it keys active_price_snapshots and
+    active_listings.card - so this is a read-time transformation applied when building
+    a marketplace search, not a different way to format cards. A string with nothing to
+    rewrite comes back untouched, which is every non-promo card and every free-text
+    valuation query.
+    """
+    if not card_query:
+        return card_query
+    out = []
+    for token in card_query.split():
+        m = _PADDABLE_NUMBER_RE.match(token)
+        out.append(f"{m.group(1)}{int(m.group(2)):03d}" if m else token)
+    return " ".join(out)
+
+
 def format_card(match_result: dict | None, title: str | None = None) -> str | None:
     card_str = _fmt_card(match_result)
     if card_str and title and _REVERSE_RE.search(title):
@@ -845,6 +929,27 @@ def image_url_for_query(card_query: str) -> str | None:
     return card_image_url(find_catalog_card(card_query))
 
 
+def card_type_label(card_query: str | None) -> str | None:
+    """What to sort/group a card by: its elemental type ("Fire", "Grass", ...) for a
+    Pokemon, or the supertype itself ("Trainer", "Energy") for anything else.
+
+    None when the card can't be resolved (sealed/bulk/free-text rows, same as
+    `image_url_for_query`), or - for a Pokemon whose printing predates the `types`
+    field being cached - when the type simply isn't known yet; CACHE_MAX_AGE_DAYS
+    picks it up on the next scheduled catalog refresh with no other change needed.
+    Only ever the first listed type: a handful of Pokemon carry two, and this is a
+    single sort bucket, not a full type chart.
+    """
+    card = find_catalog_card(card_query) if card_query else None
+    if not card:
+        return None
+    supertype = card.get("supertype") or ""
+    if supertype and supertype != "Pokémon":
+        return supertype
+    types = card.get("types") or []
+    return types[0] if types else None
+
+
 # Pokemon Center is a distribution channel, not a set: its promos carry the same card
 # name and number as the ordinary print but trade separately. Detected off the whole
 # card_query rather than the parsed set name, because on a custom search the phrase can
@@ -852,9 +957,13 @@ def image_url_for_query(card_query: str) -> str | None:
 _POKEMON_CENTER_RE = re.compile(r"pok[eé]mon\s*center|poke\s*center|pokecenter", re.IGNORECASE)
 
 
+_BALL_PATTERN_TOKENS = {("poke", "ball"): "poke_ball", ("master", "ball"): "master_ball"}
+
+
 def card_identity(card_query: str) -> dict | None:
     """Structured identity behind a flat card_query string: name, set_name, number and
-    whether it's the reverse-holo print. Feeds comp_filter.evaluate_comp, which needs to
+    which reverse-family print it is (plain reverse holo, or a Poke Ball / Master Ball
+    pattern - see _BALL_PATTERN_TOKENS). Feeds comp_filter.evaluate_comp, which needs to
     know what card we're actually pricing before it can judge a search result.
 
     Prefers the same title-anchored match enrich_rows() stashed (see lookup_market_price
@@ -875,16 +984,29 @@ def card_identity(card_query: str) -> dict | None:
             "set_name": entry["set_name"],
             "number": entry["number"],
             "reverse": entry.get("variant") == "reverseHolofoil",
+            # The pipeline that populates CARD_QUERY_LOOKUP matches TCGdex's generic
+            # variant names, which don't distinguish a ball pattern from a plain
+            # reverse holo - so a listing title is still the only way to catch one.
+            "pattern": None,
             "pokemon_center": pokemon_center,
             "parsed": True,
         }
 
-    # Fallback: "<name> [RARITY] <number> <set name> [Reverse]". The number is the first
-    # token shaped like a card number, which is also what separates name from set - so
-    # "Charizard ex SIR 199 151" resolves to number 199 in set "151", not the reverse.
+    # Fallback: "<name> [RARITY] <number> <set name> [Reverse | Poke Ball | Master
+    # Ball]". The number is the first token shaped like a card number, which is also
+    # what separates name from set - so "Charizard ex SIR 199 151" resolves to number
+    # 199 in set "151", not the reverse.
     tokens = card_query.split()
-    reverse = bool(tokens) and tokens[-1].lower() == "reverse"
-    if reverse:
+    pattern = None
+    if len(tokens) >= 2 and (tokens[-2].lower(), tokens[-1].lower()) in _BALL_PATTERN_TOKENS:
+        pattern = _BALL_PATTERN_TOKENS[(tokens[-2].lower(), tokens[-1].lower())]
+        tokens = tokens[:-2]
+    # A ball pattern IS a reverse-holo print - counted as reverse too so anything that
+    # only checks the boolean (the TCGdex variant lookup in valuation.py, for one)
+    # still asks for the closer of the two real prices rather than the plain one.
+    reverse = pattern is not None
+    if pattern is None and tokens and tokens[-1].lower() == "reverse":
+        reverse = True
         tokens = tokens[:-1]
 
     abbrevs = {a.lower() for a in RARITY_ABBREV.values()}
@@ -897,6 +1019,7 @@ def card_identity(card_query: str) -> dict | None:
             "set_name": " ".join(tokens[i + 1:]),
             "number": tok,
             "reverse": reverse,
+            "pattern": pattern,
             "pokemon_center": pokemon_center,
             "parsed": True,
         }
@@ -911,9 +1034,24 @@ def card_identity(card_query: str) -> dict | None:
         "set_name": "",
         "number": "",
         "reverse": reverse,
+        "pattern": pattern,
         "pokemon_center": pokemon_center,
         "parsed": False,
     }
+
+
+def card_number(card_query: str | None) -> str | None:
+    """The card number implied by a card_query string, via card_identity(), or None
+    when there isn't one (no card_query, or nothing in it parses as a card).
+
+    Thin wrapper for callers that only need this one field:
+    active_listings.number is populated from it (both sync paths, and the manual
+    card-correction endpoint) purely so the Active Listings page can sort by card
+    number in SQL - card_query itself can't be, since the number is embedded in a
+    formatted string rather than a column of its own.
+    """
+    identity = card_identity(card_query)
+    return (identity["number"] or None) if identity else None
 
 
 def lookup_market_price(card_query: str) -> float | None:

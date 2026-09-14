@@ -5,3 +5,5 @@ psycopg[binary]>=3.2
 psycopg-pool>=3.2
 PyJWT>=2.8
 cryptography>=42.0
+Pillow>=10.0
+pillow-heif>=0.16

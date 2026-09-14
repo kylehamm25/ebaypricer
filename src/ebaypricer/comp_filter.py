@@ -106,6 +106,13 @@ _FOREIGN_PRINT_RE = re.compile(
 _POKEMON_CENTER_RE = re.compile(r"pok[eé]mon\s*cent(?:er|re)|\bpoke\s*cent(?:er|re)\b|\bpokecent(?:er|re)\b", re.IGNORECASE)
 
 _REVERSE_RE = re.compile(r"\breverse\b", re.IGNORECASE)
+# Master Ball / Poke Ball reverse-holo patterns (151, Prismatic Evolutions, Black Bolt,
+# White Flare): two more separately-priced prints of the same card+number, on top of
+# plain reverse holo and the regular/non-holo pull. A ball-pattern pull is always worth
+# advertising, so unlike plain reverse a comp's title is trusted to say nothing when it
+# doesn't have one - see _title_pattern below.
+_POKE_BALL_RE = re.compile(r"\bpoke\s*-?\s*ball\b", re.IGNORECASE)
+_MASTER_BALL_RE = re.compile(r"\bmaster\s*-?\s*ball\b", re.IGNORECASE)
 # Distinct, materially pricier prints of the same card+number. A Shadowless Base Set
 # Charmander runs $6-90 against $0.99-4 for the Unlimited print we actually hold.
 _SPECIAL_PRINT_RE = re.compile(
@@ -192,13 +199,25 @@ def is_foreign_market(title: str, condition: str | None) -> bool:
     return bool(_FOREIGN_PRINT_RE.search(title or ""))
 
 
+def _title_pattern(title: str) -> str | None:
+    """Which ball pattern, if any, a title claims. Master Ball checked first: a title
+    naming both ("Poke Ball & Master Ball set") is a multi-card bundle already caught
+    upstream, but if one ever slipped through, the pricier claim is the one that must
+    not be mistaken for the cheaper one."""
+    if _MASTER_BALL_RE.search(title):
+        return "master_ball"
+    if _POKE_BALL_RE.search(title):
+        return "poke_ball"
+    return None
+
+
 def evaluate_comp(comp: dict, identity: dict | None) -> Verdict:
     """Judge one parsed Browse result against the card being priced.
 
     comp     - a parse_active_item() dict (title, condition, ...)
-    identity - cards.card_identity() output: {name, number, set_name, reverse}, or
-               None when the card could not be resolved, in which case only the
-               identity-free hard checks apply.
+    identity - cards.card_identity() output: {name, number, set_name, reverse,
+               pattern}, or None when the card could not be resolved, in which case
+               only the identity-free hard checks apply.
     """
     title = comp.get("title") or ""
     condition = comp.get("condition") or ""
@@ -231,12 +250,24 @@ def evaluate_comp(comp: dict, identity: dict | None) -> Verdict:
         if stated and wanted and not (wanted & stated):
             return Verdict(False, "number_mismatch", "soft")
 
+    # A ball-pattern title (below) also usually says "reverse holo", but not always -
+    # sellers who have the rarer pull tend to lead with its name and can drop the
+    # generic word entirely. Skip the plain check for those titles rather than have it
+    # reject a real Poke Ball / Master Ball comp for not also saying "reverse"; the
+    # pattern check just below is the one that actually judges them.
+    title_pattern = _title_pattern(title)
+
     # bool() on both sides is load-bearing: re.search returns a Match or None, and
     # `Match != False` is always True, which silently rejected every comp in every pool
     # and made the soft-restore path fire universally.
-    if bool(_REVERSE_RE.search(title)) != bool(identity.get("reverse")):
+    if title_pattern is None and bool(_REVERSE_RE.search(title)) != bool(identity.get("reverse")):
         # Reverse holos and their regular counterparts are separately priced prints.
         return Verdict(False, "reverse_mismatch", "soft")
+
+    if title_pattern != identity.get("pattern"):
+        # Each ball pattern trades separately from the other and from a plain reverse
+        # holo of the same card - see _BALL_PATTERN_TOKENS in cards.py.
+        return Verdict(False, "pattern_mismatch", "soft")
 
     if bool(_POKEMON_CENTER_RE.search(title)) != bool(identity.get("pokemon_center")):
         return Verdict(False, "pokemon_center_mismatch", "soft")

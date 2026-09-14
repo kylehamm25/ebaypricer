@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import {
@@ -16,7 +16,6 @@ import {
   Check,
   Clock,
   ExternalLink,
-  ImageIcon,
   Loader2,
   PackageSearch,
   Pencil,
@@ -28,32 +27,16 @@ import {
 import { api, apiPost } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
+import { CardMatchDialog } from '../components/shared/CardMatchDialog'
+import { CardBack } from '../components/shared/ViewToggle'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { useChartCursor } from '../lib/theme'
-import { formatCurrency, formatInt, formatSuggestionReason, toNumber } from '../lib/utils'
+import { cn, formatCurrency, formatInt, formatSuggestionReason, toNumber } from '../lib/utils'
 import type {
   ActiveListing, CardPriceDetail, PositionHistoryPoint, PriceComparison, SuggestedPriceBasis,
 } from '../types'
 
-const CONDITION_STYLES: Record<string, string> = {
-  new: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 ring-1 ring-inset ring-emerald-600/20',
-  'like new': 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 ring-1 ring-inset ring-emerald-600/20',
-  'near mint': 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300 ring-1 ring-inset ring-emerald-600/20',
-  'lightly played': 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300 ring-1 ring-inset ring-amber-600/20',
-  used: 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300 ring-1 ring-inset ring-amber-600/20',
-  good: 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300 ring-1 ring-inset ring-amber-600/20',
-  played: 'bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300 ring-1 ring-inset ring-rose-600/20',
-  damaged: 'bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300 ring-1 ring-inset ring-rose-600/20',
-  poor: 'bg-rose-50 text-rose-700 dark:bg-rose-500/15 dark:text-rose-300 ring-1 ring-inset ring-rose-600/20',
-}
-
-function conditionClass(condition?: string) {
-  if (!condition) return 'bg-slate-100 text-slate-600 dark:bg-neutral-700 dark:text-neutral-300 ring-1 ring-inset ring-slate-500/10'
-  return (
-    CONDITION_STYLES[condition.toLowerCase()] ??
-    'bg-slate-100 text-slate-600 dark:bg-neutral-700 dark:text-neutral-300 ring-1 ring-inset ring-slate-500/10'
-  )
-}
+const chip = "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium"
 
 function formatShortDate(v: string | null | undefined) {
   if (!v) return '—'
@@ -86,7 +69,6 @@ function EmptyChart({ label }: { label: string }) {
 
 interface PriceHistoryPoint {
   date: string
-  sold?: number
   active?: number
 }
 
@@ -102,6 +84,11 @@ export function ListingDetailPage() {
   })
 
   const [editingPrice, setEditingPrice] = useState(false)
+  const [editingCard, setEditingCard] = useState(false)
+  // Reset per listing, or navigating from a card with no art to one with art
+  // would keep showing the back.
+  const [artFailed, setArtFailed] = useState(false)
+  useEffect(() => { setArtFailed(false) }, [itemId])
   const [priceInput, setPriceInput] = useState('')
 
   const revisePriceMutation = useMutation({
@@ -160,16 +147,10 @@ export function ListingDetailPage() {
     enabled: !!itemId,
   })
 
-  // The exact price_snapshots/active_price_snapshots card_query this listing resolved
-  // to (possibly fuzzy-matched) - used to pull the SAME weighted sold average shown on
-  // the Active Listings list page, instead of re-deriving a plain mean here that could
-  // disagree with it for the same card.
+  // The exact active_price_snapshots card_query this listing resolved to (possibly
+  // fuzzy-matched), so this page reads the same comp figures the list page shows
+  // rather than re-deriving a mean that could disagree for the same card.
   const comparison = comparisons?.find((c) => c.card_query === cardDetail?.card_query)
-
-  const soldSnaps = (cardDetail?.price_snapshots ?? []).map((s) => ({
-    ...s,
-    date: s.snapshot_date?.slice(5),
-  })).reverse()
 
   const activeSnaps = (cardDetail?.active_snapshots ?? []).map((s) => ({
     ...s,
@@ -177,9 +158,6 @@ export function ListingDetailPage() {
   })).reverse()
 
   const priceHistory: PriceHistoryPoint[] = []
-  for (const s of soldSnaps) {
-    priceHistory.push({ date: s.date, sold: s.avg_price ?? undefined })
-  }
   for (const a of activeSnaps) {
     const row = priceHistory.find((r) => r.date === a.date)
     const active = a.avg_price ?? undefined
@@ -223,7 +201,13 @@ export function ListingDetailPage() {
     )
   }
 
-  const money = (v: unknown) => (v !== null && v !== undefined && v !== '' ? formatCurrency(v as string) : '—')
+  // symbol:false is for the price card, which renders its own "$" in a fixed
+  // position so the glyph doesn't shift as the number changes width.
+  const money = (v: unknown, opts?: { symbol?: boolean }) => {
+    if (v === null || v === undefined || v === '') return '—'
+    const s = formatCurrency(v as string)
+    return opts?.symbol === false ? s.replace(/^\$/, '') : s
+  }
   const int = (v: unknown) => (v !== null && v !== undefined && v !== '' ? formatInt(v as string) : '—')
   const pct = (v: unknown) => {
     if (v === null || v === undefined || v === '') return '—'
@@ -336,214 +320,233 @@ export function ListingDetailPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
       {/* Header */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex flex-col justify-between">
-        <div className="flex flex-wrap items-start gap-5">
-          {item.card_image_url ? (
+      {editingCard && (
+        <CardMatchDialog
+          itemId={itemId!}
+          current={(item.Card as string) ?? null}
+          locked={!!item['Card Locked']}
+          onClose={() => setEditingCard(false)}
+        />
+      )}
+
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex flex-col">
+        {/* Image beside one content column, rather than three flex children that
+            wrap: this card sits in a half-width grid column, and the price block
+            used to wrap onto its own line still carrying the left border that only
+            made sense while it sat beside the title. */}
+        {/* items-start, not items-stretch: the art used to take its size from the
+            content column beside it (h-full + self-stretch), so the more a listing
+            had to say, the taller its card grew. A card is a fixed shape - give it
+            a width and let 5/7 settle the rest. */}
+        <div className="flex flex-1 items-start gap-5">
+          {item.card_image_url && !artFailed ? (
             <img
               src={item.card_image_url}
               alt={`${item.Card ?? item.Title} card`}
               loading="lazy"
-              onError={(e) => { e.currentTarget.style.display = 'none' }}
-              className="w-48 aspect-[5/7] shrink-0 rounded-lg object-contain"
+              // Swapped for the card back rather than hidden: a vanishing image
+              // left a gap the layout had already reserved.
+              onError={() => setArtFailed(true)}
+              className="aspect-[5/7] w-32 sm:w-40 shrink-0 rounded-lg object-contain"
             />
           ) : (
-            <div className="flex w-48 aspect-[5/7] shrink-0 items-center justify-center rounded-lg bg-slate-50 dark:bg-neutral-700/50 ring-1 ring-slate-200 dark:ring-neutral-600">
-              <ImageIcon size={28} className="text-slate-300 dark:text-neutral-500" />
-            </div>
+            <CardBack className="w-32 sm:w-40 rounded-lg" />
           )}
 
           <div className="min-w-0 flex-1">
             <h1 className="text-2xl font-bold text-slate-900 dark:text-neutral-100 leading-snug tracking-tight">
               {item.Title}
             </h1>
-            <div className="mt-2 flex flex-wrap items-center gap-2">
+            <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
               {item.Condition && (
-                <span className={`px-2 py-0.5 rounded-md text-xs font-medium ${conditionClass(item.Condition)}`}>
-                  {item.Condition}
-                </span>
+                <span className="text-xs text-slate-500 dark:text-neutral-400">{item.Condition}</span>
               )}
-              {item.Card && <span className="text-slate-500 dark:text-neutral-400 text-xs">{item.Card}</span>}
-            </div>
-          </div>
-
-          <div className="flex flex-col items-end gap-1.5 pl-4 border-l border-slate-100 dark:border-neutral-700">
-            <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Price</p>
-            {editingPrice ? (
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-1">
-                  <span className="text-lg font-semibold text-slate-400">$</span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.01"
-                    autoFocus
-                    value={priceInput}
-                    onChange={(e) => setPriceInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') submitPrice()
-                      if (e.key === 'Escape') setEditingPrice(false)
-                    }}
-                    className="w-28 text-3xl font-bold tabular-nums text-slate-900 dark:text-neutral-100 bg-transparent border-b-2 border-blue-500 focus:outline-none"
-                  />
-                  <button
-                    onClick={submitPrice}
-                    disabled={revisePriceMutation.isPending}
-                    className="p-1.5 rounded-md text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-500/15 disabled:opacity-50"
-                    title="Save"
-                  >
-                    {revisePriceMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
-                  </button>
-                  <button
-                    onClick={() => setEditingPrice(false)}
-                    disabled={revisePriceMutation.isPending}
-                    className="p-1.5 rounded-md text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-700 disabled:opacity-50"
-                    title="Cancel"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-                {revisePriceMutation.isError && (
-                  <p className="text-xs text-rose-600 dark:text-rose-400 max-w-[220px] text-right">
-                    {(revisePriceMutation.error as Error).message}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="flex items-center gap-1.5 group">
-                <p className="text-3xl font-bold text-slate-900 dark:text-neutral-100 tabular-nums">{money(item.Price)}</p>
-                <button
-                  onClick={startEditingPrice}
-                  className="p-1 rounded-md text-slate-300 hover:text-slate-600 hover:bg-slate-100 dark:text-neutral-600 dark:hover:text-neutral-300 dark:hover:bg-neutral-700 opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Revise price on eBay"
-                >
-                  <Pencil size={14} />
-                </button>
-              </div>
-            )}
-            {priceAccuracyPct !== null && (
-              <span
-                className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs font-medium ${
-                  priceAccuracyPct <= 0
-                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
-                    : 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'
-                }`}
+              {/* The catalog match, and the way to fix it. It decides which card
+                  the listing is priced against, so a wrong one is a wrong price -
+                  it should not be a read-only fact on the page. */}
+              <button
+                onClick={() => setEditingCard(true)}
+                className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-neutral-400 hover:text-slate-800 dark:hover:text-neutral-200"
+                title="Change which card this is priced against"
               >
-                {priceAccuracyPct <= 0 ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
-                {Math.abs(priceAccuracyPct).toFixed(1)}% {priceAccuracyPct <= 0 ? 'below' : 'above'} market avg
-              </span>
-            )}
-            {!editingPrice && recommendedPrice !== null && recommendationDiffers && (
-              <div className="flex flex-col items-end gap-0.5">
-                <button
-                  onClick={useRecommendedPrice}
-                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
-                  title={formatSuggestionReason(suggestionBasis)}
-                >
-                  Suggested: {formatCurrency(recommendedPrice)}
-                </button>
-                {/* When a guardrail clamped the suggestion, the number above is a
-                    step rather than the destination - say so instead of quietly
-                    showing a figure the model didn't actually want. */}
-                {suggestionBasis?.clamps?.length && suggestionBasis.pre_guardrail != null ? (
-                  <span className="text-[11px] text-slate-400">
-                    step toward {formatCurrency(suggestionBasis.pre_guardrail)}
+                {item.Card || <span className="italic">no catalog match</span>}
+                {item['Card Locked'] && (
+                  <span className="rounded px-1 py-0.5 text-[10px] font-medium bg-slate-100 dark:bg-neutral-700">
+                    manual
                   </span>
-                ) : null}
-              </div>
-            )}
-          </div>
-        </div>
+                )}
+                <Pencil size={11} />
+              </button>
+              {/* An action, not a stat - it used to occupy a cell in the label/value
+                  grid below, where having no label left it sitting half a line above
+                  every neighbouring value. */}
+              {ebayUrl && (
+                <a
+                  href={ebayUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:underline"
+                >
+                  View on eBay
+                  <ExternalLink size={11} />
+                </a>
+              )}
+            </div>
 
-        <div className="mt-5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-x-4 gap-y-3 border-t border-slate-100 dark:border-neutral-700 pt-4 text-sm justify-items-start">
-          {ebayUrl && (
-            <div>
-              <a
-                href={ebayUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-blue-600 dark:text-blue-400 font-medium hover:underline inline-flex items-center gap-1 text-sm"
-              >
-                View on eBay
-                <ExternalLink size={11} />
-              </a>
-            </div>
-          )}
-          <div>
-            <p className="text-xs text-slate-400">Start Date</p>
-            <p className="text-slate-700 dark:text-neutral-200 font-medium">{(item['Start Date'] as string) || '—'}</p>
-          </div>
-          <div>
-            <p className="text-xs text-slate-400">Watchers</p>
-            <p className={`text-slate-700 dark:text-neutral-200 font-medium ${watchersNum === 1 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
-              {watchersNum}
-            </p>
-          </div>
-          {toNumber(item.Quantity) !== null && toNumber(item.Quantity)! > 1 && (
-            <div>
-              <p className="text-xs text-slate-400">Quantity</p>
-              <p className="text-slate-700 dark:text-neutral-200 font-medium">{int(item.Quantity)}</p>
-            </div>
-          )}
-          <div>
-            <p className="text-xs text-slate-400">Ad Rate</p>
-            <p className="text-slate-700 dark:text-neutral-200 font-medium">{pct(item['Ad Rate'])}</p>
-          </div>
-          {item.SKU && (
-            <div>
-              <p className="text-xs text-slate-400">SKU</p>
-              <p className="text-slate-700 dark:text-neutral-200 font-medium">{item.SKU as string}</p>
-            </div>
-          )}
-          <div>
-            <p className="text-xs text-slate-400">Shipping Charge</p>
-            <p className="text-slate-700 dark:text-neutral-200 font-medium">{money(item['Shipping Charge'])}</p>
-          </div>
-          <div>
-            <p className="text-xs text-slate-400">Total (incl. shipping)</p>
-            <p className="text-slate-700 dark:text-neutral-200 font-medium">
-              {totalPriceNum !== null ? formatCurrency(totalPriceNum) : '—'}
-            </p>
-          </div>
-          {rankNum !== null && (
-            <div>
-              <p className="text-xs text-slate-400">Search Rank</p>
-              <div className="flex items-center gap-2">
-                <p className="text-slate-700 dark:text-neutral-200 font-medium">#{rankNum}</p>
-                {positionHistory.length > 1 && (
-                  <div className="h-6 w-16" title="Search rank, last 90 days">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={positionHistory}>
-                        <Line type="monotone" dataKey="position" stroke="#94a3b8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
+            <div className="mt-4 border-t border-slate-100 dark:border-neutral-700 pt-3">
+              <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Price</p>
+
+              {/* Fixed height + shared baseline: no jump between modes */}
+              <div className="mt-1 flex h-12 items-baseline gap-1.5">
+                <span className="text-2xl font-semibold text-slate-400">$</span>
+                {editingPrice ? (
+                  <>
+                    <input
+                      type="number" step="0.01" min="0.01" autoFocus
+                      value={priceInput}
+                      onChange={(e) => setPriceInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') submitPrice()
+                        if (e.key === 'Escape') setEditingPrice(false)
+                      }}
+                      aria-label="New price"
+                      className="w-[6ch] border-b-2 border-blue-500 bg-transparent text-4xl font-bold tabular-nums text-slate-900 focus:outline-none dark:text-neutral-100 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    />
+                    <span className="ml-2 flex items-center gap-1 self-center">
+                      <button onClick={submitPrice} disabled={revisePriceMutation.isPending} aria-label="Save price"
+                        className="rounded-md p-1.5 text-emerald-600 hover:bg-emerald-50 disabled:opacity-50 dark:hover:bg-emerald-500/15">
+                        {revisePriceMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                      </button>
+                      <button onClick={() => setEditingPrice(false)} disabled={revisePriceMutation.isPending} aria-label="Cancel"
+                        className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 disabled:opacity-50 dark:hover:bg-neutral-700">
+                        <X size={16} />
+                      </button>
+                    </span>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={startEditingPrice}
+                    title="Click to edit price"
+                    aria-label={`Revise price on eBay, currently ${money(item.Price)}`}
+                    className="-mx-1 rounded-md px-1 text-4xl font-bold tracking-tight tabular-nums text-slate-900 hover:bg-slate-100 dark:text-neutral-100 dark:hover:bg-neutral-700"
+                  >
+                    {money(item.Price, { symbol: false })}
+                  </button>
                 )}
               </div>
+
+              {/* One chip row, reserved height, same visual weight for both signals */}
+              <div className="mt-2 flex min-h-[22px] flex-wrap items-center gap-x-2 gap-y-1.5">
+                {priceAccuracyPct !== null && (
+                  <span className={`${chip} ${priceAccuracyPct <= 0
+                    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                    : 'bg-amber-50 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300'}`}>
+                    {priceAccuracyPct <= 0 ? <TrendingDown size={12} /> : <TrendingUp size={12} />}
+                    {Math.abs(priceAccuracyPct).toFixed(1)}% {priceAccuracyPct <= 0 ? 'below' : 'above'} market
+                  </span>
+                )}
+                {!editingPrice && recommendedPrice !== null && recommendationDiffers && (
+                  <button
+                    onClick={useRecommendedPrice}
+                    title={formatSuggestionReason(suggestionBasis)}
+                    className={`${chip} bg-blue-50 text-blue-700 hover:bg-blue-100 dark:bg-blue-500/15 dark:text-blue-300 dark:hover:bg-blue-500/25`}
+                  >
+                    {/* One number, and it is the one a click applies. The clamped
+                        model target (basis.pre_guardrail) used to sit here behind an
+                        arrow, which read as the price being offered - it is in the
+                        tooltip instead, where formatSuggestionReason already names
+                        the guardrail that held the suggestion back. */}
+                    Use {formatCurrency(recommendedPrice)}
+                  </button>
+                )}
+              </div>
+
+              {revisePriceMutation.isError && (
+                <p className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">
+                  {(revisePriceMutation.error as Error).message}
+                </p>
+              )}
             </div>
-          )}
-          <div>
-            <p className="text-xs text-slate-400">Last Checked</p>
-            <p className={`font-medium inline-flex items-center gap-1 ${freshnessClass}`}>
-              <Clock size={11} />
-              {lastChecked
-                ? daysSinceChecked === 0
-                  ? 'Today'
-                  : `${daysSinceChecked}d ago`
-                : 'Never'}
-            </p>
+            <div className="mt-4 grid grid-cols-2 xl:grid-cols-3 gap-x-4 gap-y-3 text-sm">
+              <div>
+                <p className="text-xs text-slate-400">Start Date</p>
+                <p className="text-slate-700 dark:text-neutral-200 font-medium">{(item['Start Date'] as string) || '—'}</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-400">Watchers</p>
+                <p className={cn(
+                  'font-medium tabular-nums',
+                  watchersNum ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-700 dark:text-neutral-200',
+                )}>
+                  {watchersNum ?? 0}
+                </p>
+              </div>
+              {toNumber(item.Quantity) !== null && toNumber(item.Quantity)! > 1 && (
+                <div>
+                  <p className="text-xs text-slate-400">Quantity</p>
+                  <p className="text-slate-700 dark:text-neutral-200 font-medium tabular-nums">{int(item.Quantity)}</p>
+                </div>
+              )}
+              <div>
+                <p className="text-xs text-slate-400">Ad Rate</p>
+                <p className="text-slate-700 dark:text-neutral-200 font-medium tabular-nums">{pct(item['Ad Rate'])}</p>
+              </div>
+              {item.SKU && (
+                <div>
+                  <p className="text-xs text-slate-400">SKU</p>
+                  <p className="text-slate-700 dark:text-neutral-200 font-medium">{item.SKU as string}</p>
+                </div>
+              )}
+              <div>
+                <p className="text-xs text-slate-400">Shipping Charge</p>
+                <p className="text-slate-700 dark:text-neutral-200 font-medium tabular-nums">{money(item['Shipping Charge'])}</p>
+              </div>
+              <div>
+                <p className="text-xs text-slate-400">Total (incl. shipping)</p>
+                <p className="text-slate-700 dark:text-neutral-200 font-medium tabular-nums">
+                  {totalPriceNum !== null ? formatCurrency(totalPriceNum) : '—'}
+                </p>
+              </div>
+              {rankNum !== null && (
+                <div>
+                  <p className="text-xs text-slate-400">Search Rank</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-slate-700 dark:text-neutral-200 font-medium tabular-nums">#{rankNum}</p>
+                    {positionHistory.length > 1 && (
+                      <div className="h-6 w-16" title="Search rank, last 90 days">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={positionHistory}>
+                            <Line type="monotone" dataKey="position" stroke="#94a3b8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div>
+                <p className="text-xs text-slate-400">Last Checked</p>
+                <p className={`font-medium inline-flex items-center gap-1 ${freshnessClass}`}>
+                  <Clock size={11} />
+                  {lastChecked
+                    ? daysSinceChecked === 0
+                      ? 'Today'
+                      : `${daysSinceChecked}d ago`
+                    : 'Never'}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
 
       {/* Price history */}
-      <div className="bg-white dark:bg-neutral-800 rounded-xl p-4 flex flex-col">
-        <div className="flex items-center justify-between mb-1">
+      <div className="bg-white dark:bg-neutral-800 rounded-xl p-6 flex flex-col">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mb-1">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">Price History</h2>
           {priceHistory.length > 0 && (
             <div className="flex flex-wrap items-center gap-3 justify-end">
-              <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-neutral-400">
-                <span className="h-2 w-2 rounded-full bg-blue-500" /> Sold avg
-              </span>
               <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-neutral-400">
                 <span className="h-2 w-2 rounded-full bg-emerald-500" /> Active avg
               </span>
@@ -574,13 +577,11 @@ export function ListingDetailPage() {
                 cursor={cursor.line}
                 content={({ active, payload, label }) => {
                   if (!active || !payload?.length) return null
-                  const sold = payload.find((p) => p.dataKey === 'sold')?.value
                   const activeAvg = payload.find((p) => p.dataKey === 'active')?.value
-                  if (sold == null && activeAvg == null) return null
+                  if (activeAvg == null) return null
                   return (
                     <div className="bg-white dark:bg-neutral-800 border border-slate-200 dark:border-neutral-700 rounded-md shadow-sm px-3 py-2 text-xs space-y-0.5">
                       <p className="font-semibold text-slate-700 dark:text-neutral-200 mb-1">{label}</p>
-                      {sold != null && <p className="text-blue-600 dark:text-blue-400">Sold avg: {formatCurrency(Number(sold))}</p>}
                       {activeAvg != null && <p className="text-emerald-600 dark:text-emerald-400">Active avg: {formatCurrency(Number(activeAvg))}</p>}
                     </div>
                   )
@@ -594,7 +595,6 @@ export function ListingDetailPage() {
                   label={{ value: `Listed $${priceNum.toFixed(2)}`, position: 'insideTopLeft', fill: '#b45309', fontSize: 10 }}
                 />
               )}
-              <Line type="monotone" dataKey="sold" stroke="#3b82f6" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
               <Line type="monotone" dataKey="active" stroke="#10b981" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />
             </LineChart>
           </ResponsiveContainer>

@@ -21,7 +21,7 @@ def _fuzzy_card_query(db, card_name: str) -> str | None:
     ]
     if not words:
         return None
-    rows = db.execute("SELECT DISTINCT card_query FROM price_snapshots").fetchall()
+    rows = db.execute("SELECT DISTINCT card_query FROM active_price_snapshots").fetchall()
     best, best_score = None, 0
     for r in rows:
         q = (r["card_query"] or "").lower()
@@ -33,9 +33,7 @@ def _fuzzy_card_query(db, card_name: str) -> str | None:
 
 def _card_has_data(db, q: str) -> bool:
     return bool(
-        db.execute("SELECT 1 FROM price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
-        or db.execute("SELECT 1 FROM active_price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
-        or db.execute("SELECT 1 FROM sold_listings WHERE card_query = %s LIMIT 1", (q,)).fetchone()
+        db.execute("SELECT 1 FROM active_price_snapshots WHERE card_query = %s LIMIT 1", (q,)).fetchone()
         or db.execute("SELECT 1 FROM active_market_listings WHERE card_query = %s LIMIT 1", (q,)).fetchone()
     )
 
@@ -51,27 +49,14 @@ def get_price_comparisons(user_id: uuid.UUID = Depends(get_current_user_id)):
         # the Active Avg/Sold Avg columns blank for most listings. Pull each card's own
         # newest row instead, independent of what date that happens to be.
         #
-        # active_price_snapshots is the primary table (Active Avg/Suggested no longer
-        # depend on sold data at all) - LEFT JOIN sold data in optionally rather than
-        # requiring it, or any card whose TCGdex lookup didn't find a price (~30% of
-        # cards) would be excluded from this list entirely despite having perfectly
-        # good active data.
         rows = db.execute(
             """SELECT DISTINCT ON (aps.card_query)
                       aps.card_query,
-                      ps.weighted_avg AS sold_weighted_avg,
-                      ps.sample_size AS sold_sample,
                       aps.avg_price AS active_avg,
+                      aps.avg_shipping AS avg_shipping,
                       aps.min_price AS active_min,
                       aps.sample_size AS active_sample
                FROM active_price_snapshots aps
-               LEFT JOIN LATERAL (
-                   SELECT weighted_avg, sample_size
-                   FROM price_snapshots p
-                   WHERE p.card_query = aps.card_query
-                   ORDER BY p.snapshot_date DESC
-                   LIMIT 1
-               ) ps ON true
                ORDER BY aps.card_query, aps.snapshot_date DESC"""
         ).fetchall()
 
@@ -81,12 +66,17 @@ def get_price_comparisons(user_id: uuid.UUID = Depends(get_current_user_id)):
     result = []
     for r in rows:
         d = dict(r)
-        sold = d.get("sold_weighted_avg")
         active = d.get("active_avg")
-        if sold is not None and active is not None:
-            d["spread"] = round(sold - active, 2)
-        else:
-            d["spread"] = None
+        # What a buyer actually pays a competitor: item + postage. Stays None when no
+        # comp reported a shipping cost - avg_shipping IS NULL means "unknown", never
+        # "they ship free", so adding a zero here would quietly present an item-only
+        # figure as a landed one. The caller decides what to show when it's absent.
+        shipping = d.get("avg_shipping")
+        d["active_avg_total"] = (
+            round(float(active) + float(shipping), 2)
+            if active is not None and shipping is not None
+            else None
+        )
         result.append(d)
     return result
 
@@ -96,12 +86,6 @@ def get_price_snapshots(
     card: str = Query(...), days: int = 90, user_id: uuid.UUID = Depends(get_current_user_id)
 ):
     with get_db() as db:
-        sold_rows = db.execute(
-            """SELECT * FROM price_snapshots
-               WHERE card_query = %s AND snapshot_date >= CURRENT_DATE - make_interval(days => %s)
-               ORDER BY snapshot_date DESC LIMIT 30""",
-            (card, days),
-        ).fetchall()
         active_rows = db.execute(
             """SELECT * FROM active_price_snapshots
                WHERE card_query = %s AND snapshot_date >= CURRENT_DATE - make_interval(days => %s)
@@ -110,7 +94,6 @@ def get_price_snapshots(
         ).fetchall()
     return {
         "card_query": card,
-        "price_snapshots": [dict(r) for r in sold_rows],
         "active_snapshots": [dict(r) for r in active_rows],
     }
 
@@ -126,10 +109,6 @@ def get_card_price_detail(card_name: str, user_id: uuid.UUID = Depends(get_curre
             if alt:
                 used = alt
                 matched_query = alt
-        sold_snaps = db.execute(
-            "SELECT * FROM price_snapshots WHERE card_query = %s ORDER BY snapshot_date DESC LIMIT 30",
-            (used,),
-        ).fetchall()
         active_snaps = db.execute(
             "SELECT * FROM active_price_snapshots WHERE card_query = %s ORDER BY snapshot_date DESC LIMIT 30",
             (used,),
@@ -146,7 +125,6 @@ def get_card_price_detail(card_name: str, user_id: uuid.UUID = Depends(get_curre
     return {
         "card_query": used,
         "matched_query": matched_query,
-        "price_snapshots": [dict(r) for r in sold_snaps],
         "active_snapshots": [dict(r) for r in active_snaps],
         "recent_active": [dict(r) for r in recent_active],
     }

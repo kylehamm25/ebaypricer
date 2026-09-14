@@ -12,6 +12,7 @@ import { ActiveListingsPage } from './pages/ActiveListingsPage'
 import { ListingDetailPage } from './pages/ListingDetailPage'
 import { LotsPage } from './pages/LotsPage'
 import { LotDetailPage } from './pages/LotDetailPage'
+import { InventoryPage } from './pages/InventoryPage'
 import { ValuationPage } from './pages/ValuationPage'
 import { PriceLogPage } from './pages/PriceLogPage'
 import { SettingsPage } from './pages/SettingsPage'
@@ -48,6 +49,7 @@ function AppRoutes() {
         <Route path="/active/:itemId" element={<ListingDetailPage />} />
         <Route path="/lots" element={<LotsPage />} />
         <Route path="/lots/:sku" element={<LotDetailPage />} />
+        <Route path="/inventory" element={<InventoryPage />} />
         <Route path="/valuation" element={<ValuationPage />} />
         <Route path="/log" element={<PriceLogPage />} />
         <Route path="/settings" element={<SettingsPage />} />

@@ -7,7 +7,12 @@ own eBay OAuth token (via ebay_oauth.get_access_token, not the legacy global
 ebay_data.py's per-user sync) instead of a fresh Trading API call.
 
 Every 10 days an item has been listed without selling, its promoted ad rate
-is raised, up to a cap (see marketing_api.compute_target_bid). Requires the
+is raised, up to a cap (see marketing_api.compute_target_bid).
+
+**Runs only when asked.** This is reached from POST /ebay/promotion-boost and
+nothing else - no scheduler round, no pipeline step. Ad rates are real money
+and the changes are not trivially reversible, so nothing here may be put back
+on a timer. Requires the
 user's eBay account to have the sell.marketing scope granted and to be
 eligible for Promoted Listings (active Store subscription, Top Rated/Above
 Standard seller level, accepted terms) - ineligibility is a normal per-user
@@ -163,13 +168,3 @@ def run_user_promotion_boost(user_id: uuid.UUID, campaign_id: str | None = None)
         log.error("Promotion boost failed for user %s: %s", user_id, e)
         _record_job_run(user_id, started, result["status"], result)
         return result
-
-
-def run_all_users_promotion_boost() -> dict:
-    """Run the boost job for every connected user. One user's failure doesn't stop the rest."""
-    with get_db() as conn:
-        user_ids = [r["user_id"] for r in conn.execute("SELECT user_id FROM ebay_connections").fetchall()]
-    results = {}
-    for uid in user_ids:
-        results[str(uid)] = run_user_promotion_boost(uid)
-    return results

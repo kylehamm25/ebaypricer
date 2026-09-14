@@ -4,6 +4,7 @@ import { Link2, Link2Off, Loader2, CheckCircle2 } from 'lucide-react'
 import { api, apiPost } from '../lib/api'
 import type { EbayStatus } from '../types'
 import { ApiUsageBar } from '../components/shared/ApiUsageBar'
+import { ListingDefaultsCard } from '../components/shared/ListingDefaultsCard'
 
 export function SettingsPage() {
   const [connecting, setConnecting] = useState(false)
@@ -128,6 +129,8 @@ export function SettingsPage() {
           </div>
         )}
       </div>
+
+      <ListingDefaultsCard />
 
       <ApiUsageBar />
     </div>

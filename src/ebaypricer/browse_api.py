@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import requests
 
 from .auth import get_ebay_token
+from .cards import searchable_card_query
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ CARD_CATEGORY_ID = "183454"
 
 
 def _build_query(query: str) -> str:
+    # Rewrite the catalogued card number into the form sellers actually title
+    # ("SVP13" -> "SVP013"); see cards.searchable_card_query for the measurements.
+    # Done before truncation so the rewrite can never be the token that gets cut.
+    query = searchable_card_query(query)
     words = query.split()
     if len(words) > MAX_QUERY_WORDS:
         query = " ".join(words[:MAX_QUERY_WORDS])

@@ -33,7 +33,6 @@ export function ApiUsageBar() {
     <div className="p-6 bg-white dark:bg-neutral-800 rounded-lg">
       <h2 className="text-lg font-semibold text-slate-900 dark:text-neutral-100">eBay API Usage</h2>
       <p className="mt-1 text-sm text-slate-500 dark:text-neutral-400">
-        Share of today's quota used, read from eBay rather than estimated.
         {reset && ` Resets ${new Date(reset).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.`}
       </p>
 

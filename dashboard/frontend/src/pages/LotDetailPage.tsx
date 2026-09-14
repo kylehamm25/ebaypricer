@@ -5,15 +5,15 @@ import { ArrowLeft, Pencil } from 'lucide-react'
 import { api } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
+import { CardArt } from '../components/shared/ViewToggle'
 import { LotEditDialog } from '../components/shared/LotEditDialog'
 import { Money } from '../components/shared/Money'
 import { KpiSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { formatCurrency, formatInt } from '../lib/utils'
-import type { LotActiveRow, LotDetailResponse, LotSoldRow } from '../types'
+import type { LotActiveRow, LotDetailResponse, LotSoldRow, LotUnlistedRow } from '../types'
 
-function sprite(url: string | undefined) {
-  if (!url) return null
-  return <img src={url} alt="" width={48} height={48} style={{ imageRendering: 'pixelated' }} />
+function art(url: string | null | undefined) {
+  return <CardArt artUrl={url} className="w-12 rounded" />
 }
 
 function Dash() {
@@ -70,7 +70,9 @@ export function LotDetailPage() {
       )}
 
       {lot ? (
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className={`grid grid-cols-1 gap-4 ${
+          lot.unlisted_items > 0 ? 'md:grid-cols-5' : 'md:grid-cols-4'
+        }`}>
           <KpiCard
             title="Cost"
             value={lot.cost != null ? formatCurrency(lot.cost) : '—'}
@@ -84,6 +86,14 @@ export function LotDetailPage() {
             title="Listed Value"
             value={formatCurrency(lot.listed_value)}
           />
+          {/* Only when there is unlisted stock: a zero card on every finished lot
+              would take a slot from figures that always mean something. */}
+          {lot.unlisted_items > 0 && (
+            <KpiCard
+              title="Unlisted Value"
+              value={formatCurrency(lot.unlisted_value)}
+            />
+          )}
           <KpiCard
             title="Realized P/L"
             value={lot.realized_profit != null ? formatCurrency(lot.realized_profit) : '—'}
@@ -109,7 +119,7 @@ export function LotDetailPage() {
         ) : data && data.active.length > 0 ? (
           <DataTable<LotActiveRow>
             columns={[
-              { key: 'sprite_url', header: '', className: 'w-16', render: (r) => sprite(r.sprite_url) },
+              { key: 'sprite_url', header: '', className: 'w-16', render: (r) => art(r.card_image_url) },
               {
                 key: 'title',
                 header: 'Title',
@@ -179,6 +189,73 @@ export function LotDetailPage() {
         )}
       </section>
 
+      {/* Cards from this lot still in a box. Above Sold because they are the part
+          still needing a decision, and hidden entirely when there are none - most
+          lots are fully listed and an empty panel on every one of them is noise. */}
+      {data && data.unlisted.length > 0 && (
+        <section className="space-y-2">
+          <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
+            Unlisted
+            <span className="text-slate-400 font-normal"> ({formatInt(data.lot.unlisted_items)})</span>
+          </h2>
+          <DataTable<LotUnlistedRow>
+            columns={[
+              { key: 'sprite_url', header: '', className: 'w-16', render: (r) => art(r.card_image_url) },
+              {
+                key: 'name',
+                header: 'Card',
+                className: 'max-w-sm',
+                render: (r) => (
+                  <span className="text-slate-800 dark:text-neutral-100">{r.name}</span>
+                ),
+              },
+              {
+                key: 'condition',
+                header: 'Condition',
+                className: 'w-36',
+                render: (r) => r.condition
+                  ? <span className="text-xs text-slate-600 dark:text-neutral-300">{r.condition}</span>
+                  : <Dash />,
+              },
+              {
+                key: 'location',
+                header: 'Location',
+                className: 'w-36',
+                render: (r) => r.location
+                  ? <span className="text-xs text-slate-600 dark:text-neutral-300">{r.location}</span>
+                  : <Dash />,
+              },
+              {
+                key: 'quantity',
+                header: 'Qty',
+                className: 'w-14',
+                render: (r) => <span className="tabular-nums text-xs">{formatInt(r.quantity)}</span>,
+              },
+              {
+                key: 'total_value',
+                header: 'Est. Value',
+                className: 'w-28',
+                render: (r) => r.total_value == null
+                  ? <span className="text-slate-400 text-xs">not priced</span>
+                  : (
+                    <span className="tabular-nums">
+                      {formatCurrency(r.total_value)}
+                      {/* Whose number it is. A stated price is not market data and
+                          the page should not let the two blur together. */}
+                      {r.value_status === 'manual' && (
+                        <span className="ml-1 text-xs text-slate-400">yours</span>
+                      )}
+                    </span>
+                  ),
+              },
+            ]}
+            data={data.unlisted}
+            keyField="id"
+            onRowClick={() => navigate('/inventory')}
+          />
+        </section>
+      )}
+
       <section className="space-y-2">
         <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
           Sold{data ? <span className="text-slate-400 font-normal"> ({data.sold.length})</span> : null}
@@ -188,7 +265,7 @@ export function LotDetailPage() {
         ) : data && data.sold.length > 0 ? (
           <DataTable<LotSoldRow>
             columns={[
-              { key: 'sprite_url', header: '', className: 'w-16', render: (r) => sprite(r.sprite_url) },
+              { key: 'sprite_url', header: '', className: 'w-16', render: (r) => art(r.card_image_url) },
               {
                 key: 'sale_date',
                 header: 'Date',

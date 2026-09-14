@@ -5,6 +5,9 @@ export interface DashboardKpis {
   revenue: number
   shipping: number
   fees: number
+  /** Real per-order net for the month (gross - fees - debits - postage), the same
+   *  figure the Sold page reports. Never revenue minus fees. */
+  earnings: number
   active_listings: number
   trends: { date: string; count: number; revenue: number }[]
   top_items: { title: string; count: number; avg_price: number; revenue: number }[]
@@ -22,7 +25,9 @@ export interface SoldSummary {
   total_revenue: number
   total_shipping: number
   total_fees: number
-  /** Real per-order net from the Finances API (gross - fees - debits), not revenue minus fees. */
+  /** Real per-order net from the Finances API (gross - fees - debits - postage), not
+   *  revenue minus fees. Shipping revenue is inside the gross, so the label we bought
+   *  is taken back out. */
   total_earnings: number
   /** Orders whose fee data hasn't posted yet, so they contribute 0 to total_earnings. */
   orders_missing_net: number
@@ -86,24 +91,16 @@ export interface PriceChangesResponse {
 
 export interface PriceComparison {
   card_query: string
-  sold_weighted_avg: number | null
-  sold_sample: number | null
+  /** Mean competitor ITEM price, shipping excluded. */
   active_avg: number | null
+  /** Mean shipping charged across the same comp pool. Null means no comp reported
+   *  one - not that they ship free. */
+  avg_shipping: number | null
+  /** active_avg + avg_shipping: what a buyer actually pays a competitor. Null
+   *  whenever avg_shipping is, so it is never a disguised item-only figure. */
+  active_avg_total: number | null
   active_min: number | null
   active_sample: number | null
-  spread: number | null
-}
-
-export interface PriceSnapshot {
-  card_query: string
-  snapshot_date: string
-  sample_size: number | null
-  avg_price: number | null
-  median_price: number | null
-  min_price: number | null
-  max_price: number | null
-  std_dev: number | null
-  weighted_avg: number | null
 }
 
 export interface ActiveSnapshot {
@@ -113,19 +110,6 @@ export interface ActiveSnapshot {
   avg_price: number | null
   min_price: number | null
   max_price: number | null
-}
-
-export interface SoldListing extends Record<string, unknown> {
-  item_id?: string
-  card_query?: string
-  title: string
-  price: number | null
-  currency?: string | null
-  condition: string | null
-  listing_type: string | null
-  sold_date: string | null
-  url?: string | null
-  pulled_at?: string | null
 }
 
 export interface ActiveMarketListing extends Record<string, unknown> {
@@ -145,7 +129,6 @@ export interface ActiveMarketListing extends Record<string, unknown> {
 export interface CardPriceDetail {
   card_query: string
   matched_query?: string | null
-  price_snapshots: PriceSnapshot[]
   active_snapshots: ActiveSnapshot[]
   recent_active: ActiveMarketListing[]
 }
@@ -216,15 +199,16 @@ export interface ActiveListing extends Record<string, unknown> {
   Quantity: number | string | null
   'Estimated Fees': number | string | null
   'Estimated Net': number | string | null
-  'Recent Sold Avg': number | string | null
-  'Price vs Sold Avg': number | string | null
-  'Recent Sold Count': number | string | null
   'Last Checked': string | null
   'Active Avg (Top 5)': number | string | null
   'Price Accuracy': number | string | null
   'Search Position': number | string | null
   'Suggested Price': number | string | null
   'Suggested Price At': string | null
+  /** True when the catalog match was set by hand. The sync then leaves `Card`
+   *  alone instead of re-deriving it from the title (migration 0013). Absent on
+   *  the list endpoint - only the detail endpoint reads it. */
+  'Card Locked'?: boolean
   'Suggested Price Basis': SuggestedPriceBasis | null
   /** Pokemon species pixel sprite, matched off the listing title. */
   sprite_url?: string
@@ -265,6 +249,14 @@ export interface Lot extends Record<string, unknown> {
   notes: string | null
   active_items: number
   listed_value: number
+  /** Bought under this lot, catalogued, not listed yet (the Inventory page).
+   *  Counted apart from active_items - nobody can buy these. */
+  unlisted_items: number
+  unlisted_entries: number
+  unlisted_value: number
+  /** Unlisted rows with no price to contribute, so unlisted_value isn't read as
+   *  covering all of them. */
+  unlisted_unvalued: number
   sold_items: number
   sold_gross: number
   sold_net: number
@@ -284,10 +276,23 @@ export interface LotTotals {
   cost: number
   sold_net: number
   listed_value: number
+  unlisted_value: number
+  unlisted_items: number
   realized_profit: number
+  /** Sold net + listed value + unlisted value − cost. Optimistic on two counts:
+   *  no fees are taken off the unsold half, and the unlisted part isn't even on
+   *  eBay yet. Unpriced rows contribute nothing rather than being guessed at. */
   projected_profit: number
   tracked_lots: number
   untracked_lots: number
+}
+
+/** One choice in a lot-SKU picker: the buying lots from `GET /lots` merged with
+ *  whatever SKUs inventory rows already carry, so a card can be assigned to a lot
+ *  that has no inventory against it yet. */
+export interface LotOption {
+  sku: string
+  title?: string | null
 }
 
 export interface LotsResponse {
@@ -310,6 +315,7 @@ export interface LotSoldRow extends Record<string, unknown> {
   item_price: number | null
   line_gross: number | null
   line_net: number | null
+  card_image_url?: string | null
   sprite_url?: string
 }
 
@@ -328,13 +334,31 @@ export interface LotActiveRow extends Record<string, unknown> {
   start_date: string | null
   estimated_net: number | null
   suggested_price: number | null
+  card_image_url?: string | null
   sprite_url?: string
+}
+
+/** One unlisted row behind a lot, valued exactly as the Inventory page values it. */
+export interface LotUnlistedRow extends Record<string, unknown> {
+  id: number
+  name: string
+  card_query: string | null
+  condition: string | null
+  quantity: number
+  location: string | null
+  cost: number | null
+  unit_value: number | null
+  total_value: number | null
+  value_status: 'ok' | 'manual' | 'unresearched' | 'no_card'
+  card_image_url?: string | null
+  sprite_url: string | null
 }
 
 export interface LotDetailResponse {
   lot: Lot
   sold: LotSoldRow[]
   active: LotActiveRow[]
+  unlisted: LotUnlistedRow[]
   cost_tracking_enabled: boolean
 }
 
@@ -388,4 +412,215 @@ export interface RateLimit {
 export interface RateLimitsResponse {
   limits: RateLimit[]
   cached: boolean
+}
+
+export interface InventoryItem {
+  id: number
+  name: string
+  /** Catalog identity, when the row is a catalog card. Null for sealed, bulk and
+   *  anything typed free-hand - those rows never get a value estimate. */
+  card_query: string | null
+  set_name: string | null
+  number: string | null
+  condition: string | null
+  quantity: number
+  location: string | null
+  sku: string | null
+  /** Per unit, not for the whole row. */
+  cost: number | null
+  total_cost: number | null
+  /** A value stated by hand, per unit. Wins over comps and is NOT scaled by the
+   *  condition multiplier - a price you typed is already the value of the card in
+   *  hand. Null when the row is priced from comps or not priced at all. */
+  manual_value: number | null
+  /** Web-hosted photos of this card: up to 24 https:// links separated by a pipe,
+   *  first one first — eBay's own format, and the order matters because its prefill
+   *  flow reads the first link to work out what the item is. Null before migration
+   *  0016 and for anything never photographed. NOT the same as `card_image_url`,
+   *  which is catalog art of the printing rather than a photo of this card. */
+  photo_urls: string | null
+  notes: string | null
+  created_at: string | null
+  /** When this row left the pile — you pressed Archive after listing the card.
+   *  Null while it is still in the pile. NOT a claim that the card is listed on
+   *  eBay: active_listings remains the only thing that knows that. */
+  archived_at: string | null
+  /** Real card art, resolved from card_query server-side. Null for rows with no
+   *  catalog card, and for a card_query the catalog can no longer resolve. */
+  card_image_url: string | null
+  /** The eBay search the comps came from, openable so the pool can be eyeballed.
+   *  Null only for a row with no card_query - there is no search behind those. */
+  search_url: string | null
+  /** Cached comp average x the condition multiplier. Never a suggested price, and
+   *  never triggers an eBay call - see routers/inventory.py. */
+  unit_value: number | null
+  total_value: number | null
+  /** 'ok' = from comps; 'manual' = the stated price above; 'unresearched' = a
+   *  catalog card no run has priced yet; 'no_card' = nothing to price. */
+  value_status: 'ok' | 'manual' | 'unresearched' | 'no_card'
+  value_date: string | null
+  comps: number | null
+  condition_known: boolean
+  /** False means the snapshot predates comp filtering, so it may average graded
+   *  slabs and multi-card lots. Null when there is no value at all. */
+  pool_filtered: boolean | null
+}
+
+export interface InventoryResponse {
+  items: InventoryItem[]
+  totals: {
+    entries: number
+    units: number
+    value: number
+    /** Entries the value figure covers - the rest have no cached comps. */
+    valued_entries: number
+    cost: number
+    costed_entries: number
+  }
+  locations: string[]
+  skus: string[]
+  /** False when migration 0011 hasn't been run; the page says so instead of erroring. */
+  inventory_enabled: boolean
+  /** Whether the server can host photos (Supabase credentials present). False makes
+   *  the edit dialog explain itself rather than offering an uploader that fails. */
+  photo_hosting_enabled: boolean
+}
+
+/** One inventory row as a line in the eBay File Exchange CSV. Everything here was
+ *  decided server-side — the price especially, which is derived in
+ *  services/listing_csv.py so no pricing math ever lands in the browser. */
+export interface ListingDraft {
+  id: number
+  name: string
+  /** 80 characters or fewer, ending in the grade abbreviation that
+   *  trading_api.resolve_condition reads back once the listing is live. */
+  title: string
+  price: number
+  quantity: number
+  sku: string | null
+  condition: string | null
+  /** eBay's own ungraded-condition wording, which is not the same vocabulary as
+   *  the app's grades. Blank when the row's condition maps to neither. */
+  card_condition: string
+  value_status: InventoryItem['value_status']
+  unit_value: number
+  /** Pipe-separated links, straight from the row. eBay rejects a listing with no
+   *  photo (21919136), so an empty one carries a warning. */
+  photo_urls: string
+  /** Things worth knowing before uploading — a title that will never get an
+   *  automatic price, a grade eBay won't recognise, a price raised to the floor. */
+  warnings: string[]
+}
+
+/** A selected row that can't become a listing, and why. */
+export interface ListingSkip {
+  id: number
+  name: string
+  reason: string
+}
+
+/** Which of eBay's two templates to build. 'draft' lands rows in
+ *  ebay.com/sh/lst/drafts to finish in the listing tool and needs no business
+ *  policies at all; 'add' creates the listings outright and needs all four
+ *  Settings fields. */
+export type ListingCsvMode = 'draft' | 'add'
+
+export interface ListingCsvResponse {
+  mode: ListingCsvMode
+  /** The whole file. Empty string when nothing was listable. Always a CSV — eBay
+   *  rejects a workbook for both of these templates ("stick to commas, semicolons,
+   *  or tabs"); only the separate prefill template is an .xlsx. */
+  csv: string
+  drafts: ListingDraft[]
+  skipped: ListingSkip[]
+  /** Postage the price floor assumed for the chosen shipping profile. $0 for a
+   *  profile SHIPPING_PRICE_MAP doesn't know, which is worth showing. */
+  shipping_charge: number
+  filename: string
+}
+
+/** Standing listing settings, the four things the CSV needs that an inventory row
+ *  can't know. Stored per user (migration 0015), not per browser: a policy name
+ *  that doesn't match Seller Hub is the commonest reason an upload is rejected, so
+ *  getting it right once should hold on every machine you sign in from. */
+export interface ListingDefaults {
+  /** ZIP or city eBay shows buyers. */
+  item_location: string
+  /** Must stay a name SHIPPING_PRICE_MAP knows, or the CSV's price floor assumes
+   *  postage is free. */
+  shipping_profile: string
+  payment_profile: string
+  return_profile: string
+  /** Optional, unlike the four above - never gates the CSV (migration 0018). Null
+   *  means no seller-set minimum; when set, the Listing CSV button won't open a
+   *  listing below it even when fees/postage alone would allow less. */
+  min_price: number | null
+}
+
+/** Which of eBay's blank prefill templates is on file. Never the workbook itself —
+ *  only the export endpoint reads those bytes. */
+export interface PrefillTemplateMeta {
+  name: string
+  uploaded_at: string | null
+  size: number
+}
+
+export interface ListingDefaultsResponse {
+  listing_defaults: ListingDefaults
+  /** False until db/migrations/0015_listing_defaults.sql has been run. */
+  listing_defaults_enabled: boolean
+  /** Fields still to fill in. A CSV can't be built while this is non-empty. */
+  missing: (keyof ListingDefaults)[]
+  /** Null when none is stored — and also when migration 0017 hasn't been run, since
+   *  both leave the page asking for a file. */
+  prefill_template: PrefillTemplateMeta | null
+}
+
+/** What `PUT /settings/listing-defaults` adds on top: how many inventory rows it just
+ *  raised to a newly-saved minimum (0 when min_price is null, or nothing was below
+ *  it). Only this endpoint enforces the minimum against the existing pile - a plain
+ *  GET never mutates anything, so it doesn't carry this field. */
+export interface ListingDefaultsSaveResponse extends ListingDefaultsResponse {
+  raised_to_minimum: number
+}
+
+/** What `PUT /settings/prefill-template` adds on top: what it found in the file it
+ *  just accepted, so a template eBay has revised is visible immediately. */
+export interface PrefillTemplateUpload extends ListingDefaultsResponse {
+  sheet: string
+  columns: string[]
+  missing_columns: string[]
+}
+
+/** One inventory row as a line in eBay's prefill listing template. No price: that
+ *  flow only asks what the item IS, and the price is set later. */
+export interface PrefillDraft {
+  id: number
+  name: string
+  /** The lot SKU, deliberately not unique per row — routers/lots.py groups all
+   *  money by exactly this string. */
+  custom_label: string
+  /** Pipe-separated https:// links, capped at eBay's 24. */
+  photo_urls: string
+  title: string
+  category: string
+  /** `Name=Value` pairs joined by pipes, empty values dropped. */
+  aspects: string
+  warnings: string[]
+}
+
+export interface PrefillResponse {
+  /** The filled workbook, base64-encoded — the same file that was uploaded, with
+   *  rows written into it and every other sheet and style untouched. */
+  workbook: string
+  filename: string
+  drafts: PrefillDraft[]
+  skipped: ListingSkip[]
+  /** The sheet that was written to, and the first row written. */
+  sheet: string
+  first_row: number
+  /** Which of the five known columns the template actually had, and which it
+   *  didn't — a template missing the photo or aspects column still works. */
+  columns: string[]
+  missing_columns: string[]
 }

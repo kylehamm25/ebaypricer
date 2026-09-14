@@ -24,6 +24,19 @@ export function formatInt(n: number | string | null | undefined): string {
   return v.toLocaleString()
 }
 
+/** A lot is done when nothing from it is still listed and something actually
+ *  sold. A lot with nothing listed AND nothing sold isn't complete - it just has
+ *  no data yet (a cost entered before the cards were listed), so it stays unlabelled. */
+export function isLotComplete(lot: {
+  active_items: number
+  sold_items: number
+  unlisted_items?: number
+}): boolean {
+  // Cards still sitting in a box are unfinished business just as much as listed
+  // ones, so a lot with unlisted stock is not done however much of it has sold.
+  return lot.active_items === 0 && (lot.unlisted_items ?? 0) === 0 && lot.sold_items > 0
+}
+
 /** Tailwind text colour for a profit/loss figure: green above zero, red below,
  *  muted when there is no figure at all. Shared so every page colours money the
  *  same way. */

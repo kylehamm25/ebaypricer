@@ -154,7 +154,21 @@ def run_sold_refresh() -> dict:
 def run_active_refresh() -> dict:
     """Runs get_active.py (refreshes the Active Listings sheet from eBay), syncs it into
     Postgres, then kicks off shared price research so pricing columns (Sold Avg, Spread,
-    Search Rank) reflect the refreshed listing set too."""
+    Search Rank) reflect the refreshed listing set too.
+
+    The research is forced: pressing Refresh means "go and look now", and unforced it
+    short-circuits on _all_cards_researched_today, so the second refresh of any day
+    left every comp figure and suggested price exactly as it was.
+
+    That is a deliberate exception to the ebay-api-rate-limits skill's "never pass
+    force=True from a request-triggered path". The cost scales with the catalog: one
+    Browse search per card for comps plus up to three memoized search-position
+    queries, so ~200 cards is a few hundred Browse calls against a 5,000/day limit,
+    plus ~200 x 0.5s of inter-call sleep. MAX_RUN_SECONDS (45 min) and the advisory
+    lock still bound one run, and the lock stops repeated clicks stacking - but
+    someone refreshing all day can still exhaust the daily quota. Keep the
+    scheduler's own round in services/ebay_data.py unforced so the automatic path
+    stays cheap."""
 
     def work() -> dict:
         result = _run_script("scripts/get_active.py")
@@ -162,7 +176,7 @@ def run_active_refresh() -> dict:
             tail = "\n".join(result.stdout.splitlines()[-10:]) + "\n" + "\n".join(result.stderr.splitlines()[-10:])
             return {"status": "error", "exit_code": result.returncode, "log_tail": tail[-1500:]}
         excel = sync_excel()
-        research = run_shared_price_research()
+        research = run_shared_price_research(force=True)
         return {"status": "ok", "exit_code": 0, "excel": excel, "price_research": research}
 
     return _run_stage(ACTIVE_JOB_NAME, _ACTIVE_GUARD, _ACTIVE_LOCK_KEY, work)

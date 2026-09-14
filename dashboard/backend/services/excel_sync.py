@@ -6,8 +6,11 @@ from decimal import Decimal, InvalidOperation
 
 from openpyxl import load_workbook
 
+from ebaypricer.cards import card_number
+
 from dashboard.backend.config import DEFAULT_USER_ID, EXCEL_PATH
 from dashboard.backend.database import get_db
+from dashboard.backend.services.upsert_rules import existing_columns, set_clause
 
 log = logging.getLogger(__name__)
 
@@ -42,9 +45,6 @@ _ACTIVE_COLUMNS = {
     "Quantity": "quantity",
     "Estimated Fees": "estimated_fees",
     "Estimated Net": "estimated_net",
-    "Recent Sold Avg": "recent_sold_avg",
-    "Price vs Sold Avg": "price_vs_sold_avg",
-    "Recent Sold Count": "recent_sold_count",
     "Last Checked": "last_checked",
     "Active Avg (Top 5)": "active_avg_top5",
     "Price Accuracy": "price_accuracy",
@@ -52,11 +52,11 @@ _ACTIVE_COLUMNS = {
 }
 
 _DATE_COLUMNS = {"sale_date", "start_date", "last_checked"}
-_INT_COLUMNS = {"quantity", "watchers", "days_listed", "recent_sold_count", "search_position"}
+_INT_COLUMNS = {"quantity", "watchers", "days_listed", "search_position"}
 _NUM_COLUMNS = {
     "item_price", "shipping", "order_total", "total_fees", "order_earnings",
     "price", "shipping_charge", "estimated_fees", "estimated_net",
-    "recent_sold_avg", "price_vs_sold_avg", "active_avg_top5", "price_accuracy",
+    "active_avg_top5", "price_accuracy",
     "total_value", "ad_rate",
 }
 
@@ -119,19 +119,31 @@ def _coerce(col: str, v):
 
 
 def _upsert_rows(conn, table: str, columns: dict[str, str], key_cols: list[str],
-                 rows: list[dict], skip_cols: set[str] | None = None) -> int:
+                 rows: list[dict], skip_cols: set[str] | None = None,
+                 extra_cols: list[str] | None = None) -> int:
     """skip_cols: columns mapped here but absent from the sheet this run. They are left
     out of the statement entirely rather than written as NULL - writing NULL would let a
     column that merely went missing from the workbook ERASE good values already in
     Postgres (this is what happened to ad_rate). Omitted columns keep whatever the row
-    already has; genuinely new rows just get the database default."""
+    already has; genuinely new rows just get the database default.
+
+    extra_cols: columns with no Excel header at all - computed values like `number`,
+    set directly on each row dict by the caller rather than copied from a cell. Added
+    only when the database actually has them, the same "degrade rather than crash"
+    rule skip_cols follows for header-driven columns, but checked against the schema
+    instead of the sheet."""
     if not rows:
         return 0
     skip = skip_cols or set()
     all_cols = key_cols + [c for c in columns.values() if c not in key_cols and c not in skip]
+    if extra_cols:
+        present = existing_columns(conn, table)
+        all_cols += [c for c in extra_cols if c not in all_cols and c in present]
     col_sql = ", ".join(all_cols)
     placeholders = ", ".join("%s" for _ in all_cols)
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in all_cols if c not in key_cols)
+    # set_clause, not a bare EXCLUDED assignment: a hand-corrected column stays put
+    # while its lock is set - see services/upsert_rules.py.
+    updates = ", ".join(set_clause(conn, table, c) for c in all_cols if c not in key_cols)
     insert_sql = (
         f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders}) "
         f"ON CONFLICT ({', '.join(key_cols)}) DO UPDATE SET {updates}"
@@ -193,13 +205,19 @@ def sync_excel(force: bool = False) -> dict:
                     if col is None:
                         continue
                     item[col] = _coerce(col, v)
+                if table == "active_listings":
+                    # No Excel header carries this - it's derived from the card
+                    # identity `card` just resolved to, purely so the Active Listings
+                    # page can sort by card number in SQL (see migration 0019).
+                    item["number"] = card_number(item.get("card"))
                 if all(item.get(k) is not None for k in key_cols[1:]):
                     rows.append(item)
 
             if not rows:
                 result[sheet_name] = "0 rows synced"
                 continue
-            count = _upsert_rows(conn, table, col_map, key_cols, rows, skip_cols)
+            extra_cols = ["number"] if table == "active_listings" else None
+            count = _upsert_rows(conn, table, col_map, key_cols, rows, skip_cols, extra_cols)
             result[sheet_name] = f"{count} rows synced"
 
             if table == "active_listings":

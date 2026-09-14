@@ -77,12 +77,14 @@ not chosen.
 
 ## The parts that surprise people
 
-**Sold comps do not come from eBay.** eBay's Browse API has no sold search; it
-silently ignores the `soldDate` filter and returns ordinary active listings.
-Sold-side research uses TCGdex/TCGPlayer market price via
-`ebaypricer.cards.lookup_market_price`, which yields one price point, so those
-snapshots are `sample_size=1` rather than an aggregate. See the note at the top of
-`browse_api.py`. Do not recreate a "sold" search against Browse.
+**There are no sold comps, at all.** eBay's Browse API has no sold search; it
+silently ignores the `soldDate` filter and returns ordinary active listings. The
+stand-in was a TCGdex/TCGPlayer market price (`sample_size=1` - one asking-price
+point, not a record of any sale), and that has been removed too, because it read as
+"sold" everywhere it surfaced. The model has never taken a sold input and must not
+gain one: anchors come from the active comp pool only. Do not recreate a "sold"
+search against Browse, and do not reintroduce a market-price lookup relabelled as
+sold data. See the note at the top of `browse_api.py`.
 
 **Condition is a multiplier, not a comp filter.** Our listings carry real TCG
 grades (`resolve_condition` in `trading_api.py`), but competitor listings do not —
@@ -108,7 +110,11 @@ so `comp_filter.py` screens the *results* before any aggregate is computed:
   keywords), multi-card lots, print-defect one-offs, and foreign-market or
   non-English prints.
 - **soft** drops (restored together if the pool falls below `MIN_FILTERED_COMPS`) —
-  name mismatch, card-number mismatch, reverse-holo mismatch, Shadowless/1st Edition.
+  name mismatch, card-number mismatch, reverse-holo mismatch, Shadowless/1st Edition,
+  and — for cards from a set with them (151, Prismatic Evolutions, Black Bolt, White
+  Flare) — a Poke Ball/Master Ball pattern mismatch: each ball pattern trades apart
+  from plain reverse holo and from the other pattern of the same card, and the
+  inventory-page card search is what tags a row with one (`lib/cardFinish.ts`).
 
 Comps are therefore not comparable to graded-slab pricing, and the model must never
 be pointed at a graded listing and expected to be right. Every run records what it

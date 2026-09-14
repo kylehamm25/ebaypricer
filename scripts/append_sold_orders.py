@@ -11,7 +11,13 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from ebaypricer.auth import get_access_token
 from ebaypricer.trading_api import fetch_sold_orders
-from ebaypricer.finances import FinancesApiError, fetch_finance_fees, merge_fees_into_rows, _closest_by_date
+from ebaypricer.finances import (
+    FinancesApiError,
+    estimated_label_cost,
+    fetch_finance_fees,
+    merge_fees_into_rows,
+    _closest_by_date,
+)
 from ebaypricer.cards import enrich_rows
 from ebaypricer.excel import (
     HEADER_FILL, HEADER_FONT, DATA_FONT,
@@ -161,6 +167,7 @@ def update_existing_earnings(
     date_col = col_map.get("Sale Date")
     fees_col = col_map.get("Total eBay Fees")
     price_col = col_map.get("Item Price")
+    ship_col = col_map.get("Shipping")
     if earn_col is None or oid_col is None:
         return 0
     updated = 0
@@ -187,6 +194,19 @@ def update_existing_earnings(
             updated += 1
         resolved.append((row, real_oid))
 
+    def _shipping(group: list, col: int | None) -> float:
+        """Order-level, so on a multi-line order it sits on the primary row and the
+        continuation rows are blank - take the first row that actually has it."""
+        if col is None:
+            return 0.0
+        for row in group:
+            try:
+                if row[col].value is not None:
+                    return float(row[col].value)
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
     def _price(row: tuple) -> float:
         try:
             return float(row[price_col].value or 0) if price_col is not None else 0.0
@@ -204,7 +224,11 @@ def update_existing_earnings(
         fees = fees_by_order.get(real_oid)
         total_fees = sum(fees.values()) if fees else 0.0
         debit = (debits_by_order or {}).get(real_oid, 0.0)
-        api_earn = round(gross - total_fees - debit, 2)
+        # gross is totalFeeBasisAmount - what fees are charged ON, buyer-paid postage
+        # included - so the label still has to come out of it. Same deduction
+        # merge_fees_into_rows applies, or a row would mean one thing when it was
+        # written and another when it was backfilled.
+        api_earn = round(gross - total_fees - debit - estimated_label_cost(_shipping(group, ship_col)), 2)
 
         if len(group) > 1:
             # Multi-line order: order-level values belong only on the primary line

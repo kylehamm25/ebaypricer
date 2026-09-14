@@ -29,6 +29,10 @@ export async function apiPut(path: string, body?: unknown): Promise<unknown> {
   return send('PUT', path, body)
 }
 
+export async function apiDelete(path: string): Promise<unknown> {
+  return send('DELETE', path)
+}
+
 async function send(method: string, path: string, body?: unknown): Promise<unknown> {
   const h = await headers()
   if (body !== undefined) h['Content-Type'] = 'application/json'

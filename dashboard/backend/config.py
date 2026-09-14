@@ -41,12 +41,6 @@ EBAY_SYNC_INTERVAL_HOURS = float(_env("EBAY_SYNC_INTERVAL_HOURS", "6"))
 # Legacy pipeline run (Phase 7): runs scripts/main.py then ingests workbook + SQLite
 EBAY_PIPELINE_INTERVAL_HOURS = float(_env("EBAY_PIPELINE_INTERVAL_HOURS", "1"))
 
-# Per-user promotion ad-rate boosting (Phase 4). Requires the connecting user's eBay
-# account to have the sell.marketing scope granted (not in EBAY_SCOPES by default -
-# it's only issued to accounts with an eBay Store subscription that accepted Promoted
-# Listings terms; add it to EBAY_SCOPES if you want boosting for newly-connected users).
-EBAY_PROMOTION_INTERVAL_HOURS = float(_env("EBAY_PROMOTION_INTERVAL_HOURS", "24"))
-
 # Shared marketplace price research (Phase 3): researches every card any connected
 # user currently has listed (not just the legacy Excel pipeline's account) and writes
 # derived pricing columns onto each user's own active_listings rows.

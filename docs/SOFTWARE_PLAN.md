@@ -18,7 +18,6 @@
 |   price_active_listings.py -> price_snapshots + sold_listings |
 |   avg_active_price.py      -> active_price_snapshots +        |
 |                              listing_positions               |
-|   auto_boost_promotion.py  -> marketing promotions            |
 +------------------+-------------------------------------------+
                    |  (eBay OAuth in .env: EBAY_APP_ID, EBAY_SECRET,
                    |   EBAY_DEV_ID, REFRESH_TOKEN - single account)
@@ -86,6 +85,8 @@
 | `sold.py` | `GET /sold/list` (page/card/dates/sort), `/sold/summary` (deduped per order; earnings = revenue - fees), `/sold/trends`, `/sold/by-card` |
 | `active.py` | `/active/list` (card/sort incl. numeric CAST), `/item/{item_id}`, `/summary`, `/by-card-value`, `/value-buckets`, `/value-trend`, `/days-distribution` |
 | `lots.py` | `GET /lots` (per-SKU cost, sold net, listed value, profit), `PUT /lots/{sku}` (upsert cost) |
+| `active.py` (cont.) | `PUT /active/item/{id}/card` — hand-set the catalog match, locked against sync re-derivation (migration 0013) |
+| `inventory.py` | `GET /inventory` (unlisted pile, filters + cached value), `POST /inventory`, `PUT|DELETE /inventory/{id}`, `POST /inventory/bulk-update` (only the fields sent; absent = leave, null = clear), `POST /inventory/bulk-delete`, `POST /inventory/{id}/archive|unarchive`, `POST /inventory/bulk-archive` |
 | `pricing.py` | `/pricing/comparisons`, `/snapshots`, `/cards/{card_name}` (fuzzy match, 10 recent sold) |
 | `pipeline.py` | `/pipeline/status` (in-memory state + log mtime), `/logs`, `POST /run` (subprocess `scripts/main.py`) |
 | `promotion.py` | promotions endpoints |
@@ -121,6 +122,8 @@
 **`ebay_connections`** — PK (`user_id`); `ebay_user_id text, refresh_token text (encrypted), scopes text, token_issued_at timestamptz, token_expires_at timestamptz, last_synced_at timestamptz, sync_status text`
 
 **`price_change_log`** (migration 0005) — `id` PK; `user_id uuid, item_id text, old_price numeric(10,2), new_price numeric(10,2), source text ('single'|'bulk'), changed_at timestamptz`. Append-only history of price revisions this app applied to live eBay listings — `active_listings.price` is overwritten in place, so nothing else records what a listing used to cost. Also drives the reprice cooldown: `suggested_price.py` declines to suggest for `REPRICE_COOLDOWN_DAYS` (5) after a change lands, so the model doesn't ask to re-edit a price that hasn't had time to work. Only *applied* changes are logged — a revision eBay rejected must not start a cooldown.
+
+**`inventory`** (migration 0011; `manual_value` added in 0012, `archived_at` in 0014) — `id` PK; `user_id uuid, name text, card_query text, set_name text, number text, condition text, quantity int (check > 0), location text, sku text, cost numeric(10,2) *(per unit)*, manual_value numeric(10,2) *(per unit, hand-stated; wins over comps, condition multiplier NOT applied)*, notes text, created_at/updated_at timestamptz`. Cards owned but not yet listed — the gap between a lot being bought and its cards reaching `active_listings`. Unlike every other table here it is **entirely hand-entered**: eBay has no idea what is in a box on the desk, so nothing syncs, overwrites or reconciles it. Surrogate id rather than a natural key because the same card in the same condition can sit in two boxes and both rows are real. There is deliberately **no "listed" status flag** — a card that goes up for sale has its row deleted or decremented and `active_listings` takes over; two tables both claiming to know whether something is listed is how they end up disagreeing. `card_query` is the same catalog identity used by `active_price_snapshots`, which is what lets the page show a value; it is nullable, and sealed/bulk rows simply have none. Value is read from the **shared snapshots only and never researched in the request** — a pile can hold hundreds of cards and one page load would otherwise fire hundreds of Browse calls.
 
 **`lots`** (migration 0008; `title` added in 0009) — PK (`user_id, sku`); `title text, cost numeric(10,2), purchased_at date, source text, notes text, updated_at timestamptz`. The purchase cost of a buying lot, keyed by the SKU already stamped on its listings and orders (`PULL`, `NONTCG` and rows with no SKU are not purchased lots and are excluded from the page). Deliberately holds *only* what can't be derived — units sold, net proceeds, live items and current listed value are aggregated on read from `sold_orders` + `active_listings` by `routers/lots.py`, so a lot appears on the page as soon as its SKU exists in the data and there is no "create the lot first" step. Note the multi-item-order caveat recorded there: eBay reports order-level money on one row per order, so per-SKU net has to be allocated across the order's lines, never summed directly.
 

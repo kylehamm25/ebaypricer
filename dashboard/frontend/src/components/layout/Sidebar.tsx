@@ -1,7 +1,7 @@
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useEffect, useRef } from 'react'
 import {
-  LayoutDashboard, ShoppingCart, Package, Boxes, History, LogOut, Settings, Sun, Moon, Calculator,
+  LayoutDashboard, ShoppingCart, Package, Boxes, History, LogOut, Settings, Sun, Moon, Calculator, Archive,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { useAuth } from '../../lib/auth-context'
@@ -12,6 +12,7 @@ const links = [
   { to: '/sold', label: 'Sold Orders', icon: ShoppingCart },
   { to: '/active', label: 'Active Listings', icon: Package },
   { to: '/lots', label: 'Lots', icon: Boxes },
+  { to: '/inventory', label: 'Inventory', icon: Archive },
   { to: '/valuation', label: 'Valuation', icon: Calculator },
   { to: '/log', label: 'Price Log', icon: History },
   { to: '/settings', label: 'Settings', icon: Settings },

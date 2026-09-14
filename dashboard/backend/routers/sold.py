@@ -8,6 +8,7 @@ from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
 from dashboard.backend.services.stage_runner import SOLD_JOB_NAME, get_latest_run, run_sold_refresh
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
+from ebaypricer.cards import image_url_for_query
 
 router = APIRouter(prefix="/api/v1/sold", tags=["sold"])
 
@@ -95,6 +96,13 @@ def get_sold_listings(
         title = item.get("Item Title", "")
         if title:
             item["sprite_url"] = get_sprite_url(title)
+
+    # Real card art where the order line matched a catalog card, for the grid view.
+    # Once per DISTINCT card - the lookup is a small on-disk read (~0.2ms), never a
+    # network call, and a page of orders repeats the same cards.
+    art = {q: image_url_for_query(q) for q in {i["Card"] for i in items if i.get("Card")}}
+    for item in items:
+        item["card_image_url"] = art.get(item.get("Card"))
     return {
         "items": items,
         "total": total,
@@ -145,10 +153,12 @@ def get_sold_summary(user_id: UUID = Depends(get_current_user_id)):
             {"uid": user_id},
         ).fetchone()
     result = dict(row)
-    # total_earnings is now the real per-order net from the Finances API
-    # (totalFeeBasisAmount - fees - debits), NOT revenue-minus-fees. The old formula
-    # dropped shipping revenue and ignored refund debits, so the card labelled
-    # "Order Earnings" was showing a number that was not order earnings.
+    # total_earnings is the real per-order net built in finances.merge_fees_into_rows
+    # (totalFeeBasisAmount - fees - debits - postage), NOT revenue-minus-fees. Note the
+    # postage term: buyer-paid shipping is inside eBay's fee basis but the label is ours
+    # to buy, so an order's net is short by what it cost us until it is taken out - see
+    # finances.estimated_label_cost for how that is estimated. total_shipping beside it
+    # is still the shipping REVENUE, which is why the two don't reconcile by hand.
     units = result["total_items"] or 0
     result["avg_price"] = round(float(result["total_revenue"]) / units, 2) if units else 0
     return result

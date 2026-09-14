@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Search, Trash2, Loader2, AlertTriangle, Boxes, Pencil, ExternalLink, Minus, Plus } from 'lucide-react'
 import { api, apiPut } from '../lib/api'
 import { useAuth } from '../lib/auth-context'
 import { formatCurrency } from '../lib/utils'
 import { KpiCard } from '../components/shared/KpiCard'
+import { CardArt } from '../components/shared/ViewToggle'
 import type { CardHit, CardValue, LotsResponse } from '../types'
 
 // Matches CONDITION_MULTIPLIER in services/suggested_price.py. Kept as labels only -
@@ -26,29 +28,11 @@ interface Row {
   price?: string
 }
 
-function CardSprite({ card, value }: { card: CardHit; value?: CardValue }) {
-  const [failed, setFailed] = useState(false)
-  // Catalog cards have real card art. Custom searches have no card at all, so the
-  // backend parses a Pokemon species sprite out of the query text instead (falling back
-  // to Pikachu when nothing matches). Same box either way so rows stay aligned.
-  const custom = isCustom(card)
-  const src = custom ? value?.sprite_url : card.image_url
-
-  // Covers both "not resolved yet" and "failed to load" - a custom row has no sprite
-  // until its valuation returns.
-  if (!src || failed) {
-    return <div className="w-16 aspect-[5/7] shrink-0 rounded bg-slate-100 dark:bg-neutral-700" />
-  }
-  return (
-    <img
-      src={src}
-      alt=""
-      loading="lazy"
-      onError={() => setFailed(true)}
-      style={custom ? { imageRendering: 'pixelated' } : undefined}
-      className="w-16 aspect-[5/7] shrink-0 rounded object-contain"
-    />
-  )
+function CardSprite({ card }: { card: CardHit }) {
+  // Catalog cards have real art. A custom search has no catalog card at all, so
+  // there is nothing to show but a card back - which is honest, where the species
+  // sprite it used to fall back to was a guess dressed up as a picture.
+  return <CardArt artUrl={card.image_url} className="w-16 rounded" />
 }
 
 function nextSku(lots: { sku: string }[]): string {
@@ -59,6 +43,9 @@ function nextSku(lots: { sku: string }[]): string {
   const next = nums.length ? Math.max(...nums) + 1 : 1
   return `L${String(next).padStart(4, '0')}`
 }
+
+// The one highlight style for the search dropdown, shared by hover and the arrow keys.
+const HIGHLIGHT = 'bg-slate-50 dark:bg-neutral-700/50'
 
 const FIELD =
   'w-full bg-slate-50 dark:bg-neutral-700/50 rounded-lg px-2 py-1 text-sm outline-none ' +
@@ -84,6 +71,10 @@ function customHit(query: string): CardHit {
 function manualHit(name: string): CardHit {
   return customHit(name)
 }
+
+// One row of the search dropdown: a catalog hit, or one of the two fallbacks offered
+// when the catalog has nothing (or the wrong thing) for what was typed.
+type Option = { kind: 'card'; card: CardHit } | { kind: 'custom' } | { kind: 'manual' }
 
 // Catalog hits always carry a number and set; a free-text entry carries neither.
 function isCustom(card: CardHit): boolean {
@@ -144,6 +135,10 @@ export function ValuationPage() {
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<CardHit[]>([])
   const [open, setOpen] = useState(false)
+  // Which dropdown entry the arrow keys are on. Indexes `options` below, not `hits`:
+  // the two trailing actions ("search eBay", "my own price") are selectable rows too.
+  const [active, setActive] = useState(0)
+  const listRef = useRef<HTMLUListElement>(null)
   const [searching, setSearching] = useState(false)
   const [rows, setRows] = useState<Row[]>([])
   const [offer, setOffer] = useState('')
@@ -339,6 +334,50 @@ export function ValuationPage() {
     return { asking, net, cards, priced, missing, unfiltered }
   }, [rows])
 
+  // The dropdown flattened into one selectable list, so the keyboard doesn't have to
+  // know that the last two rows are actions rather than catalog hits.
+  const options = useMemo<Option[]>(() => {
+    const o: Option[] = hits.map((card) => ({ kind: 'card', card }))
+    if (query.trim().length >= 2) o.push({ kind: 'custom' }, { kind: 'manual' })
+    return o
+  }, [hits, query])
+
+  // A new result set means the old highlight points at a different card - start over at
+  // the top rather than leaving it on whatever now happens to occupy that index.
+  useEffect(() => { setActive(0) }, [options])
+
+  // The list scrolls (max-h-80), so arrowing past the fold has to bring the row along.
+  useEffect(() => {
+    if (!open) return
+    listRef.current?.querySelector(`[data-idx="${active}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [active, open])
+
+  function choose(i: number) {
+    const o = options[i]
+    if (!o) return
+    if (o.kind === 'card') addCard(o.card)
+    else if (o.kind === 'custom') addCard(customHit(query))
+    else addManual(query.trim())
+  }
+
+  function onSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (!options.length) return
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      // Arrowing on a closed dropdown reopens it rather than moving an invisible
+      // highlight, which is what a search field that still holds a query should do.
+      if (!open) { setOpen(true); return }
+      const d = e.key === 'ArrowDown' ? 1 : -1
+      setActive((i) => (i + d + options.length) % options.length)
+    } else if (e.key === 'Enter') {
+      if (!open) return
+      e.preventDefault()
+      choose(active)
+    } else if (e.key === 'Escape') {
+      setOpen(false)
+    }
+  }
+
   const offerNum = parseFloat(offer)
   const hasOffer = !isNaN(offerNum) && offerNum > 0
   const profit = hasOffer ? totals.net - offerNum : 0
@@ -357,6 +396,11 @@ export function ValuationPage() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onFocus={() => hits.length && setOpen(true)}
+            onKeyDown={onSearchKeyDown}
+            role="combobox"
+            aria-expanded={open}
+            aria-controls="valuation-search-results"
+            aria-activedescendant={open ? `valuation-option-${active}` : undefined}
             placeholder="Search a card"
             className="w-full bg-transparent outline-none text-sm text-slate-900 dark:text-neutral-100 placeholder:text-slate-400"
           />
@@ -364,12 +408,24 @@ export function ValuationPage() {
         </div>
 
         {open && (hits.length > 0 || query.trim().length >= 2) && (
-          <ul className="absolute z-20 mt-1 w-full max-h-80 overflow-y-auto bg-white dark:bg-neutral-800 rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10">
-            {hits.map((h) => (
+          <ul
+            ref={listRef}
+            id="valuation-search-results"
+            role="listbox"
+            className="absolute z-20 mt-1 w-full max-h-80 overflow-y-auto bg-white dark:bg-neutral-800 rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10"
+          >
+            {hits.map((h, i) => (
               <li key={h.card_query + h.number}>
                 <button
+                  id={`valuation-option-${i}`}
+                  data-idx={i}
+                  role="option"
+                  aria-selected={active === i}
+                  // Hovering moves the highlight instead of drawing a second one, so the
+                  // mouse and the arrow keys can never disagree about what Enter picks.
+                  onMouseEnter={() => setActive(i)}
                   onClick={() => addCard(h)}
-                  className="w-full text-left px-3 py-2 hover:bg-slate-50 dark:hover:bg-neutral-700/50"
+                  className={`w-full text-left px-3 py-2 ${active === i ? HIGHLIGHT : ''}`}
                 >
                   <span className="text-sm text-slate-900 dark:text-neutral-100">{h.name}</span>
                   <span className="text-xs text-slate-500 dark:text-neutral-400 ml-2">
@@ -389,8 +445,13 @@ export function ValuationPage() {
             {query.trim().length >= 2 && (
               <li className={hits.length ? 'border-t border-slate-100 dark:border-neutral-700' : undefined}>
                 <button
+                  id={`valuation-option-${hits.length}`}
+                  data-idx={hits.length}
+                  role="option"
+                  aria-selected={active === hits.length}
+                  onMouseEnter={() => setActive(hits.length)}
                   onClick={() => addCard(customHit(query))}
-                  className="w-full text-left px-3 py-2 hover:bg-slate-50 dark:hover:bg-neutral-700/50"
+                  className={`w-full text-left px-3 py-2 ${active === hits.length ? HIGHLIGHT : ''}`}
                 >
                   <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 dark:text-neutral-300">
                     <Search className="w-3.5 h-3.5" />
@@ -404,7 +465,6 @@ export function ValuationPage() {
                     </span>
                   ) : (
                     <span className="block text-xs text-slate-400 mt-0.5">
-                      Use for stamped promos and anything the catalog can't describe
                     </span>
                   )}
                 </button>
@@ -413,15 +473,19 @@ export function ValuationPage() {
             {query.trim().length >= 2 && (
               <li className="border-t border-slate-100 dark:border-neutral-700">
                 <button
+                  id={`valuation-option-${hits.length + 1}`}
+                  data-idx={hits.length + 1}
+                  role="option"
+                  aria-selected={active === hits.length + 1}
+                  onMouseEnter={() => setActive(hits.length + 1)}
                   onClick={() => addManual(query.trim())}
-                  className="w-full text-left px-3 py-2 hover:bg-slate-50 dark:hover:bg-neutral-700/50"
+                  className={`w-full text-left px-3 py-2 ${active === hits.length + 1 ? HIGHLIGHT : ''}`}
                 >
                   <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 dark:text-neutral-300">
                     <Pencil className="w-3.5 h-3.5" />
                     Add <span className="font-medium text-slate-900 dark:text-neutral-100">"{query.trim()}"</span> with my own price
                   </span>
                   <span className="block text-xs text-slate-400 mt-0.5">
-                    No lookup — for bulk, sealed, or anything already appraised
                   </span>
                 </button>
               </li>
@@ -565,11 +629,11 @@ export function ValuationPage() {
                     <tr key={r.id} className="border-t border-slate-100 dark:border-neutral-700/60">
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-3">
-                          <CardSprite card={r.card} value={r.value} />
+                          <CardSprite card={r.card} />
                           <div>
                             <div className="text-slate-900 dark:text-neutral-100">{r.card.name}</div>
                             {r.manual ? (
-                              <div className="text-xs text-slate-400 italic">Priced by hand</div>
+                              <div className="text-xs text-slate-400 italic"></div>
                             ) : isCustom(r.card) ? (
                               <div className="text-xs text-slate-400 italic">Custom search</div>
                             ) : (

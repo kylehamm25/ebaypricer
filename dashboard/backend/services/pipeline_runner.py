@@ -2,11 +2,11 @@
 Pipeline runner (runs the legacy scripts and ingests their output into Supabase).
 
 run_pipeline_once() executes scripts/main.py (append_sold_orders, get_active,
-price_active_listings, avg_active_price, auto_boost_promotion), then ingests
-the results into Supabase:
+price_active_listings, avg_active_price), then ingests the results into
+Supabase. Nothing in that chain writes to eBay - the ad-rate boost step was
+removed so an unattended run cannot move ad spend:
   - Excel workbook -> sold_orders / active_listings / inventory_value_history
-  - SQLite (db/pokemon_prices.db) -> price_snapshots / active_price_snapshots /
-    sold_listings / listing_positions
+  - SQLite (db/pokemon_prices.db) -> active_price_snapshots / listing_positions
 
 A Postgres advisory lock guarantees a single active runner across processes
 (prod + dev servers, cron invocations, ...).
@@ -59,14 +59,9 @@ def _d(v):
 
 
 _TABLES = [
-    {
-        "sqlite": "price_snapshots",
-        "pg": "price_snapshots",
-        "cols": ["card_query", "snapshot_date", "sample_size", "avg_price",
-                 "median_price", "min_price", "max_price", "std_dev", "weighted_avg"],
-        "key": ["card_query", "snapshot_date"],
-        "conv": {"snapshot_date": _d},
-    },
+    # price_snapshots and sold_listings are deliberately absent: the sold side was
+    # removed (see services/price_research.py), and re-ingesting the legacy SQLite
+    # copies would put it straight back.
     {
         "sqlite": "active_price_snapshots",
         "pg": "active_price_snapshots",
@@ -74,14 +69,6 @@ _TABLES = [
                  "min_price", "max_price"],
         "key": ["card_query", "snapshot_date"],
         "conv": {"snapshot_date": _d},
-    },
-    {
-        "sqlite": "sold_listings",
-        "pg": "sold_listings",
-        "cols": ["item_id", "card_query", "title", "price", "currency",
-                 "condition", "listing_type", "sold_date", "url", "pulled_at"],
-        "key": ["item_id"],
-        "conv": {"sold_date": _dt, "pulled_at": _dt},
     },
     {
         "sqlite": "listing_positions",

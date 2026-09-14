@@ -91,6 +91,7 @@ def get_dashboard_kpis(
         revenue = 0
         shipping = 0
         fees = 0
+        earnings = 0
         trends = []
         top_items = []
         available_months: list[str] = []
@@ -141,11 +142,13 @@ def get_dashboard_kpis(
                            (SELECT COALESCE(ROUND(SUM(item_price * COALESCE(quantity, 1)), 2), 0)
                             FROM sold_orders WHERE user_id = %s AND {month_filter}) AS rev,
                            COALESCE(ROUND(SUM(order_ship), 2), 0) AS ship,
-                           COALESCE(ROUND(SUM(order_fees), 2), 0) AS fees
+                           COALESCE(ROUND(SUM(order_fees), 2), 0) AS fees,
+                           COALESCE(ROUND(SUM(order_net), 2), 0) AS earnings
                     FROM (
                       SELECT order_id,
                              MAX(shipping) AS order_ship,
-                             MAX(total_fees) AS order_fees
+                             MAX(total_fees) AS order_fees,
+                             MAX(order_earnings) AS order_net
                       FROM sold_orders
                       WHERE user_id = %s AND {month_filter}
                       GROUP BY order_id
@@ -156,6 +159,12 @@ def get_dashboard_kpis(
             revenue = row["rev"]
             shipping = row["ship"]
             fees = row["fees"]
+            # The per-order net the Finances API gives us, summed - the same figure the
+            # Sold page shows. It is NOT revenue minus fees: it counts shipping revenue,
+            # refund debits and the postage we paid, none of which those two columns
+            # know about. This card used to subtract them in the frontend and disagreed
+            # with the Sold page as a result.
+            earnings = row["earnings"]
 
             top_items = [
                 dict(r) for r in db.execute(
@@ -186,6 +195,7 @@ def get_dashboard_kpis(
         "revenue": revenue,
         "shipping": shipping,
         "fees": fees,
+        "earnings": earnings,
         "active_listings": active_count,
         "trends": trends,
         "top_items": top_items,

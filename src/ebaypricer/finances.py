@@ -19,11 +19,12 @@ class FinancesApiError(Exception):
     """
 
 
-# --- Postage assumed when reconstructing net without a Finances gross figure -------
-# Only used by merge_fees_into_rows' fallback path, where eBay gave us the fees for an
-# order but no totalFeeBasisAmount to subtract them from. We then have to rebuild net
-# from the Trading API's Order Total, which means guessing what the LABEL cost us -
-# a number eBay never reports here.
+# --- Postage assumed when working out what an order actually earned ----------------
+# Neither of the numbers eBay hands us is net of postage: totalFeeBasisAmount is the
+# amount fees are charged ON (buyer-paid shipping included), and the Trading API's
+# Order Total is what the buyer paid. Either way the LABEL is ours to absorb, and eBay
+# never reports what it cost here - so both paths in merge_fees_into_rows subtract the
+# estimate below.
 #
 # Free shipping means the buyer paid nothing and we absorbed the label. In the middle
 # band we assume a light-parcel label. Above it, we assume the postage we charged is
@@ -33,11 +34,24 @@ class FinancesApiError(Exception):
 # (listing_economics.SHIPPING_PRICE_MAP = 0.78, suggested_price.ESE_SHIPPING_RATES =
 # 0.78/1.36 and ASSUMED_SHIP_COST = 0.78) - each is exactly $0.04 lower. The reason for
 # that offset is not recorded anywhere and has not been verified against a real label
-# invoice; treat these as unaudited estimates. They only ever affect orders the
-# Finances API gave no gross for, so the primary path below is unaffected.
+# invoice; treat these as unaudited estimates.
 FREE_SHIP_LABEL_COST = 0.74
 LIGHT_PARCEL_LABEL_COST = 1.32
 LIGHT_PARCEL_SHIPPING_MAX = 5.00
+
+
+def estimated_label_cost(shipping: float | None) -> float:
+    """What the postage on an order cost us, given what the buyer was charged for it.
+
+    Note the band edges: a charge at or below FREE_SHIP_LABEL_COST but above zero is
+    taken at face value rather than rounded up to the light-parcel label, which is the
+    behaviour this has always had."""
+    s = float(shipping or 0.0)
+    if s == 0.0:
+        return FREE_SHIP_LABEL_COST
+    if FREE_SHIP_LABEL_COST < s < LIGHT_PARCEL_SHIPPING_MAX:
+        return LIGHT_PARCEL_LABEL_COST
+    return s
 
 
 def fetch_finance_fees(access_token: str, start_dt: datetime, end_dt: datetime, debug: bool = False):
@@ -232,6 +246,12 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
 
         debit = round(debits_by_order.get(real_order_id, 0.0), 2) if debits_by_order and real_order_id else None
 
+        # Order-level, so it sits on one row of the group - the same reason fees and
+        # earnings do. Read it once for the order rather than per row, or the
+        # continuation rows would price their postage from a blank.
+        shipping = next((r.get("Shipping") for r in group if r.get("Shipping") is not None), 0.0)
+        postage = estimated_label_cost(shipping)
+
         for row in group:
             current_oid = str(row.get("Order ID") or "")
             if (
@@ -243,19 +263,11 @@ def merge_fees_into_rows(rows: list[dict], fees_by_order: dict, item_id_index: d
             row["Total eBay Fees"] = total_fees
             if gross is not None:
                 expenses = (total_fees or 0.0) + (debit or 0.0)
-                row["Order Earnings"] = round(gross - expenses, 2)
+                row["Order Earnings"] = round(gross - expenses - postage, 2)
             else:
                 order_total = row.get("Order Total") or 0.0
-                shipping = row.get("Shipping") or 0.0
                 if total_fees is not None:
                     expenses = total_fees + (debit or 0.0)
-                    earnings = order_total - expenses
-                    if shipping == 0.0:
-                        earnings -= FREE_SHIP_LABEL_COST
-                    elif FREE_SHIP_LABEL_COST < shipping < LIGHT_PARCEL_SHIPPING_MAX:
-                        earnings -= LIGHT_PARCEL_LABEL_COST
-                    else:
-                        earnings -= shipping
-                    row["Order Earnings"] = round(earnings, 2)
+                    row["Order Earnings"] = round(order_total - expenses - postage, 2)
                 else:
                     row["Order Earnings"] = None

@@ -8,10 +8,10 @@ import { KpiCard } from '../components/shared/KpiCard'
 import { LotEditDialog } from '../components/shared/LotEditDialog'
 import { Money } from '../components/shared/Money'
 import { KpiSkeleton, TableSkeleton } from '../components/shared/Skeleton'
-import { formatCurrency, formatInt, profitTone } from '../lib/utils'
+import { formatCurrency, formatInt, isLotComplete, profitTone } from '../lib/utils'
 import type { Lot, LotsResponse } from '../types'
 
-type SortKey = 'sku' | 'cost' | 'total_items' | 'listed_value' | 'sold_net'
+type SortKey = 'sku' | 'cost' | 'total_items' | 'listed_value' | 'unlisted_value' | 'sold_net'
   | 'realized_profit' | 'projected_profit' | 'roi_pct'
 
 export function LotsPage() {
@@ -46,10 +46,210 @@ export function LotsPage() {
     return rows
   }, [lots, sortBy, sortDir])
 
+  // A finished lot's numbers no longer move, so it stops competing for attention
+  // with the ones still being worked - same columns, its own table below.
+  const open = useMemo(() => sorted.filter((r) => !isLotComplete(r)), [sorted])
+  const completed = useMemo(() => sorted.filter(isLotComplete), [sorted])
+  const hasCompleted = completed.length > 0
+
   const handleSort = (key: string) => {
     if (key === sortBy) setSortDir((d) => (d === 'desc' ? 'asc' : 'desc'))
     else { setSortBy(key as SortKey); setSortDir('desc') }
   }
+
+  // One definition, two tables: the open lots and the finished ones show the
+  // same columns and obey the same header sort.
+  const lotsTable = (rows: Lot[]) => (
+    <DataTable<Lot>
+      columns={[
+        {
+          key: 'sku',
+          header: 'Lot',
+          // Still sorted by SKU even when a title is showing: the codes run in
+          // purchase order (L0030 before L0041), which titles won't.
+          sortKey: 'sku',
+          className: 'w-52',
+          render: (r) => (
+            <div>
+              <div className="font-medium text-slate-800 dark:text-neutral-100 truncate">
+                {r.title || r.sku}
+              </div>
+              <div className="text-xs text-slate-400 truncate">
+                {/* The SKU is the lot's identity, so it stays visible even when
+                    a title has taken the main line. */}
+                {[r.title ? r.sku : null, r.source, r.purchased_at]
+                  .filter(Boolean).join(' · ') || '—'}
+              </div>
+            </div>
+          ),
+        },
+        {
+          key: 'cost',
+          header: 'Cost',
+          sortKey: 'cost',
+          className: 'w-24',
+          render: (r) => r.cost != null
+            ? <span className="tabular-nums">{formatCurrency(r.cost)}</span>
+            : <span className="text-slate-400 text-xs">not set</span>,
+        },
+        {
+          key: 'total_items',
+          header: 'Items',
+          sortKey: 'total_items',
+          className: 'w-28',
+          render: (r) => (
+            <span className="text-xs tabular-nums text-slate-600 dark:text-neutral-300">
+              {formatInt(r.sold_items)} sold
+              <span className="text-slate-300 dark:text-neutral-600"> / </span>
+              {formatInt(r.active_items)} live
+              {/* Only when there is some - a zero here on every finished lot would
+                  be noise in a column that is already three numbers wide. */}
+              {r.unlisted_items > 0 && (
+                <>
+                  <span className="text-slate-300 dark:text-neutral-600"> / </span>
+                  {formatInt(r.unlisted_items)} unlisted
+                </>
+              )}
+            </span>
+          ),
+        },
+        {
+          key: 'listed_value',
+          header: 'Listed Value',
+          sortKey: 'listed_value',
+          className: 'w-28',
+          render: (r) => <span className="tabular-nums">{formatCurrency(r.listed_value)}</span>,
+        },
+        {
+          key: 'unlisted_value',
+          header: 'Unlisted Value',
+          sortKey: 'unlisted_value',
+          className: 'w-28',
+          render: (r) => (
+            r.unlisted_items === 0
+              ? <span className="text-slate-400 text-xs">—</span>
+              : (
+                <span
+                  className="tabular-nums"
+                  title={
+                    `${r.unlisted_entries} entr${r.unlisted_entries === 1 ? 'y' : 'ies'} still in hand` +
+                    (r.unlisted_unvalued ? ` · ${r.unlisted_unvalued} with no price yet` : '')
+                  }
+                >
+                  {formatCurrency(r.unlisted_value)}
+                  {r.unlisted_unvalued > 0 && (
+                    <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">
+                      +{r.unlisted_unvalued}?
+                    </span>
+                  )}
+                </span>
+              )
+          ),
+        },
+        {
+          key: 'sold_net',
+          header: 'Sold Net',
+          sortKey: 'sold_net',
+          className: 'w-28',
+          render: (r) => (
+            <span
+              className="tabular-nums"
+              title={`${formatCurrency(r.sold_gross)} gross before fees${
+                r.sold_missing_net ? ` · ${r.sold_missing_net} sale(s) still awaiting fee data` : ''
+              }`}
+            >
+              {formatCurrency(r.sold_net)}
+              {r.sold_missing_net > 0 && <span className="ml-1 text-slate-400">*</span>}
+            </span>
+          ),
+        },
+        {
+          key: 'recouped',
+          header: 'Recouped',
+          className: 'w-28',
+          render: (r) => {
+            if (r.recouped_pct == null) return <span className="text-slate-400 text-xs">—</span>
+            const pct = Math.max(0, Math.min(100, r.recouped_pct))
+            const done = r.recouped_pct >= 100
+            return (
+              <div className="flex items-center gap-2" title={`${r.recouped_pct}% of cost recovered from sales`}>
+                <div className="h-1.5 w-12 rounded-full bg-slate-200 dark:bg-neutral-700 overflow-hidden">
+                  <div
+                    className={`h-full rounded-full ${done ? 'bg-emerald-500' : 'bg-blue-500'}`}
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                <span className="text-xs tabular-nums text-slate-500 dark:text-neutral-400">
+                  {Math.round(r.recouped_pct)}%
+                </span>
+              </div>
+            )
+          },
+        },
+        {
+          key: 'realized_profit',
+          header: 'Realized',
+          sortKey: 'realized_profit',
+          className: 'w-24',
+          render: (r) => <Money value={r.realized_profit} bold />,
+        },
+        {
+          key: 'projected_profit',
+          header: 'Projected',
+          sortKey: 'projected_profit',
+          className: 'w-24',
+          // The composition matters here: three sources with different degrees of
+          // certainty add up to one number, and the unlisted part is the softest.
+          render: (r) => (
+            <span
+              title={
+                `${formatCurrency(r.sold_net)} sold net` +
+                ` + ${formatCurrency(r.listed_value)} listed` +
+                (r.unlisted_items > 0 ? ` + ${formatCurrency(r.unlisted_value)} unlisted` : '') +
+                ` − ${formatCurrency(r.cost ?? 0)} cost. Fees on unsold items not deducted.`
+              }
+            >
+              <Money value={r.projected_profit} />
+            </span>
+          ),
+        },
+        {
+          key: 'roi_pct',
+          header: 'ROI',
+          sortKey: 'roi_pct',
+          className: 'w-20',
+          render: (r) => r.roi_pct == null
+            ? <span className="text-slate-400 text-xs">—</span>
+            : <span className={`tabular-nums text-xs font-medium ${profitTone(r.roi_pct)}`}>
+                {r.roi_pct > 0 ? '+' : ''}{r.roi_pct}%
+              </span>,
+        },
+        {
+          key: 'edit',
+          header: '',
+          className: 'w-12',
+          stopRowClick: true,
+          render: (r) => (
+            <button
+              type="button"
+              aria-label={`Edit lot ${r.sku}`}
+              title="Edit cost and details"
+              className="text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
+              onClick={() => setEditing(r)}
+            >
+              <Pencil size={14} />
+            </button>
+          ),
+        },
+      ]}
+      data={rows}
+      keyField="sku"
+      sortBy={sortBy}
+      sortDir={sortDir}
+      onSortChange={handleSort}
+      onRowClick={(r) => navigate(`/lots/${encodeURIComponent(r.sku)}`)}
+    />
+  )
 
   const totals = data?.totals
 
@@ -95,6 +295,7 @@ export function LotsPage() {
             { header: 'Cost', width: 'w-16' },
             { header: 'Items', width: 'w-20' },
             { header: 'Listed Value', width: 'w-20' },
+            { header: 'Unlisted Value', width: 'w-20' },
             { header: 'Sold Net', width: 'w-20' },
             { header: 'Realized', width: 'w-20' },
             { header: 'Projected', width: 'w-20' },
@@ -102,148 +303,25 @@ export function LotsPage() {
           ]}
         />
       ) : sorted.length > 0 ? (
-        <DataTable<Lot>
-          columns={[
-            {
-              key: 'sku',
-              header: 'Lot',
-              // Still sorted by SKU even when a title is showing: the codes run in
-              // purchase order (L0030 before L0041), which titles won't.
-              sortKey: 'sku',
-              className: 'w-52',
-              render: (r) => (
-                <div>
-                  <div className="font-medium text-slate-800 dark:text-neutral-100 truncate">
-                    {r.title || r.sku}
-                  </div>
-                  <div className="text-xs text-slate-400 truncate">
-                    {/* The SKU is the lot's identity, so it stays visible even when
-                        a title has taken the main line. */}
-                    {[r.title ? r.sku : null, r.source, r.purchased_at]
-                      .filter(Boolean).join(' · ') || '—'}
-                  </div>
-                </div>
-              ),
-            },
-            {
-              key: 'cost',
-              header: 'Cost',
-              sortKey: 'cost',
-              className: 'w-24',
-              render: (r) => r.cost != null
-                ? <span className="tabular-nums">{formatCurrency(r.cost)}</span>
-                : <span className="text-slate-400 text-xs">not set</span>,
-            },
-            {
-              key: 'total_items',
-              header: 'Items',
-              sortKey: 'total_items',
-              className: 'w-28',
-              render: (r) => (
-                <span className="text-xs tabular-nums text-slate-600 dark:text-neutral-300">
-                  {formatInt(r.sold_items)} sold
-                  <span className="text-slate-300 dark:text-neutral-600"> / </span>
-                  {formatInt(r.active_items)} live
-                </span>
-              ),
-            },
-            {
-              key: 'listed_value',
-              header: 'Listed Value',
-              sortKey: 'listed_value',
-              className: 'w-28',
-              render: (r) => <span className="tabular-nums">{formatCurrency(r.listed_value)}</span>,
-            },
-            {
-              key: 'sold_net',
-              header: 'Sold Net',
-              sortKey: 'sold_net',
-              className: 'w-28',
-              render: (r) => (
-                <span
-                  className="tabular-nums"
-                  title={`${formatCurrency(r.sold_gross)} gross before fees${
-                    r.sold_missing_net ? ` · ${r.sold_missing_net} sale(s) still awaiting fee data` : ''
-                  }`}
-                >
-                  {formatCurrency(r.sold_net)}
-                  {r.sold_missing_net > 0 && <span className="ml-1 text-slate-400">*</span>}
-                </span>
-              ),
-            },
-            {
-              key: 'recouped',
-              header: 'Recouped',
-              className: 'w-28',
-              render: (r) => {
-                if (r.recouped_pct == null) return <span className="text-slate-400 text-xs">—</span>
-                const pct = Math.max(0, Math.min(100, r.recouped_pct))
-                const done = r.recouped_pct >= 100
-                return (
-                  <div className="flex items-center gap-2" title={`${r.recouped_pct}% of cost recovered from sales`}>
-                    <div className="h-1.5 w-12 rounded-full bg-slate-200 dark:bg-neutral-700 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${done ? 'bg-emerald-500' : 'bg-blue-500'}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <span className="text-xs tabular-nums text-slate-500 dark:text-neutral-400">
-                      {Math.round(r.recouped_pct)}%
-                    </span>
-                  </div>
-                )
-              },
-            },
-            {
-              key: 'realized_profit',
-              header: 'Realized',
-              sortKey: 'realized_profit',
-              className: 'w-24',
-              render: (r) => <Money value={r.realized_profit} bold />,
-            },
-            {
-              key: 'projected_profit',
-              header: 'Projected',
-              sortKey: 'projected_profit',
-              className: 'w-24',
-              render: (r) => <Money value={r.projected_profit} />,
-            },
-            {
-              key: 'roi_pct',
-              header: 'ROI',
-              sortKey: 'roi_pct',
-              className: 'w-20',
-              render: (r) => r.roi_pct == null
-                ? <span className="text-slate-400 text-xs">—</span>
-                : <span className={`tabular-nums text-xs font-medium ${profitTone(r.roi_pct)}`}>
-                    {r.roi_pct > 0 ? '+' : ''}{r.roi_pct}%
-                  </span>,
-            },
-            {
-              key: 'edit',
-              header: '',
-              className: 'w-12',
-              stopRowClick: true,
-              render: (r) => (
-                <button
-                  type="button"
-                  aria-label={`Edit lot ${r.sku}`}
-                  title="Edit cost and details"
-                  className="text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
-                  onClick={() => setEditing(r)}
-                >
-                  <Pencil size={14} />
-                </button>
-              ),
-            },
-          ]}
-          data={sorted}
-          keyField="sku"
-          sortBy={sortBy}
-          sortDir={sortDir}
-          onSortChange={handleSort}
-          onRowClick={(r) => navigate(`/lots/${encodeURIComponent(r.sku)}`)}
-        />
+        <div className="space-y-6">
+          {open.length > 0 && (hasCompleted ? (
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
+                Open <span className="text-slate-400 font-normal">({open.length})</span>
+              </h2>
+              {lotsTable(open)}
+            </section>
+          ) : lotsTable(open))}
+
+          {hasCompleted && (
+            <section className="space-y-2">
+              <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
+                Completed <span className="text-slate-400 font-normal">({completed.length})</span>
+              </h2>
+              {lotsTable(completed)}
+            </section>
+          )}
+        </div>
       ) : !isError ? (
         <div className="flex h-28 items-center justify-center rounded-lg border border-dashed border-slate-200 dark:border-neutral-700 text-sm text-slate-400">
           No purchased lots found on your listings or orders yet.

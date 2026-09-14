@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from psycopg.errors import UndefinedTable
+from psycopg.errors import UndefinedColumn, UndefinedTable
 from psycopg.types.json import Json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ebaypricer.trading_api import EbayReviseError, revise_item_price
 
@@ -14,8 +14,10 @@ from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_token
 from dashboard.backend.services.suggested_price import REPRICE_COOLDOWN_DAYS
 from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
+from dashboard.backend.services.type_sort import sort_by_card_type
+from dashboard.backend.services.upsert_rules import existing_columns
 from dashboard.backend.utils.pokemon_sprites import get_sprite_url
-from ebaypricer.cards import image_url_for_query
+from ebaypricer.cards import card_number, image_url_for_query
 
 router = APIRouter(prefix="/api/v1/active", tags=["active"])
 
@@ -25,8 +27,7 @@ _SELECT = (
     'COALESCE(ad_rate::text || \'%%\', \'\') AS "Ad Rate", watchers AS "Watchers", '
     'days_listed AS "Days Listed", start_date AS "Start Date", quantity AS "Quantity", '
     'estimated_fees AS "Estimated Fees", estimated_net AS "Estimated Net", '
-    'recent_sold_avg AS "Recent Sold Avg", price_vs_sold_avg AS "Price vs Sold Avg", '
-    'recent_sold_count AS "Recent Sold Count", last_checked AS "Last Checked", '
+    'last_checked AS "Last Checked", '
     'active_avg_top5 AS "Active Avg (Top 5)", price_accuracy AS "Price Accuracy", '
     'search_position AS "Search Position", '
     # Computed server-side by services/suggested_price.py. Both /list and /item use
@@ -45,6 +46,7 @@ _SORT_COLS = {
     "Price": "price",
     "Search Position": "search_position",
     "Card": "card",
+    "Number": "number",
     "Condition": "condition",
     "Suggested Price": "suggested_price",
     # What the Total column shows. Deliberately NOT COALESCE(price, 0): a listing
@@ -58,11 +60,21 @@ _SORT_COLS = {
     "Active Avg": "comp.active_avg",
 }
 
+# Not in _SORT_COLS - "Type" has no column, so it can't be an ORDER BY key. The
+# same sort the inventory page offers (see SORT_TYPE_KEY in
+# routers/inventory.py): handled entirely in Python after the fetch, via the
+# shared services/type_sort.py helper so both pages group identically.
+SORT_TYPE_KEY = "Type"
+
 # Each card's most recent competitor-price snapshot. LEFT so listings whose card
 # has never been researched still appear; their Active Avg sorts last.
 _COMP_JOIN = """
 LEFT JOIN LATERAL (
-    SELECT aps.avg_price AS active_avg
+    -- Landed, to match the Active Avg column: the page shows item + shipping.
+    -- COALESCE to 0 is defensible for an ORDER BY key and nowhere else - a card
+    -- whose comps never reported postage simply sorts on its item price rather
+    -- than dropping to the bottom. Never reuse this expression as a value.
+    SELECT aps.avg_price + COALESCE(aps.avg_shipping, 0) AS active_avg
     FROM active_price_snapshots aps
     WHERE aps.card_query = active_listings.card
     ORDER BY aps.snapshot_date DESC
@@ -83,12 +95,12 @@ def _exists(db, table: str = "active_listings") -> bool:
 def get_active_listings(
     user_id: UUID = Depends(get_current_user_id),
     page: int = Query(1, ge=1),
-    per_page: int = Query(50, ge=1, le=500),
+    per_page: int = Query(500, ge=1, le=500),
     card: str = Query(None),
     days_min: int = Query(None),
     days_max: int = Query(None),
-    sort_by: str = Query("Days Listed"),
-    sort_dir: str = Query("desc"),
+    sort_by: str = Query("Number"),
+    sort_dir: str = Query("asc"),
 ):
     where_clauses = ["user_id = %s"]
     params = [user_id]
@@ -114,37 +126,91 @@ def get_active_listings(
     # were most of the click-to-repaint latency. The window count is evaluated before
     # LIMIT, so it still yields the full filtered total.
     with get_db() as db:
-        try:
-            rows = db.execute(
-                f"SELECT {_SELECT}, COUNT(*) OVER () AS _total "
-                f"FROM active_listings {_COMP_JOIN} "
-                # NULLS LAST so a missing value never outranks a real one - without
-                # it Postgres puts NULLs first on DESC, so sorting by Search Rank or
-                # Active Avg led with every listing that has no value at all.
-                f"WHERE {where_sql} ORDER BY {sort_col} {dir_sql} NULLS LAST "
-                f"LIMIT %s OFFSET %s",
-                params + [per_page, offset],
-            ).fetchall()
-        except UndefinedTable:
-            # Migration not applied yet - degrade rather than 500.
-            return {"items": [], "total": 0, "page": page, "per_page": per_page}
-        # A window count needs at least one row; an empty page (out-of-range offset or
-        # a filter matching nothing) falls back to a plain COUNT so paging stays right.
-        if rows:
-            total = rows[0]["_total"]
+        if sort_by == SORT_TYPE_KEY:
+            # No column to ORDER BY (see SORT_TYPE_KEY above): fetch the whole
+            # filtered set, sort in Python exactly the way the inventory page
+            # does, then slice the requested page - sorting one page at a time
+            # would only order within the page, not across pages. The lateral
+            # comp join is skipped: it exists only to serve the "Active Avg"
+            # ORDER BY, which isn't asked for here.
+            num_select = (
+                ""
+                if "number" not in existing_columns(db, "active_listings")
+                else ", number"
+            )
+            # Checked up front rather than caught after the fact, for the same
+            # reason as the "number" guard below: a failed statement aborts the
+            # whole transaction. Only reachable before migration 0019 is run -
+            # number_of then falls back to None for every row, leaving the id
+            # tiebreak, rather than 500ing over one unavailable column.
+            try:
+                all_rows = db.execute(
+                    f"SELECT {_SELECT}{num_select} FROM active_listings "
+                    f"WHERE {where_sql}",
+                    params,
+                ).fetchall()
+            except UndefinedTable:
+                # Migration not applied yet - degrade rather than 500.
+                return {"items": [], "total": 0, "page": page, "per_page": per_page}
+            ordered = sort_by_card_type(
+                [dict(r) for r in all_rows],
+                direction="asc" if sort_dir == "asc" else "desc",
+                query_of=lambda i: i.get("Card"),
+                number_of=lambda i: i.get("number"),
+                id_of=lambda i: i.get("Item ID"),
+            )
+            total = len(ordered)
+            rows = ordered[offset:offset + per_page]
         else:
-            total = db.execute(
-                f"SELECT COUNT(*) AS c FROM active_listings WHERE {where_sql}", params
-            ).fetchone()["c"]
+            if sort_col == "number" and "number" not in existing_columns(db, "active_listings"):
+                # Checked up front rather than caught after the fact: a failed statement
+                # aborts the whole transaction, so retrying a corrected query on the same
+                # connection isn't an option here the way it is for a standalone write.
+                # Only reachable before migration 0019 is run - falls back to the default
+                # sort rather than a 500 over one unavailable option.
+                sort_col = "days_listed"
+            try:
+                rows = db.execute(
+                    f"SELECT {_SELECT}, COUNT(*) OVER () AS _total "
+                    f"FROM active_listings {_COMP_JOIN} "
+                    # NULLS LAST so a missing value never outranks a real one - without
+                    # it Postgres puts NULLs first on DESC, so sorting by Search Rank or
+                    # Active Avg led with every listing that has no value at all.
+                    f"WHERE {where_sql} ORDER BY {sort_col} {dir_sql} NULLS LAST "
+                    f"LIMIT %s OFFSET %s",
+                    params + [per_page, offset],
+                ).fetchall()
+            except UndefinedTable:
+                # Migration not applied yet - degrade rather than 500.
+                return {"items": [], "total": 0, "page": page, "per_page": per_page}
+            # A window count needs at least one row; an empty page (out-of-range offset or
+            # a filter matching nothing) falls back to a plain COUNT so paging stays right.
+            if rows:
+                total = rows[0]["_total"]
+            else:
+                total = db.execute(
+                    f"SELECT COUNT(*) AS c FROM active_listings WHERE {where_sql}", params
+                ).fetchone()["c"]
 
     items = []
     for row in rows:
         item = dict(row)
         item.pop("_total", None)
+        # Only selected on the SORT_TYPE_KEY path, to order within a type by -
+        # never shown, so it doesn't reach the response.
+        item.pop("number", None)
         title = item.get("Title", "")
         if title:
             item["sprite_url"] = get_sprite_url(title)
         items.append(item)
+
+    # Real card art alongside the sprite, so the grid view can show the actual
+    # printing rather than one Pikachu-or-species picture per card name. Resolved
+    # once per DISTINCT card_query - each call re-reads a small on-disk lookup
+    # (~0.2ms) and a page of listings repeats the same cards. No network.
+    art = {q: image_url_for_query(q) for q in {i["Card"] for i in items if i.get("Card")}}
+    for item in items:
+        item["card_image_url"] = art.get(item.get("Card"))
     return {
         "items": items,
         "total": total,
@@ -195,7 +261,25 @@ def get_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
     card_query = item.get("Card")
     if card_query:
         item["card_image_url"] = image_url_for_query(card_query)
+
+    # Whether the match was set by hand. Its own query rather than a column in
+    # _SELECT, which the list endpoint shares - before migration 0013 that would
+    # have taken the whole listings page down instead of just this indicator.
+    item["Card Locked"] = _card_locked(user_id, item_id)
     return item
+
+
+def _card_locked(user_id: UUID, item_id: str) -> bool:
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT card_locked FROM active_listings WHERE user_id = %s AND item_id = %s",
+                [user_id, item_id],
+            ).fetchone()
+    except (UndefinedColumn, UndefinedTable):
+        # Migration 0013 not run: nothing is locked, because nothing can be.
+        return False
+    return bool(row and row["card_locked"])
 
 
 @router.post("/item/{item_id}/refresh")
@@ -214,6 +298,67 @@ def refresh_active_item(item_id: str, user_id: UUID = Depends(get_current_user_i
     from dashboard.backend.services.price_research import refresh_card
 
     refresh_card(card)
+    return get_active_item(item_id, user_id)
+
+
+class CardMatch(BaseModel):
+    """The catalog identity this listing should price against.
+
+    None hands the row back to the fuzzy matcher, which will re-derive it on the
+    next sync. A non-empty string is taken verbatim: it may be a catalog identity
+    from /valuation/cards/search, or free text to search eBay with, exactly as the
+    Valuation and Inventory pages treat it.
+    """
+    card_query: str | None = Field(None, max_length=200)
+
+
+@router.put("/item/{item_id}/card")
+def set_active_item_card(
+    item_id: str,
+    body: CardMatch,
+    user_id: UUID = Depends(get_current_user_id),
+):
+    """Correct the catalog match by hand, and stop the sync re-deriving it.
+
+    A wrong match is not cosmetic - it prices the listing against a different card -
+    so this deliberately does NOT try to be clever about what was meant. It stores
+    what it was given.
+    """
+    card = (body.card_query or "").strip() or None
+    try:
+        with get_db(read_only=False) as db:
+            # Checked up front rather than caught after the fact: number (migration
+            # 0019) is optional, and a failed statement would abort the whole
+            # transaction, so there's no retrying a corrected query on this
+            # connection the way there would be on a fresh one.
+            set_number = "number" in existing_columns(db, "active_listings")
+            row = db.execute(
+                # Setting a card locks it; clearing it unlocks, so the next sync
+                # re-derives rather than leaving the row permanently blank. number
+                # rides along with card - see upsert_rules.LOCKED_COLUMNS - so it's
+                # set here too rather than waiting for the next sync to catch up.
+                "UPDATE active_listings SET card = %s, card_locked = %s"
+                + (", number = %s" if set_number else "")
+                + " WHERE user_id = %s AND item_id = %s RETURNING item_id",
+                [card, card is not None, *([card_number(card)] if set_number else []),
+                 user_id, item_id],
+            ).fetchone()
+    except UndefinedColumn:
+        raise HTTPException(
+            503,
+            "Editing the catalog match needs db/migrations/0013_active_listings_card_locked.sql "
+            "to be run first - without it the next sync would overwrite the correction.",
+        )
+    if row is None:
+        raise HTTPException(404, "Listing not found")
+
+    # The old card's snapshot says nothing about the new one, so the listing has no
+    # usable comps until the new card is researched. One card, on an explicit
+    # request - the same path the per-listing Refresh button uses.
+    if card:
+        from dashboard.backend.services.price_research import refresh_card
+
+        refresh_card(card)
     return get_active_item(item_id, user_id)
 
 

@@ -1,11 +1,19 @@
 """
 Usage:
     python main.py
-    python main.py --dry-run     # preview without making changes
 
-Runs append_sold_orders.py, get_active.py, price_active_listings.py,
-avg_active_price.py, and auto_boost_promotion.py in sequence.
-price_active_listings.py and avg_active_price.py run at most once per day.
+Runs append_sold_orders.py, get_active.py and avg_active_price.py in sequence.
+avg_active_price.py runs at most once per day.
+
+price_active_listings.py used to run third. It is the Excel path's sold-side
+research - a TCGdex market price written to the workbook as "Recent Sold Avg" and
+to SQLite as price_snapshots - and the sold side was removed everywhere (see
+dashboard/backend/services/price_research.py). Leaving it in the chain would keep
+refilling exactly what was taken out.
+
+The pipeline does not change promoted-listing ad rates. It used to end with
+auto_boost_promotion.py; that step was removed so an unattended run can never
+move ad spend. The script is still there to be run deliberately by hand.
 
 Each run is logged to ebayprice/logs/main.log with timestamps.
 """
@@ -37,10 +45,8 @@ def setup_logging():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run all daily eBay pipelines")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="Preview auto_boost_promotion without making changes")
     parser.add_argument("--force", action="store_true",
-                        help="Force price_active_listings and avg_active_price to run even if snapshots exist for today")
+                        help="Force avg_active_price to run even if snapshots exist for today")
     return parser.parse_args()
 
 
@@ -78,14 +84,6 @@ def main():
         log.info("=== Pipeline finished with errors ===")
         sys.exit(rc)
 
-    price_extra = ["--force"] if args.force else None
-    rc = run_script(log, scripts_dir / "price_active_listings.py",
-                    "price_active_listings.py", price_extra)
-    if rc != 0:
-        log.error("price_active_listings.py failed (exit %s)", rc)
-        log.info("=== Pipeline finished with errors ===")
-        sys.exit(rc)
-
     avg_extra = ["--force"] if args.force else None
     rc = run_script(log, scripts_dir / "avg_active_price.py",
                     "avg_active_price.py", avg_extra)
@@ -93,12 +91,6 @@ def main():
         log.error("avg_active_price.py failed (exit %s)", rc)
         log.info("=== Pipeline finished with errors ===")
         sys.exit(rc)
-
-    boost_args = ["--dry-run"] if args.dry_run else None
-    rc = run_script(log, scripts_dir / "auto_boost_promotion.py",
-                    "auto_boost_promotion.py", boost_args)
-    if rc != 0:
-        log.warning("auto_boost_promotion.py skipped (exit %s)", rc)
 
     log.info("=== Pipeline finished successfully ===")
 

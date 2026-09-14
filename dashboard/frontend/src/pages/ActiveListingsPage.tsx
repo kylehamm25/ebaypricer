@@ -10,6 +10,8 @@ import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { KpiSkeleton, ChartSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { StageRefreshButton } from '../components/shared/StageRefreshButton'
+import { CardArt, GridShell, ViewToggle } from '../components/shared/ViewToggle'
+import { GRID_CLASS, useViewPreference } from '../lib/view-preference'
 import { useChartCursor } from '../lib/theme'
 import { formatCurrency, formatInt, formatSuggestionReason, toNumber } from '../lib/utils'
 import type {
@@ -26,8 +28,115 @@ interface BulkPriceResult {
 // larger than one chunk are split into sequential requests instead of erroring out.
 const BULK_CHUNK_SIZE = 100
 
+// Mostly the same keys and order as the table's column headers below, and the same
+// keys routers/active.py accepts in _SORT_COLS - plus "Type", which like the
+// inventory page's sort of the same name has no column of its own (card type is
+// resolved from the catalog, not stored) and is sorted server-side in Python.
+// The grid has no headers to click at all, so it needs sorting spelled out
+// explicitly here; the table's own headers cover every one of these except
+// "Card #" and "Card Type", which have no column of their own (the number is
+// derived from the matched card, the type from the catalog, neither is shown
+// anywhere on the page) - so this control stays visible in both views rather
+// than only where the grid's missing headers would otherwise leave no way to
+// trigger those two.
+const SORTS: { key: string; label: string }[] = [
+  { key: 'Number', label: 'Card #' },
+  { key: 'Type', label: 'Card Type' },
+  { key: 'Card', label: 'Title' },
+  { key: 'Condition', label: 'Condition' },
+  { key: 'Price', label: 'Price' },
+  { key: 'Total', label: 'Total' },
+  { key: 'Active Avg', label: 'Active Avg' },
+  { key: 'Suggested Price', label: 'Suggested' },
+  { key: 'Days Listed', label: 'Days Listed' },
+  { key: 'Watchers', label: 'Watchers' },
+  { key: 'Search Position', label: 'Search Rank' },
+]
+
+/** One live listing as a tile: art on top, the numbers under it, nothing editable.
+ *  Selection is offered only where there is a suggested price to apply, exactly as
+ *  in the table - a checkbox on a listing with nothing to change would arm a bulk
+ *  action that then skipped it. */
+function ActiveCard({ item, selectable, selected, onToggle, onOpen }: {
+  item: ActiveListing
+  selectable: boolean
+  selected: boolean
+  onToggle: () => void
+  onOpen: () => void
+}) {
+  const price = toNumber(item.Price)
+  const suggested = toNumber(item['Suggested Price'])
+  const delta = price != null && suggested != null ? suggested - price : null
+
+  return (
+    <GridShell selected={selected} onClick={onOpen} label={`Open ${item.Title}`}>
+      {/* Tints with the tile, so hovering lights the whole block rather than
+          leaving the picture sitting on its own untouched panel. */}
+      <div className="relative bg-slate-50 dark:bg-neutral-900/40 transition-colors group-hover:bg-slate-100 dark:group-hover:bg-neutral-700">
+        <CardArt artUrl={item.card_image_url} className="w-full" />
+        {selectable && (
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggle}
+            // The tile itself opens the listing, so ticking must not also navigate.
+            onClick={(e) => e.stopPropagation()}
+            aria-label="Select for bulk price update"
+            className="absolute top-2 left-2 w-5 h-5 cursor-pointer rounded accent-blue-600 bg-white dark:bg-neutral-800 shadow"
+          />
+        )}
+      </div>
+
+      <div className="flex flex-col gap-1 p-2">
+        <div
+          className="text-sm font-medium text-slate-800 dark:text-neutral-100 truncate"
+          title={item.Title as string}
+        >
+          {item.Title}
+        </div>
+        <div className="flex items-center justify-between gap-2 text-xs text-slate-400">
+          <span className="truncate">
+            {[item.Condition, item.SKU].filter(Boolean).join(' · ') || '—'}
+          </span>
+          {/* Same ×n as the inventory tile: multi-quantity listings matter here,
+              since applying a suggested price moves every unit. */}
+          <span className="tabular-nums shrink-0">×{formatInt(item.Quantity)}</span>
+        </div>
+
+        <div className="flex items-end justify-between gap-2">
+          <span className="text-sm tabular-nums text-slate-800 dark:text-neutral-100">
+            {formatCurrency(price)}
+          </span>
+          {/* The suggested price as a delta, not a second absolute number - what
+              matters on a tile is whether it wants to move and which way. */}
+          {delta != null && Math.abs(delta) >= 0.01 ? (
+            <span
+              className={`text-xs tabular-nums ${
+                delta > 0
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-rose-600 dark:text-rose-400'
+              }`}
+              title={`Suggested ${formatCurrency(suggested)}`}
+            >
+              {delta > 0 ? '+' : ''}{formatCurrency(delta)}
+            </span>
+          ) : (
+            <span className="text-xs text-slate-400">—</span>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-2 text-xs text-slate-500 dark:text-neutral-400">
+          <span>{formatInt(item['Days Listed'])}d</span>
+          <span>{formatInt(item.Watchers)} watching</span>
+        </div>
+      </div>
+    </GridShell>
+  )
+}
+
 export function ActiveListingsPage() {
   const cursor = useChartCursor()
+  const [view, chooseView] = useViewPreference('active')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [reviewOpen, setReviewOpen] = useState(false)
   const navigate = useNavigate()
@@ -36,11 +145,14 @@ export function ActiveListingsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const page = Number(searchParams.get('page') ?? '1')
   const cardFilter = searchParams.get('card') ?? ''
-  const sortBy = searchParams.get('sort_by') ?? 'Days Listed'
-  const sortDir = (searchParams.get('sort_dir') === 'asc' ? 'asc' : 'desc') as 'asc' | 'desc'
+  // Card number, ascending, is the default on a fresh open - matches
+  // dashboard/backend/routers/active.py's own Query() defaults, so a direct API call
+  // with no params agrees with what a fresh page load shows.
+  const sortBy = searchParams.get('sort_by') ?? 'Number'
+  const sortDir = (searchParams.get('sort_dir') === 'desc' ? 'desc' : 'asc') as 'asc' | 'desc'
   const perPageOptions = [50, 100, 250, 500]
-  const rawPerPage = Number(searchParams.get('per_page') ?? '50')
-  const perPage = perPageOptions.includes(rawPerPage) ? rawPerPage : 50
+  const rawPerPage = Number(searchParams.get('per_page') ?? '500')
+  const perPage = perPageOptions.includes(rawPerPage) ? rawPerPage : 500
 
   // Updates the URL query string so filters/sort/page survive navigating
   // away and back (component unmounts on route change and would otherwise
@@ -88,7 +200,7 @@ export function ActiveListingsPage() {
     setSearchParams({}, { replace: true })
   }
 
-  const hasFilters = !!(cardFilter || sortBy !== 'Days Listed' || sortDir !== 'desc')
+  const hasFilters = !!(cardFilter || sortBy !== 'Number' || sortDir !== 'asc')
 
   const { data: summary } = useQuery<ActiveSummary>({
     queryKey: ['active-summary'],
@@ -435,6 +547,22 @@ export function ActiveListingsPage() {
             Clear
           </button>
         )}
+        <select
+          className="border border-slate-300 dark:border-neutral-600 dark:bg-neutral-800 dark:text-neutral-100 rounded-lg px-2 py-1.5 text-sm bg-white"
+          value={`${sortBy}:${sortDir}`}
+          onChange={(e) => {
+            const [key, dir] = e.target.value.split(':')
+            updateParams({ sort_by: key, sort_dir: dir, page: null })
+          }}
+        >
+          {SORTS.flatMap((o) => [
+            <option key={`${o.key}:asc`} value={`${o.key}:asc`}>{o.label} ↑</option>,
+            <option key={`${o.key}:desc`} value={`${o.key}:desc`}>{o.label} ↓</option>,
+          ])}
+        </select>
+        <div className="ml-auto">
+          <ViewToggle view={view} onChange={chooseView} />
+        </div>
       </div>
 
       {listLoading ? (
@@ -457,9 +585,46 @@ export function ActiveListingsPage() {
       ) : listData?.items ? (
         <>
           <div className={isPlaceholderData ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
+          {view === 'grid' ? (
+            listData.items.length === 0 ? (
+              <div className="bg-white dark:bg-neutral-800 rounded-xl p-8 text-center text-slate-400 text-sm">
+                No data
+              </div>
+            ) : (
+              <div className={GRID_CLASS}>
+                {listData.items.map((r) => {
+                  const id = r['Item ID'] as string
+                  return (
+                    <ActiveCard
+                      key={id}
+                      item={r}
+                      selectable={isPriceChanged(r)}
+                      selected={selected.has(id)}
+                      onToggle={() => {
+                        const next = new Set(selected)
+                        if (next.has(id)) next.delete(id)
+                        else next.add(id)
+                        setSelected(next)
+                      }}
+                      onOpen={() => navigate(`/active/${encodeURIComponent(id)}`)}
+                    />
+                  )
+                })}
+              </div>
+            )
+          ) : (
           <DataTable<ActiveListing>
             columns={[
-              { key: 'sprite_url', header: '', render: (r) => r.sprite_url ? <img src={r.sprite_url as string} alt="" width={64} height={64} style={{ imageRendering: 'pixelated' }} /> : null, className: 'w-30' },
+              {
+                key: 'sprite_url',
+                header: '',
+                className: 'w-30',
+                // Real card art, sprite only as a fallback: the species sprite can't
+                // tell two printings apart - every Charizard shares one.
+                render: (r) => (
+                  <CardArt artUrl={r.card_image_url} className="w-16 rounded" />
+                ),
+              },
               { key: 'Title', header: 'Title', className: 'max-w-sm truncate', sortKey: 'Card' },
               { key: 'Condition', header: 'Condition', sortKey: 'Condition' },
               { key: 'Price', header: 'Price', render: (r) => formatCurrency(r.Price as string), sortKey: 'Price' },
@@ -483,7 +648,25 @@ export function ActiveListingsPage() {
                 sortKey: 'Active Avg',
                 render: (r) => {
                   const pricing = getPricingForListing(r.Card as string | null)
-                  return pricing?.active_avg ? formatCurrency(pricing.active_avg) : <span className="text-slate-400 text-xs">—</span>
+                  if (!pricing?.active_avg) return <span className="text-slate-400 text-xs">—</span>
+                  // Landed, so it lines up with the Total column beside it rather than
+                  // making a free-shipping listing look dear next to a cheaper item
+                  // that charges postage. Falls back to the item price when no comp
+                  // reported shipping - the tooltip says which of the two you're
+                  // looking at, since the number alone can't.
+                  const landed = pricing.active_avg_total
+                  return (
+                    <span
+                      className="tabular-nums"
+                      title={
+                        landed !== null
+                          ? `${formatCurrency(pricing.active_avg)} item + ${formatCurrency(pricing.avg_shipping)} shipping, across ${pricing.active_sample ?? 0} competitor listings`
+                          : `Item price only - no competitor reported a shipping cost (${pricing.active_sample ?? 0} listings)`
+                      }
+                    >
+                      {formatCurrency(landed ?? pricing.active_avg)}
+                    </span>
+                  )
                 },
               },
               {
@@ -567,6 +750,7 @@ export function ActiveListingsPage() {
             sortDir={sortDir}
             onSortChange={handleSort}
           />
+          )}
           </div>
           <div className="flex justify-center items-center pt-2 relative">
             <div className="flex gap-2 items-center">

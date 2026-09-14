@@ -10,6 +10,38 @@ the allowed alternatives in `PRESETS`). That file is what the Chrome extension
 fills into eBay's listing form, so it *is* the standard — read it rather than
 trusting a remembered value, and update it if the standard changes.
 
+**There is a second copy.** `dashboard/backend/services/listing_csv.py` restates the
+same defaults in eBay File Exchange's vocabulary, for the bulk-upload CSV the
+Inventory page builds (`POST /inventory/listing-csv`). It is a copy rather than a
+parse because `defaults.js` is JavaScript and its description is an array joined at
+runtime. So changing a default means changing **both**, and the two speak different
+dialects of the same thing:
+
+| defaults.js (form) | listing_csv.py (CSV) |
+|---|---|
+| `format: "Buy It Now"` | `FORMAT = "FixedPrice"` |
+| `description` (plain text, newline-separated) | `DESCRIPTION_HTML` (eBay's field is HTML) |
+| `packageWeight`, `dimensions` | `WEIGHT_MAJOR`/`WEIGHT_MINOR`, `PACKAGE_*` |
+| `shippingPolicy` | `DEFAULT_SHIPPING_PROFILE` (must stay a `SHIPPING_PRICE_MAP` key) |
+| `condition: "Near Mint or better"` | `EBAY_CARD_CONDITION`, keyed on the app's grades |
+| `promotedRate: 2` | **nothing** — see below |
+
+A third consumer shares those defaults: `services/prefill_template.py`, which fills
+eBay's prefill template for the round-trip flow. It holds no defaults of its own —
+title, category and aspects all come from `listing_csv` — so auditing a prefill draft
+is auditing the same values, minus price, format, duration, policies and description,
+which that file has no columns for.
+
+The item location and the three business policy *names* are not in either file —
+they are per-user account facts, stored in `listing_defaults` (migration 0015) and
+edited on the Settings page. When auditing a draft, `shipping_profile` there is the
+one to check against `SHIPPING_PRICE_MAP`.
+
+Two `DEFAULTS` fields deliberately have no CSV counterpart. `promotedRate` is absent
+because a rate baked into a fifty-row bulk upload is exactly the automatic ad spend
+the `auto_boost_promotion` removal exists to prevent; Best Offer is absent for the
+same reason `revise_best_offer_thresholds` was deleted. Do not add either.
+
 ## Audit checklist
 
 Walk the draft field by field. Report mismatches grouped as **blocking** (will
@@ -84,16 +116,32 @@ worth calling out together.
 ### 6. Promoted rate
 
 Default **2%**, which matches the base of `compute_target_bid` in
-`marketing_api.py` (2.0 + 1.0 per 10 unsold days, capped). Starting above 2%
-means `auto_boost_promotion` will not raise it until staleness catches up to
-whatever it was set to.
+`marketing_api.py` (2.0 + 1.0 per 10 unsold days, capped). Nothing raises the
+rate on its own any more — `auto_boost_promotion` was taken out of the pipeline
+— so whatever is set at listing time is what the listing keeps until someone
+deliberately boosts it.
 
 ### 7. Description
 
 Default template key is `reg`; the body is the multi-line string in `DEFAULTS.description`
-(penny sleeve + top loader, ships within 1 business day, smoke free home, see
-photos for condition). Check the claims are still true for this listing — "see
-photos for condition" on a draft with no condition photos is a real problem.
+(KLINKSUMMER promo code, combine-orders note, the tiered shipping bullets, and the
+Klink TCG sign-off). Check the claims are still true for this listing.
+
+Two that go stale rather than being wrong-on-arrival: the **promo code** is seasonal
+and outlives the season unless someone edits it, and the **shipping bullets state a
+$20 threshold** — cards under $20 by eBay Standard Envelope, $20 and over by Ground
+Advantage in a bubble mailer. A draft whose price sits near that line, or whose
+shipping policy doesn't match the side it falls on, is describing a service it won't
+get. The CSV exports carry one shipping policy for the whole batch (`shipping_profile`
+on Settings), so a mixed-price batch will contradict this text for some of its rows —
+worth calling out as advisory when it happens.
+
+`reg` is a key the **Chrome extension** uses to pick a template in eBay's listing
+form. There is **no CSV column that references a saved description template by name**
+(verified against eBay's uploadable-templates docs: the draft template's only
+description field is `Description`, and File Exchange's is `*Description`), so
+`listing_csv.DESCRIPTION_HTML` inlines the same body as HTML instead. Changing the
+description means changing both.
 
 ### 8. Custom label / SKU
 
@@ -101,6 +149,15 @@ photos for condition" on a draft with no condition photos is a real problem.
 `DEFAULTS.customLabel` is empty. Note that a graded custom label contradicts the
 raw-only comp pool — comps exclude `-PSA -BGS -CGC -SGC -graded -slab`, so a
 graded card cannot be priced by this model.
+
+The listing CSV ignores that vocabulary and puts the **lot SKU** in `CustomLabel`
+instead (`L0030`, `L0041`, …), because `routers/lots.py` groups every sold order and
+active listing by exactly that string — a listing created without it never joins the
+lot it came out of. Treat a missing SKU on a draft as advisory: the listing works,
+but its money will never reach a lot's P&L. Both file builders do this, and the
+prefill one keeps it even though eBay recommends a unique per-row label there for
+correlating results — lot attribution is the stronger claim, and rows correlate by
+title, which is unique per card anyway.
 
 ## Output format
 

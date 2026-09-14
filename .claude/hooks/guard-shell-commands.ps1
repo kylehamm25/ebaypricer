@@ -28,18 +28,19 @@ function Send-Decision {
 }
 
 # --- 1. Live eBay writes ------------------------------------------------------
-# scripts/main.py ends with auto_boost_promotion.py, which raises real promoted-
-# listing ad rates through the Marketing API - that spends money and is not a
-# preview unless --dry-run is passed. Scoped to scripts/ so it never catches
-# `python -m uvicorn dashboard.backend.main:app` or dashboard/backend/main.py.
-if ($cmd -match 'scripts[/\\](main|auto_boost_promotion)\.py' -and $cmd -notmatch '--dry-run') {
+# auto_boost_promotion.py raises real promoted-listing ad rates through the
+# Marketing API - that spends money and is not a preview unless --dry-run is
+# passed. scripts/main.py is deliberately NOT matched any more: the boost step
+# was removed from the pipeline, so main.py no longer writes to eBay at all.
+if ($cmd -match 'scripts[/\\]auto_boost_promotion\.py' -and $cmd -notmatch '--dry-run') {
     Send-Decision 'ask' @'
-This runs the pipeline against LIVE eBay data without --dry-run.
+This changes LIVE promoted-listing ad rates without --dry-run.
 
-auto_boost_promotion.py raises real promoted-listing ad rates via the Marketing
-API (it spends money, and the bid changes are not trivially reversible).
+auto_boost_promotion.py raises real ad rates via the Marketing API (it spends
+money, and the bid changes are not trivially reversible). It is no longer part
+of the pipeline - running it is always a deliberate act.
 
-Add --dry-run to preview promotion changes instead, or approve to apply for real.
+Add --dry-run to preview the changes instead, or approve to apply for real.
 '@
 }
 

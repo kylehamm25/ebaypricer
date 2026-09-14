@@ -1,198 +1,42 @@
 # eBay Automation
 
-Automated eBay selling pipeline for Pokemon card listings. Fetches sold orders, refreshes active listings, computes market prices, and manages promoted listing bids.
+Automated eBay selling pipeline for Pokemon cards, plus a dashboard to view the data. Two halves that share a database but run independently:
 
-## Motivation
+1. **Pipeline** (`src/ebaypricer/` + `scripts/`) — talks to eBay's Trading/Browse/Marketing/Finances APIs, refreshes sold orders and active listings, and keeps an Excel workbook as the bookkeeping source of truth. Runs hourly via Windows Task Scheduler.
+2. **Dashboard** (`dashboard/backend` FastAPI + `dashboard/frontend` React/Vite) — sold orders, active listings, inventory, lots, and pricing, backed by Postgres/Supabase. Syncs the Excel workbook on startup.
 
-Managing a high-volume Pokemon card inventory manually became increasingly time-consuming. This project automates pricing research, bookkeeping, listing management, and promoted listing optimization, allowing inventory to stay competitively priced while reducing repetitive seller tasks.
-
-## Features
-
-- **Sold Order Tracking** 
-- **Active Listing Management** 
-- **Market Price Analytics** 
-- **Active Price Comparison**
-- **Automated Promotion Adjustment**
-- **Listing Defaults Extension** 
-
-## Scale
-
-- Supports hundreds of active listings
-- Tracks thousands of sold price snapshots
-- Processes hundreds of completed sales
-- Integrates four eBay APIs
-- Executes automatically on an hourly schedule
-
-## Tech Stack
-
-- Python 3.12
-- SQLite
-- openpyxl
-- eBay Trading API
-- eBay Browse API
-- eBay Marketing API
-- eBay Finances API
-- OAuth 2.0
-- Chrome Extension (JavaScript)
-- PowerShell / Bash
+A third piece, `ebay-defaults-extension/`, is a standalone Chrome extension for filling eBay listing form defaults.
 
 ## Pipeline
 
-All steps run sequentially via `scripts/main.py`:
-
+```bash
+pip install -e .              # required: installs src/ebaypricer
+python scripts/main.py        # full run: append_sold_orders → get_active → avg_active_price
 ```
-append_sold_orders → get_active → avg_active_price (active avg + price accuracy)
+
+See `scripts/CLAUDE.md` for the per-script data flow.
+
+## Dashboard
+
+```bash
+python -m uvicorn dashboard.backend.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Hourly execution is supported through `scripts/run_hourly.ps1` (Windows) or `scripts/run_hourly.sh` (anacron/cron).
-
-## Performance
-
-- Incremental updates avoid reprocessing historical orders.
-- SQLite caches sold-listing snapshots to reduce API usage.
-- Duplicate sold listings are automatically filtered across daily runs.
-- Weighted averages prioritize recent market activity.
-- Outlier filtering removes anomalous sale prices before averaging.
-- Automatic OAuth token refresh minimizes authentication interruptions.
-
-## Data Storage
-
-- Excel is used as the primary bookkeeping interface for readability
-- SQLite stores historical pricing snapshots and cached marketplace data, enabling incremental updates without repeatedly querying eBay.
-
-## Reliability
-
-- Automatic OAuth token refresh with persistent refresh-token workflow.
-- Retry logic for transient API failures.
-- Duplicate prevention for sold orders.
-- Graceful handling of missing listing metadata.
-- Logging for all pipeline stages.
-
-## Scripts Reference
-
-### `main.py` 
-
-The entry point for the full automation pipeline. Runs three sub-scripts sequentially, stopping on failure. Nothing in the chain writes to eBay - the `auto_boost_promotion` step was removed so an unattended run can never change ad rates. All output is logged to `logs/main.log` with timestamps.
-
-**Pipeline order:**
-1. `append_sold_orders.py` - import new sales
-2. `get_active.py` - refresh active listings
-3. `avg_active_price.py` - active-market comparison
-
-
-### `append_sold_orders.py`
-
-Pulls completed orders via the Trading API within a date range, enriches each sale with eBay fee data from the Finances API, deduplicates against existing rows, and appends new orders to the Sold Orders sheet in the Excel workbook.
-
-**Key behaviors:**
-- Default cutoff is `2026-06-30`; override with `--days N` to fetch the last N days.
-- Deduplicates by (Item ID, Sale Date) to prevent re-importing.
-- Strips deprecated columns automatically when opening existing workbooks.
-- For multi-item orders, order-level values (Shipping, Total, Fees, Earnings) appear only on the first/highest-priced item row; continuation rows leave those fields blank.
-- Enriches each row with card metadata via fuzzy matching against the Pokemon card database.
-
-
-### `get_active.py`
-
-Fetches all current active listings from the Trading API, enriches them with card names, shipping cost estimates, and promoted listing ad rates from the Marketing API, then rewrites the Active Listings sheet in Excel.
-
-**Key behaviors:**
-- Maps shipping profile names to estimated costs (e.g., "Free Shipping" → $0.00, "Ebay Standard Envelope" → $0.78).
-- Estimates fees using tiered multipliers: 65% net for items ≤ $2, 70% for ≤ $5, 73% otherwise.
-- Pulls ad-rate percentages for each listing
-- Restores existing price analytics columns (Recent Sold Avg, Price vs Sold Avg, etc.) so they aren't lost on refresh.
-- Preserves cached card names across runs to maintain consistency.
-
-
-### `price_active_listings.py` (no longer in the pipeline)
-
-For each unique card in the Active Listings sheet, searches eBay completed/sold listings via the Browse API, computes a weighted-average sold price, and writes analytics columns back to the sheet.
-
-**Key behaviors:**
-- Searches up to 10 sold matches per card, filtered to the last 30 days.
-- Removes statistical outliers beyond 1.5 sigma before averaging.
-- Weighted average: recent sales (≤ 14 days) weighted 2x, older sales 1x.
-- Caches results in SQLite (`price_snapshots` table) — re-runs on the same day are no-ops unless `--force` is used.
-- Writes columns: `Recent Sold Avg`, `Price vs Sold Avg`, `Recent Sold Count`, `Last Checked`.
-- Each sold listing is also saved to the `sold_listings` table for debugging.
-
-
-### `avg_active_price.py`
-
-For each unique card, searches currently active eBay listings via the Browse API, takes the 5 cheapest listings, averages them, and writes `Active Avg (Top 5)` to the sheet. Also computes a `Price Accuracy` column: the difference between the listed price and the midpoint of the sold and active market averages.
-
-**Key behaviors:**
-- Targets the 5 lowest prices for a conservative competitive benchmark.
-- Price Accuracy = Listed Price − AVG(Recent Sold Avg, Active Avg (Top 5)), using whichever benchmark data is available.
-- Caches results in SQLite (`active_snapshots` table) to avoid redundant API calls.
-- Prints a summary table with per-card averages and a grand average across all cards.
-- Respects `--force` to bypass daily cache.
-- Rate-limited with a 0.5s sleep between calls.
-
-
-### `auto_boost_promotion.py`
-
-Increases promoted listing ad rates for stale inventory. Every 10 days an item has been listed without selling, its ad rate is bumped by 1% (computed via `marketing_api.compute_target_bid`), up to a configurable cap.
-
-**Not part of the pipeline** - `main.py` used to run it last, and it was removed so ad spend never moves unattended. Run it by hand (with `--dry-run` first) when you actually want a boost.
-
-**Key behaviors:**
-- Default cap is 5.0%; items over $50 cap at 3.0%.
-- Targets the first RUNNING Cost-Per-Sale campaign; specify a different campaign with `--campaign-name` or `--campaign-id`.
-- Validates the campaign funding model — refuses to run on Cost-Per-Click campaigns.
-- Processes updates in batches of 500 via the Marketing API's `bulk_update_bids` endpoint.
-- `--dry-run` prints what would be changed without applying.
-
-
-### `gen_access_token.py`
-
-One-time setup script that walks through the eBay OAuth 2.0 authorization code flow. Opens the eBay consent page in a browser, captures the redirect URL, exchanges the authorization code for access and refresh tokens, then saves them to `.env`.
-
-**Key behaviors:**
-- Requests scopes: `sell.inventory.readonly`, `sell.fulfillment.readonly`, `sell.marketing`.
-- Validates that `sell.marketing` was granted (required for promotion features).
-- Persists both ACCESS_TOKEN and REFRESH_TOKEN to the `.env` file.
-- At runtime, `auth.py` automatically refreshes the access token using the stored refresh token.
-
-
-### `run_hourly.ps1`
-
-PowerShell script designed for Windows Task Scheduler. Activates the project's virtual environment, runs `main.py`, and appends stdout/stderr to `%USERPROFILE%\ebay_exports\run_hourly.log` with timestamps.
-
-
-## Project Layout
-
-```
-src/ebaypricer/          core library
-├── auth.py              OAuth 2.0 token management
-├── trading_api.py       eBay Trading API (orders, active listings)
-├── browse_api.py        eBay Browse API (sold search, snapshots)
-├── finances.py          eBay Finances API (fee breakdowns)
-├── cards.py             Pokemon card database + fuzzy matching
-├── excel.py             shared styling helpers
-├── marketing_api.py     promoted listings campaign/ads API
-└── paths.py             centralized file paths
-scripts/                 entry points
-├── main.py              pipeline orchestrator
-├── append_sold_orders.py
-├── get_active.py
-├── avg_active_price.py
-├── price_active_listings.py
-├── auto_boost_promotion.py   (manual only, not in the pipeline)
-├── gen_access_token.py
-└── run_hourly.ps1
-ebay-defaults-extension/  Chrome extension for listing form defaults
-data/                    card DB + pricing caches
-db/                      SQLite (sold listings, price snapshots)
-```
+Or use the shortcuts: `start-dashboard.bat` (dev, backend :8000 + frontend :5173) and `start-prod.bat` (single-host prod on :8000). Database migrations in `db/migrations/` are applied by hand in the Supabase SQL editor, in order.
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
 pip install -e .
-cp .env.example .env   # fill in EBAY_APP_ID, EBAY_SECRET, EBAY_DEV_ID
-python scripts/gen_access_token.py   # OAuth consent -> refresh token saved to .env
+cp .env.example .env   # fill in credentials, see .env.example
+python scripts/gen_access_token.py   # one-time eBay OAuth consent flow
 ```
 
 Requires eBay Developer API credentials from [developer.ebay.com](https://developer.ebay.com).
+
+## Docs
+
+- `CLAUDE.md` — architecture, pricing model, and conventions
+- `docs/SOFTWARE_PLAN.md` — Postgres schema and migration plan
+- `dashboard/frontend/CLAUDE.md` — frontend route map and rules

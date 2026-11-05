@@ -20,8 +20,6 @@ function Dash() {
   return <span className="text-slate-400 text-xs">—</span>
 }
 
-/** One buying lot: what it cost, what it has returned, and the listings behind
- *  those numbers. Reached by clicking a row on the Lots page. */
 export function LotDetailPage() {
   const { sku } = useParams<{ sku: string }>()
   const navigate = useNavigate()

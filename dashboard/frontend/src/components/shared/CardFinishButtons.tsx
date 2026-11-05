@@ -8,15 +8,6 @@ const SHORT_CODE: Record<Exclude<CardFinish, 'regular'>, string> = {
   master_ball: 'MB',
 }
 
-/** The finish buttons shown beside a catalog search hit - "Regular" is the row's own
- *  click target everywhere this is used, so it isn't repeated here. Which buttons
- *  appear depends on the hit's own set (`finishesFor` in lib/cardFinish.ts): every
- *  set gets Reverse Holo and Non-Holo, and a set with the Poke Ball / Master Ball
- *  chase pulls (151, Prismatic Evolutions, Black Bolt, White Flare) gets those two as
- *  well. Kept as its own component because the inventory page's inline search and the
- *  edit dialog's card-search step both need the exact same buttons, and a hit's row
- *  is a sibling `<button>` rather than a wrapper - buttons can't nest - so this has to
- *  be a separate element either way. */
 export function CardFinishButtons({ setName, onPick }: {
   setName: string | null | undefined
   onPick: (finish: CardFinish) => void

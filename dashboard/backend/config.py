@@ -28,27 +28,26 @@ EBAY_TOKEN_ENCRYPTION_KEY = _env("EBAY_TOKEN_ENCRYPTION_KEY", "")
 # sell.inventory (not .readonly) is required to revise a listing's price from the
 # dashboard - a user who connected before this scope was added must disconnect and
 # reconnect (Settings page) to grant it; their existing token won't gain it retroactively.
+# sell.marketplace.insights.readonly (Item Sales sold comps) likewise needs a
+# reconnect; see scripts/probe_item_sales.py for the validation probe.
 EBAY_SCOPES = _env(
     "EBAY_SCOPES",
     "https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly "
-    "https://api.ebay.com/oauth/api_scope/sell.inventory",
+    "https://api.ebay.com/oauth/api_scope/sell.inventory "
+    "https://api.ebay.com/oauth/api_scope/sell.marketplace.insights.readonly",
 )
 
 # Per-user eBay sync (Phase 6)
 EBAY_SYNC_DAYS = int(_env("EBAY_SYNC_DAYS", "120"))  # fetch window (overlap for fee updates)
 EBAY_SYNC_INTERVAL_HOURS = float(_env("EBAY_SYNC_INTERVAL_HOURS", "6"))
 
-# Legacy pipeline run (Phase 7): runs scripts/main.py then ingests workbook + SQLite
-EBAY_PIPELINE_INTERVAL_HOURS = float(_env("EBAY_PIPELINE_INTERVAL_HOURS", "1"))
-
 # Shared marketplace price research (Phase 3): researches every card any connected
-# user currently has listed (not just the legacy Excel pipeline's account) and writes
-# derived pricing columns onto each user's own active_listings rows.
+# user currently has listed and writes derived pricing columns onto each user's
+# own active_listings rows.
 EBAY_PRICE_RESEARCH_INTERVAL_HOURS = float(_env("EBAY_PRICE_RESEARCH_INTERVAL_HOURS", "6"))
 
 LOG_PATH = os.path.join(PROJECT_ROOT, "logs", "main.log")
 DATA_DIR_STR = str(DATA_DIR)
-EXCEL_PATH = _env("EBAY_EXCEL_PATH", os.path.join("H:", os.sep, "My Drive", "ebay", "ebay_sold_orders.xlsx"))
 FRONTEND_DIST = _env("FRONTEND_DIST", os.path.join(PROJECT_ROOT, "dashboard", "frontend", "dist"))
 
 ALLOWED_ORIGINS = [

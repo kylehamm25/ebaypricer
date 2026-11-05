@@ -33,9 +33,6 @@ export function useTheme() {
   return useContext(ThemeContext)
 }
 
-/** Theme-aware Recharts <Tooltip cursor={...}> styles - Recharts' own default
- * cursor colors are light-mode only and barely visible (bar) or wrong (line)
- * against a dark card background. */
 export function useChartCursor() {
   const { theme } = useTheme()
   const dark = theme === 'dark'

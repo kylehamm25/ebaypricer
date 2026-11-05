@@ -7,7 +7,6 @@ interface KpiCardProps {
   value: string
   subtitle?: string
   icon?: ReactNode
-  /** Colors the value text - 'positive'/'negative' for at-a-glance good/bad signals (e.g. price vs. benchmark). */
   tone?: KpiTone
 }
 

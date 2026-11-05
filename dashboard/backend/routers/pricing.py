@@ -52,9 +52,11 @@ def get_price_comparisons(user_id: uuid.UUID = Depends(get_current_user_id)):
         rows = db.execute(
             """SELECT DISTINCT ON (aps.card_query)
                       aps.card_query,
+                      aps.snapshot_date,
                       aps.avg_price AS active_avg,
                       aps.avg_shipping AS avg_shipping,
                       aps.min_price AS active_min,
+                      aps.max_price AS active_max,
                       aps.sample_size AS active_sample
                FROM active_price_snapshots aps
                ORDER BY aps.card_query, aps.snapshot_date DESC"""

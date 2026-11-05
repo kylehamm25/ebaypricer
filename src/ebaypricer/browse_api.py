@@ -40,15 +40,58 @@ EXCLUDED_TERMS = "-PSA -BGS -CGC -SGC -graded -slab -lot -bundle -playset -proxy
 CARD_CATEGORY_ID = "183454"
 
 
-def _build_query(query: str) -> str:
+# Trailing print phrases the inventory/valuation finish buttons put on a
+# card_query. These must survive MAX_QUERY_WORDS truncation: without this, the finish
+# picked on the page never reaches eBay on any card whose base query already fills
+# the budget ("Charizard ex SIR 199 151" is five words before " Reverse" is even
+# added, and promo set names run longer still). The base is truncated to make room
+# instead, so the print - the thing that separates one pool from another's - is never
+# the token that gets cut. Single "Reverse" rather than "Reverse Holo" on purpose:
+# eBay matches on words, so it already matches "reverse holo" titles, and the second
+# word would cost a slot that usually holds the card number; comp_filter enforces the
+# print either way.
+_FINISH_TRAIL_RE = re.compile(
+    r"\s+((?:poke|master)\s+ball|non\s*[\s-]*holo|reverse(?:\s+holo)?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _split_finish(query: str) -> tuple[str, str]:
+    """Peel a trailing print phrase off a card query, canonicalised.
+
+    Returns (base, finish), with finish "" when there is none. Single-token
+    spellings ("Non-Holo", "NonHolo") come back two-worded, and a trailing
+    "Reverse Holo" collapses to "Reverse" for the reason above.
+    """
+    m = _FINISH_TRAIL_RE.search(query)
+    if not m:
+        return query, ""
+    norm = re.sub(r"[\s-]+", " ", m.group(1)).strip().lower()
+    if norm == "reverse holo":
+        norm = "reverse"
+    return query[: m.start()].strip(), norm.title()
+
+
+def truncate_query(query: str) -> str:
+    """A card query cut to what eBay actually gets asked, finish included.
+
+    Shared by _build_query and the search-position lookup in price_research, so the
+    two can never disagree about what was searched for.
+    """
     # Rewrite the catalogued card number into the form sellers actually title
     # ("SVP13" -> "SVP013"); see cards.searchable_card_query for the measurements.
     # Done before truncation so the rewrite can never be the token that gets cut.
-    query = searchable_card_query(query)
-    words = query.split()
-    if len(words) > MAX_QUERY_WORDS:
-        query = " ".join(words[:MAX_QUERY_WORDS])
-    return f"{query} {EXCLUDED_TERMS}".strip()
+    base, finish = _split_finish(searchable_card_query(query))
+    words = base.split()
+    if finish:
+        words = words[: MAX_QUERY_WORDS - len(finish.split())]
+    else:
+        words = words[:MAX_QUERY_WORDS]
+    return " ".join([*words, *finish.split()]).strip()
+
+
+def _build_query(query: str) -> str:
+    return f"{truncate_query(query)} {EXCLUDED_TERMS}".strip()
 
 
 def web_search_url(query: str) -> str:

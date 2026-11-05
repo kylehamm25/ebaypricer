@@ -20,11 +20,12 @@ import {
   PackageSearch,
   Pencil,
   RefreshCw,
+  ThumbsDown,
   TrendingDown,
   TrendingUp,
   X,
 } from 'lucide-react'
-import { api, apiPost } from '../lib/api'
+import { api, apiDelete, apiPost } from '../lib/api'
 import { DataTable } from '../components/shared/DataTable'
 import { KpiCard } from '../components/shared/KpiCard'
 import { CardMatchDialog } from '../components/shared/CardMatchDialog'
@@ -114,6 +115,20 @@ export function ListingDetailPage() {
       queryClient.invalidateQueries({ queryKey: ['active-item-positions', itemId] })
       queryClient.invalidateQueries({ queryKey: ['pricing-comparisons'] })
       queryClient.invalidateQueries({ queryKey: ['pricing-card', cardQuery] })
+    },
+  })
+
+  // Thumbs-down on the suggestion: vetoes the direction it moved for 30 days
+  // (an up-veto still allows cuts and vice versa). Voting recomputes server-side
+  // so the hold takes effect immediately; voting again clears it.
+  const feedbackMutation = useMutation({
+    mutationFn: (vote: 'down' | null) =>
+      vote === null
+        ? apiDelete(`/active/item/${encodeURIComponent(itemId!)}/feedback`)
+        : apiPost(`/active/item/${encodeURIComponent(itemId!)}/feedback`, { vote }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['active-item', itemId] })
+      queryClient.invalidateQueries({ queryKey: ['active-list'] })
     },
   })
 
@@ -226,13 +241,25 @@ export function ListingDetailPage() {
     const n = toNumber(item['Price Accuracy'])
     return n !== null ? n * 100 : null
   })()
-  const activePrices = recentActive
+  // One source for every tile: the card's latest filtered snapshot - the same
+  // aggregate the list page's Active Avg column and the pricing model read.
+  // The table below shows the cheapest 15 RAW comp rows (pre-filter), so deriving
+  // the tiles from those rows instead mixed two pools: a snapshot average could
+  // land above the displayed max, which reads as a wrong number but is really two
+  // different pools shown as one.
+  const hasSnapshot = comparison?.active_avg != null
+  const rowPrices = recentActive
     .map((r) => Number(r.price))
     .filter((n) => Number.isFinite(n))
-  const activeAvg =
-    comparison?.active_avg ?? (activePrices.length ? activePrices.reduce((a, b) => a + b, 0) / activePrices.length : null)
-  const activeMin = activePrices.length ? Math.min(...activePrices) : null
-  const activeMax = activePrices.length ? Math.max(...activePrices) : null
+  const rowMean = rowPrices.length ? rowPrices.reduce((a, b) => a + b, 0) / rowPrices.length : null
+  // Landed, like the list page's Active Avg column: item average plus the pool's
+  // mean shipping, so both pages show one number for the same card.
+  const activeAvg = comparison?.active_avg_total ?? comparison?.active_avg ?? rowMean
+  const activeMin = comparison?.active_min ?? (rowPrices.length ? Math.min(...rowPrices) : null)
+  const activeMax = comparison?.active_max ?? (rowPrices.length ? Math.max(...rowPrices) : null)
+  const snapshotLabel = hasSnapshot
+    ? `filtered snapshot${comparison?.snapshot_date ? ` ${comparison.snapshot_date}` : ''} · ${comparison?.active_sample ?? 0} comps`
+    : null
 
   // Item price alone understates what a buyer actually pays - rank comps by the
   // all-in total so the cheapest *landed* price surfaces first, not just cheapest item.
@@ -255,9 +282,11 @@ export function ListingDetailPage() {
   const bestTotal = sortedComps.length && sortedComps[0]._total !== null ? sortedComps[0]._total : null
 
   const knownShippingCosts = compsWithTotal.filter((r) => r._hasShipping).map((r) => Number(r.shipping_cost))
-  const avgShipping = knownShippingCosts.length
-    ? knownShippingCosts.reduce((a, b) => a + b, 0) / knownShippingCosts.length
-    : null
+  // Snapshot first (filtered pool), rows below only when never researched.
+  const avgShipping = comparison?.avg_shipping
+    ?? (knownShippingCosts.length
+      ? knownShippingCosts.reduce((a, b) => a + b, 0) / knownShippingCosts.length
+      : null)
 
   const rawItemId = typeof item['Item ID'] === 'string' ? item['Item ID'].trim() : ''
   const ebayUrl = rawItemId ? `https://www.ebay.com/itm/${rawItemId}` : null
@@ -272,6 +301,10 @@ export function ListingDetailPage() {
   const suggestionBasis = (item['Suggested Price Basis'] as SuggestedPriceBasis | null) ?? null
   const recommendationDiffers =
     recommendedPrice !== null && (priceNum === null || Math.abs(recommendedPrice - priceNum) >= 0.01)
+
+  // Active thumbs-down on the suggestion, if any. Shown whenever a suggestion
+  // exists - including holds, so a veto can always be undone from here.
+  const feedback = (item['Feedback'] as { direction: string; voted_at: string } | null) ?? null
 
   const useRecommendedPrice = () => {
     if (recommendedPrice === null) return
@@ -460,7 +493,36 @@ export function ListingDetailPage() {
                     Use {formatCurrency(recommendedPrice)}
                   </button>
                 )}
+                {/* Thumbs-down on the recommendation. Vetoes the direction it moved
+                    for 30 days (server-side); voting again clears the veto. Stays
+                    visible on holds so an active veto is always undoable - a hold
+                    has no direction to veto, so voting one is refused server-side. */}
+                {!editingPrice && recommendedPrice !== null && (
+                  <button
+                    onClick={() => feedbackMutation.mutate(feedback ? null : 'down')}
+                    disabled={feedbackMutation.isPending}
+                    title={feedback
+                      ? 'Remove your veto — suggestions move freely again'
+                      : 'Not helpful — hold this direction for 30 days'}
+                    aria-label={feedback ? 'Remove suggestion veto' : 'Downvote suggestion'}
+                    aria-pressed={!!feedback}
+                    className={`${chip} disabled:opacity-50 ${feedback
+                      ? 'bg-rose-50 text-rose-700 hover:bg-rose-100 dark:bg-rose-500/15 dark:text-rose-300 dark:hover:bg-rose-500/25'
+                      : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100 dark:text-neutral-500 dark:hover:text-neutral-200 dark:hover:bg-neutral-700'}`}
+                  >
+                    {feedbackMutation.isPending
+                      ? <Loader2 size={12} className="animate-spin" />
+                      : <ThumbsDown size={12} className={feedback ? 'fill-current' : ''} />}
+                    {feedback ? 'Vetoed' : 'Not helpful'}
+                  </button>
+                )}
               </div>
+
+              {feedbackMutation.isError && (
+                <p className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">
+                  {(feedbackMutation.error as Error).message}
+                </p>
+              )}
 
               {revisePriceMutation.isError && (
                 <p className="mt-1.5 text-xs text-rose-600 dark:text-rose-400">
@@ -614,13 +676,35 @@ export function ListingDetailPage() {
           <TableSkeleton rows={5} columns={[{ header: 'Title', width: 'w-72' }, { header: 'Price', width: 'w-16' }]} />
         ) : (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-2">
               <KpiCard title="Active Count" value={int(recentActive.length)} />
-              <KpiCard title="Active Avg" value={activeAvg !== null ? formatCurrency(activeAvg) : '—'} />
+              <KpiCard
+                title="Active Avg"
+                value={activeAvg !== null ? formatCurrency(activeAvg) : '—'}
+                subtitle={
+                  hasSnapshot
+                    ? (comparison?.avg_shipping != null
+                      ? `${formatCurrency(comparison.active_avg)} item + ${formatCurrency(comparison.avg_shipping)} ship`
+                      : 'item only — no ship data')
+                    : 'from rows below'
+                }
+              />
               <KpiCard title="Active Min" value={activeMin !== null ? formatCurrency(activeMin) : '—'} />
               <KpiCard title="Active Max" value={activeMax !== null ? formatCurrency(activeMax) : '—'} />
               <KpiCard title="Avg Shipping" value={avgShipping !== null ? formatCurrency(avgShipping) : '—'} />
             </div>
+            {snapshotLabel ? (
+              <p className="text-[11px] text-slate-400 mb-3">
+                Tiles: {snapshotLabel}. The table shows the cheapest 15 raw comps (pre-filter),
+                so individual rows can sit outside these aggregates.
+              </p>
+            ) : (
+              recentActive.length > 0 && (
+                <p className="text-[11px] text-slate-400 mb-3">
+                  No snapshot yet — figures are the mean of the rows below.
+                </p>
+              )
+            )}
             {sortedComps.length > 0 ? (
               <DataTable
                 columns={[

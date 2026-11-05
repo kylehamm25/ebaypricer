@@ -275,19 +275,40 @@ def identity(row: dict) -> dict:
     set_name = (row.get("set_name") or "").strip()
     number = (row.get("number") or "").strip()
     reverse = False
+    pattern = None
+    non_holo = False
 
     ident = card_identity(row["card_query"]) if row.get("card_query") else None
     if ident:
         reverse = bool(ident.get("reverse"))
+        pattern = ident.get("pattern")
+        non_holo = bool(ident.get("non_holo"))
         set_name = set_name or (ident.get("set_name") or "").strip()
         number = number or (ident.get("number") or "").strip()
         name = name or (ident.get("name") or "").strip()
 
+    # card_identity() loses the ball-pattern distinction when it reads a cached
+    # CARD_QUERY_LOOKUP entry (TCGdex only knows "reverseHolofoil"), but the suffix is
+    # still in card_query. Recover it here so a Poke Ball print is never titled as a
+    # plain Reverse Holo and priced against the wrong pool.
+    query_tokens = (row.get("card_query") or "").lower().split()
+    if len(query_tokens) >= 2:
+        suffix = (query_tokens[-2], query_tokens[-1])
+        if not pattern and suffix in {("poke", "ball"), ("master", "ball")}:
+            pattern = "poke_ball" if suffix == ("poke", "ball") else "master_ball"
+        if suffix == ("non", "holo"):
+            non_holo = True
+    elif query_tokens:
+        if query_tokens[-1] in {"non-holo", "nonholo"}:
+            non_holo = True
+
     out = {
         "name": name, "set_name": set_name, "number": number, "reverse": reverse,
+        "pattern": pattern, "non_holo": non_holo,
         # Everything below is blank unless the catalog resolves the card. A free-text
         # row has a name and nothing else, and blank is the honest answer for it.
-        "rarity": "", "supertype": "", "subtypes": [], "release": "",
+        "rarity": "", "supertype": "", "subtypes": [], "types": [], "release": "",
+        "set_series": "", "catalog": False,
     }
 
     card = find_catalog_card(row["card_query"]) if row.get("card_query") else None
@@ -295,7 +316,10 @@ def identity(row: dict) -> dict:
         out["rarity"] = (card.get("rarity") or "").strip()
         out["supertype"] = (card.get("supertype") or "").strip()
         out["subtypes"] = card.get("subtypes") or []
+        out["types"] = card.get("types") or []
         out["release"] = (card.get("set_release") or "").strip()
+        out["set_series"] = (card.get("set_series") or "").strip()
+        out["catalog"] = True
     return out
 
 
@@ -333,41 +357,165 @@ def _vintage(release: str) -> str:
     return "Yes" if int(year) < VINTAGE_BEFORE_YEAR else "No"
 
 
-def build_title(ident: dict, condition: str | None) -> str:
-    """An 80-character title in this seller's usual shape.
+TITLE_FINISH = {
+    "reverse": "Reverse Holo",
+    "poke_ball": "Poke Ball",
+    "master_ball": "Master Ball",
+    "non_holo": "Non-Holo",
+}
 
-    Trimmed from the least identifying end: "Pokemon TCG" goes before the set name,
-    which goes before the card number, and the grade is appended last so it survives
-    every trim. That order is not cosmetic - the grade is what `parse_condition_from_title`
-    reads back, and a title that loses it gets priced off eBay's generic "Ungraded"
-    instead.
+
+def build_title(ident: dict, condition: str | None) -> str:
+    """An 80-character title built for eBay search, not just card identification.
+
+    The first words are the ones a buyer types - card name, number, set - then the
+    catalog's own facts (rarity, series, stage/speciality, language) fill the remaining
+    space. Optional phrases are added only while they still fit, so a long title stays
+    under eBay's limit without dropping the grade. The grade is always last because
+    `parse_condition_from_title` reads it back, and a title that loses it gets priced
+    off eBay's generic "Ungraded" instead.
     """
     grade = TITLE_GRADE.get((condition or "").strip().lower(), "")
-    # Most identifying first, so a long name pushes out context rather than itself.
-    # The number goes in bare, no '#'.
-    parts = [ident["name"], ident["number"], ident["set_name"]]
-    if ident["reverse"]:
-        parts.append("Reverse Holo")
-    optional = ["Pokemon TCG"]
+    name = (ident.get("name") or "").strip()
+    if not name:
+        return ""
 
-    def assemble(head: list[str], tail: list[str]) -> str:
+    number = (ident.get("number") or "").strip()
+    set_name = (ident.get("set_name") or "").strip()
+    set_series = (ident.get("set_series") or "").strip()
+    rarity = (ident.get("rarity") or "").strip()
+    catalog = bool(ident.get("catalog"))
+    release_year = (ident.get("release") or "").strip()[:4]
+    if not release_year.isdigit():
+        release_year = ""
+    vintage = "Vintage" if release_year and int(release_year) < VINTAGE_BEFORE_YEAR else ""
+    card_types = "/".join(
+        value.strip() for value in ident.get("types") or [] if value and value.strip()
+    )
+
+    finish = ""
+    if ident.get("pattern") in TITLE_FINISH:
+        finish = TITLE_FINISH[ident["pattern"]]
+    elif ident.get("reverse"):
+        finish = "Reverse Holo"
+    elif ident.get("non_holo"):
+        finish = "Non-Holo"
+
+    # A reverse/ball/non-holo printing whose catalog rarity says "Rare Holo" is
+    # already described by its finish; saying both would be a contradiction.
+    if finish and "holo" in rarity.lower():
+        rarity = ""
+
+    # "Base" is the series of "Base Set", not a second set name. Only add the series
+    # when it contributes a distinct search term.
+    if set_series and (
+        set_series.lower() in set_name.lower() or set_name.lower() in set_series.lower()
+    ):
+        set_series = ""
+
+    # The name and grade cannot be dropped. Number and set name go only if the title
+    # would otherwise exceed eBay's hard limit; the current code did this by popping
+    # from the end, which discarded the number before the set name.
+    keep_number = bool(number)
+    keep_set = bool(set_name)
+
+    def assemble(parts: list[str]) -> str:
         out: list[str] = []
-        for part in [*head, *tail, grade]:
+        for part in parts:
             # A free-text row's name often already contains its own number and set
             # ("dragonite 12 mcdonalds"), and identity parses those back out of it -
             # so without this the title says each of them twice.
             if part and part.lower() not in " ".join(out).lower():
                 out.append(part)
-        return " ".join(out).strip()
+        title = " ".join(out).strip()
+        return f"{title} {grade}".strip() if grade else title
 
-    title = assemble(parts, optional)
-    while len(title) > TITLE_MAX and optional:
-        optional.pop()
-        title = assemble(parts, optional)
-    while len(title) > TITLE_MAX and len(parts) > 1:
-        parts.pop()
-        title = assemble(parts, optional)
-    return title[:TITLE_MAX].strip()
+    def core() -> list[str]:
+        parts = [name]
+        if keep_number:
+            parts.append(number)
+        if keep_set:
+            parts.append(set_name)
+        return parts
+
+    while len(assemble(core())) > TITLE_MAX and (keep_set or keep_number):
+        if keep_set:
+            keep_set = False
+        else:
+            keep_number = False
+
+    if len(assemble(core())) > TITLE_MAX:
+        # Only a pathologically long name reaches this. Cut the name rather than the
+        # grade, because the grade is what the pricing model reads back.
+        room = TITLE_MAX - (len(grade) + 1 if grade else 0)
+        name = name[:max(1, room)].rstrip()
+
+    # Final reading order. Series belongs before a bare set name ("151" becomes
+    # "Scarlet & Violet 151"), and "Pokemon TCG Card" stays together at the end.
+    subtype_phrases = [
+        (f"subtype:{i}", value.strip())
+        for i, value in enumerate(ident.get("subtypes") or [])
+        if value and value.strip().lower() != "basic"
+    ]
+    supertype = (ident.get("supertype") or "").strip()
+    if supertype.lower() in {"pokemon", "pokémon"}:
+        supertype = ""
+
+    candidates = [
+        ("rarity", rarity, 1),
+        ("finish", finish, 2),
+        ("brand", "Pokemon TCG", 3),
+        ("series", set_series, 4),
+        *[(key, value, 5) for key, value in subtype_phrases],
+        ("supertype", supertype, 6),
+        ("english", "English" if catalog else "", 7),
+        ("year", release_year, 8),
+        ("vintage", vintage, 9),
+        ("types", card_types, 10),
+        ("card", "Card", 11),
+    ]
+
+    selected: set[str] = set()
+
+    def render(chosen: set[str]) -> str:
+        parts = [name]
+        if keep_number:
+            parts.append(number)
+        if "series" in chosen:
+            parts.append(set_series)
+        if keep_set:
+            parts.append(set_name)
+        if "rarity" in chosen:
+            parts.append(rarity)
+        if "finish" in chosen:
+            parts.append(finish)
+        for key, value in subtype_phrases:
+            if key in chosen:
+                parts.append(value)
+        if "supertype" in chosen:
+            parts.append(supertype)
+        if "year" in chosen:
+            parts.append(release_year)
+        if "vintage" in chosen:
+            parts.append(vintage)
+        if "types" in chosen:
+            parts.append(card_types)
+        if "english" in chosen:
+            parts.append("English")
+        if "brand" in chosen:
+            parts.append("Pokemon TCG")
+        if "card" in chosen:
+            parts.append("Card")
+        return assemble(parts)
+
+    for key, phrase, _priority in sorted(candidates, key=lambda item: item[2]):
+        if not phrase:
+            continue
+        trial = selected | {key}
+        if len(render(trial)) <= TITLE_MAX:
+            selected = trial
+
+    return render(selected)
 
 
 def _effective_floor(shipping_charge: float, min_price: float | None) -> float:
@@ -532,6 +680,10 @@ def card_aspects(ident: dict, card_condition: str) -> dict[str, str]:
     """
     subtypes = ident.get("subtypes") or []
     rarity = ident.get("rarity") or ""
+    finish = (
+        TITLE_FINISH.get(ident.get("pattern") or "", "")
+        or ("Reverse Holo" if ident["reverse"] else ("Non-Holo" if ident["non_holo"] else ""))
+    )
     return {
         # --- true of every raw English single this app lists ---------------------
         "Game": "Pokémon TCG",
@@ -557,11 +709,12 @@ def card_aspects(ident: dict, card_condition: str) -> dict[str, str]:
         # Promo is a rarity in the catalog but reads as a feature on a listing, and a
         # reverse print is the other thing a buyer filters on. One value, not both:
         # File Exchange carries a single value per aspect column.
-        "Features": "Reverse Holo" if ident["reverse"] else ("Promo" if "promo" in rarity.lower() else ""),
         # Only stated when the catalog says so outright. Most modern rares are holo
-        # without saying it in the rarity, and guessing "Holo" on a card that isn't is
-        # the kind of wrong specific a buyer opens a return over.
-        "Finish": "Reverse Holo" if ident["reverse"] else ("Holo" if "holo" in rarity.lower() else ""),
+        # without guessing "Holo" on a card that isn't is the kind of wrong specific
+        # a buyer opens a return over. Ball patterns use their own finish, not Reverse
+        # Holo, even though the catalog stores them as reverse-family variants.
+        "Features": finish or ("Promo" if "promo" in rarity.lower() else ""),
+        "Finish": finish or ("Holo" if "holo" in rarity.lower() else ""),
         # Not an aspect - see CD_CARD_CONDITION. Kept in the dict because the prefill
         # template asks for free-text aspects, where the grade is worth stating.
         "Card Condition": card_condition,

@@ -2,8 +2,9 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Pencil, Trash2, Search, AlertTriangle, Loader2, Minus, Plus, Sparkles, ExternalLink,
-  Archive, ArchiveRestore, FileSpreadsheet, FileUp, Copy, ImagePlus,
+  Archive, ArchiveRestore, FileSpreadsheet, FileUp, Copy, ImagePlus, ScanLine,
 } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import { api, apiDelete, apiPost, apiPut } from '../lib/api'
 import { useAuth } from '../lib/auth-context'
 import { DataTable } from '../components/shared/DataTable'
@@ -15,17 +16,13 @@ import { InventoryPrefillDialog } from '../components/shared/InventoryPrefillDia
 import { KpiSkeleton, TableSkeleton } from '../components/shared/Skeleton'
 import { CardArt, GridShell, ViewToggle } from '../components/shared/ViewToggle'
 import { CardFinishButtons } from '../components/shared/CardFinishButtons'
+import { CONDITIONS } from '../lib/conditions'
 import { sortByName, uploadPhotos } from '../lib/photos'
 import { applyFinish, finishLabel } from '../lib/cardFinish'
 import type { CardFinish } from '../lib/cardFinish'
 import { GRID_CLASS, useViewPreference } from '../lib/view-preference'
 import { formatCurrency, formatInt } from '../lib/utils'
 import type { CardHit, CardValue, InventoryItem, InventoryResponse, LotOption, LotsResponse } from '../types'
-
-// Same vocabulary as CONDITION_MULTIPLIER in services/suggested_price.py. Labels
-// only - the multiplier is applied server-side, so this list can never disagree
-// with what a row is actually valued at.
-const CONDITIONS = ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged']
 
 const SELECT =
   'bg-white dark:bg-neutral-800 text-slate-700 dark:text-neutral-200 rounded-lg px-3 py-2 text-sm outline-none'
@@ -74,18 +71,11 @@ const SORTS: { key: string; label: string }[] = [
   { key: 'cost', label: 'Cost' },
 ]
 
-/** What to show as the tile/row's picture: a real photo of the actual card in hand
- *  beats catalog art of the printing in general, whenever there is one. `photo_urls`
- *  is already ordered with the main image first - the same field the prefill flow
- *  and every export read to identify the item - so this is just "first or none". */
 function coverArt(item: InventoryItem): string | null {
   const first = item.photo_urls?.split('|')[0]?.trim()
   return first || item.card_image_url
 }
 
-/** The whole row as the API wants it back, with the edited fields overridden.
- *  PUT replaces the row, so an inline edit has to resend everything it isn't
- *  changing - sending only the changed field would blank the rest. */
 function itemBody(item: InventoryItem, patch: Partial<Record<string, unknown>>) {
   return {
     name: item.name,
@@ -103,9 +93,6 @@ function itemBody(item: InventoryItem, patch: Partial<Record<string, unknown>>) 
   }
 }
 
-/** Quantity, editable in place. Held locally and written on a delay so holding
- *  the + button is one request rather than one per click, and so a refetch
- *  landing mid-edit can't yank the number back to what the server last saw. */
 function QuantityCell({ item }: { item: InventoryItem }) {
   const queryClient = useQueryClient()
   const [qty, setQty] = useState(item.quantity)
@@ -154,8 +141,6 @@ function QuantityCell({ item }: { item: InventoryItem }) {
   )
 }
 
-/** Condition, editable in place. Changing it changes the row's value, since the
- *  multiplier is applied server-side on read. */
 function ConditionCell({ item }: { item: InventoryItem }) {
   const queryClient = useQueryClient()
   const save = useMutation({
@@ -175,9 +160,6 @@ function ConditionCell({ item }: { item: InventoryItem }) {
   )
 }
 
-/** The unit value and how much to trust it. A row can be worth nothing knowable
- *  for two quite different reasons, and both are said out loud rather than shown
- *  as a dash that reads like zero. */
 function ValueCell({ item, unitOnly = false }: { item: InventoryItem; unitOnly?: boolean }) {
   if (item.value_status === 'no_card') {
     return <span className="text-xs text-slate-400">no price set</span>
@@ -200,12 +182,6 @@ function ValueCell({ item, unitOnly = false }: { item: InventoryItem; unitOnly?:
   )
 }
 
-/** Files a row away once its card has been listed, or puts it back.
- *
- *  Not a delete: deleting throws away the condition, location, lot and researched
- *  price, so an ended listing or a mis-click would leave nothing to restore. And
- *  not a "listed" flag either - it records that the row left the pile, and claims
- *  nothing about what is on eBay. */
 function ArchiveButton({ item }: { item: InventoryItem }) {
   const queryClient = useQueryClient()
   const archived = !!item.archived_at
@@ -228,10 +204,6 @@ function ArchiveButton({ item }: { item: InventoryItem }) {
   )
 }
 
-/** Copies a row's fields into a brand new one - a second physical copy of the same
- *  card, or splitting a stack across two locations without retyping everything.
- *  Photos and cost come along; quantity does too, since duplicating a row that says
- *  "3 of these" and then editing one copy down is faster than typing 1 and 2. */
 function DuplicateButton({ item }: { item: InventoryItem }) {
   const queryClient = useQueryClient()
   const copy = useMutation({
@@ -251,9 +223,6 @@ function DuplicateButton({ item }: { item: InventoryItem }) {
   )
 }
 
-/** Delete asks in place instead of through a modal: one row of a long list is a
- *  small enough action that a dialog over the whole page is more interruption
- *  than the decision deserves. */
 function DeleteButton({ item }: { item: InventoryItem }) {
   const queryClient = useQueryClient()
   const [armed, setArmed] = useState(false)
@@ -294,27 +263,12 @@ function DeleteButton({ item }: { item: InventoryItem }) {
   )
 }
 
-/** One item as a card. Read-only by design: the grid is for looking at a pile, and
- *  a select and a stepper on every tile turn browsing into a minefield of accidental
- *  edits. The pencil opens the same dialog the table uses; inline editing stays in
- *  the table, where the controls sit in their own columns.
- *
- *  Memoized: with no pagination the whole pile renders at once, so an unmemoized
- *  tile meant every selection toggle re-rendered every tile (each carrying its own
- *  image, drag state and upload mutation), which locked the tab on large piles.
- *  The callbacks are stable references taking the row as an argument, so only the
- *  toggled tile re-renders on select. Shift-click selects the whole run from the
- *  last-clicked tile (the anchor) to the one shift-clicked, in the current sort
- *  order - the anchor is the tile's position, so re-sorting moves what a later
- *  shift-click covers, the same as any file manager. */
 const InventoryCard = memo(function InventoryCard({ item, index, selected, onToggle, onEdit, photoHostingEnabled }: {
   item: InventoryItem
   index: number
   selected: boolean
   onToggle: (id: number, index: number, shiftKey: boolean) => void
   onEdit: (item: InventoryItem) => void
-  /** From GET /inventory. False when the server has no Supabase credentials - a
-   *  drop is refused with that explanation instead of failing per file. */
   photoHostingEnabled: boolean
 }) {
   const queryClient = useQueryClient()
@@ -906,9 +860,9 @@ export function InventoryPage() {
                     )}
                   </button>
                   {/* Regular is the row's own click target above (and what Enter
-                      adds); these two cover the other prints of the same catalogued
-                      card. Only Reverse Holo changes what gets priced - see
-                      lib/cardFinish.ts for why Non-Holo doesn't. */}
+                      adds); these cover the other prints of the same catalogued
+                      card. Each finish changes card_query, so each print gets its
+                      own eBay search and comp pool - see lib/cardFinish.ts. */}
                   <CardFinishButtons setName={h.set_name} onPick={(finish) => choose(i, finish)} />
                 </li>
               ))}
@@ -990,6 +944,13 @@ export function InventoryPage() {
         <datalist id="inventory-skus">
           {lotOptions.map((l) => <option key={l.sku} value={l.sku}>{l.title || undefined}</option>)}
         </datalist>
+        <Link
+          to="/inventory/scan"
+          className="inline-flex items-center gap-2 px-3 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
+        >
+          <ScanLine size={16} />
+          Scan cards
+        </Link>
       </div>
 
       {add.isError && (

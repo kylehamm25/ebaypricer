@@ -535,3 +535,26 @@ def upsert_lot(sku: str, body: LotUpdate, user_id: UUID = Depends(get_current_us
             503, "Lot cost tracking needs migration db/migrations/0008_lots.sql to be run first"
         )
     return {"status": "ok", "sku": sku}
+
+
+@router.delete("/{sku}")
+def delete_lot(sku: str, user_id: UUID = Depends(get_current_user_id)):
+    """Delete the stored cost record for one lot. Listings, orders and inventory
+    rows are untouched: a lot with live activity stays on the page as untracked,
+    and only a lot with nothing attached disappears entirely."""
+    sku = sku.strip()
+    if not sku:
+        raise HTTPException(422, "SKU is required")
+    if sku in EXCLUDED_SKUS:
+        raise HTTPException(422, f"{sku} is not a purchased lot and isn't tracked here")
+
+    try:
+        with get_db(read_only=False) as db:
+            deleted = db.execute(
+                "DELETE FROM lots WHERE user_id = %s AND sku = %s", [user_id, sku]
+            ).rowcount
+    except UndefinedTable:
+        raise HTTPException(404, f"No saved lot {sku}")
+    if not deleted:
+        raise HTTPException(404, f"No saved lot {sku}")
+    return {"status": "ok", "sku": sku}

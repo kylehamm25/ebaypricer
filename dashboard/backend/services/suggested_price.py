@@ -72,6 +72,19 @@ CONDITION_MULTIPLIER = {
     "poor": 0.35,
 }
 
+# --- Stale hold -------------------------------------------------------------------
+# Past this age a suggestion may hold or cut, never increase. The comp anchors are
+# *asking* prices, and a month with no sale is direct evidence this
+# listing won't clear above its own current price - whatever the pool says.
+# Matches STALENESS_GRACE_DAYS: once the staleness ramp starts pulling toward the
+# floor, increases are off the table.
+# Measured Oct 2026: 14 of the 38 listings at 100+ days with a suggestion were
+# being told to increase, driven by below-floor pricing (a $1.55 listing against a
+# $1.99+ floor) plus the shipping adjustment stacking on top. Each had sat ~250-320
+# days unsold at the lower price - the market had spoken and the model argued anyway.
+# Tightened to 30 days on seller request: nothing unsold for a month goes up.
+STALE_NO_INCREASE_DAYS = 30
+
 # --- Reprice cooldown -----------------------------------------------------------
 # After a price change is applied, this listing gets no new suggestion for this many
 # days. A price needs time to prove itself: the comp pool barely moves day to day, so
@@ -139,6 +152,21 @@ MAX_WATCHER_PULL = 0.6
 #
 # CHANGE_CAP_MAX is a hard ceiling regardless of price - no suggestion moves a
 # listing by more than $2 in one step, even a $200 card.
+
+# Minimum meaningful move. Below this the suggestion holds at the current price
+# instead: a 1c applied "change" still costs an eBay call and starts a 5-day
+# cooldown that blocks the next real reprice, so emitting it is pure downside.
+# Psych rounding is the usual source (a $2.00 hold rounds to $1.99).
+MIN_SUGGESTION_STEP = 0.05
+
+# --- Seller feedback hold -------------------------------------------------------
+# A thumbs-down on a suggestion vetoes that direction for this many days: a
+# downvoted increase can still cut, a downvoted decrease can still rise - only the
+# rejected direction holds at the current price. The seller knows something the
+# comp pool doesn't (the card in hand, a price already promised), so their veto
+# outranks the model, but it expires: 30 days is long enough to matter and short
+# enough that a genuinely moved market gets to ask again.
+FEEDBACK_HOLD_DAYS = 30
 CHANGE_CAP_PCT = 0.25
 CHANGE_CAP_MIN = 0.25
 CHANGE_CAP_MAX = 2.00
@@ -176,6 +204,15 @@ def uses_ese_shipping(shipping_charge: float | None) -> bool:
 # proxies for it. Revisit if a real cost_basis column is ever added.
 MIN_NET_PROCEEDS = 1.00
 ASSUMED_SHIP_COST = 0.78  # eBay Standard Envelope rate, applied when buyer pays $0
+
+# Cap on the shipping adjustment, as a share of the condition-adjusted target.
+# Landed-price positioning is the premise, but uncapped it lets postage dominate
+# the card: comps shipping tracked/ground ($3-5 means) against our $0.78 ESE
+# envelope added up to +$8.62 on ~$2 targets. Measured Oct 2026: median adjustment
+# $0.56, p90 $1.27, and in 58/288 suggestions postage moved the target more than the
+# card math did. Symmetric - an adjustment that large in either direction is a
+# different shipping product, not a price signal.
+MAX_SHIPPING_ADJ_SHARE = 0.5
 
 # --- Title exclusions ------------------------------------------------------------
 # Print-defect / novelty variants (holo bleed, swirl, miscut, error) trade on the
@@ -281,6 +318,8 @@ def compute_suggested_price(
     comp_avg_shipping: float | None = None,
     watchers: int | None = None,
     days_since_price_change: float | None = None,
+    feedback_direction: str | None = None,
+    days_since_feedback: float | None = None,
 ) -> Suggestion:
     """Suggest a price for one listing.
 
@@ -294,9 +333,16 @@ def compute_suggested_price(
                    a $10-item/$5-shipping comp that's actually $3 more expensive
                    landed. See the shipping-adjustment step below.
     days_since_price_change - age of the last applied price change, or None if this
-                   listing has never been repriced through the app. Keeps this module
-                   clock-free: the caller reads price_change_log and does the
-                   subtraction, we only compare against REPRICE_COOLDOWN_DAYS.
+                    listing has never been repriced through the app. Keeps this module
+                    clock-free: the caller reads price_change_log and does the
+                    subtraction, we only compare against REPRICE_COOLDOWN_DAYS.
+    feedback_direction - which way the seller vetoed ('up' = a suggested increase
+                    was thumbed down, 'down' = a suggested cut was), or None if no
+                    veto is on record. Only directions vetoed within FEEDBACK_HOLD_DAYS
+                    hold; anything older is treated as absent.
+    days_since_feedback - age of that veto, or None if the timestamp is unknown
+                    (an undated veto is honored rather than voided - losing the
+                    timestamp must not lose what the seller said).
     """
     basis: dict = {"v": 1}
     flags: list[str] = []
@@ -377,10 +423,16 @@ def compute_suggested_price(
     # charge more than average -> target comes down (our item price needs to be
     # cheaper to match their total); we charge less/free -> target goes up. Skipped
     # (0.0) when no comp reported a shipping cost - "no data" must not be treated as
-    # "comps ship free", which would push every target up.
+    # "comps ship free", which would push every target up. Capped at
+    # MAX_SHIPPING_ADJ_SHARE of the condition-adjusted target either way - beyond
+    # that the gap is a different shipping product, not a price signal.
     shipping_adjustment = 0.0
     if comp_avg_shipping is not None:
-        shipping_adjustment = float(comp_avg_shipping) - float(shipping_charge or 0)
+        raw_adjustment = float(comp_avg_shipping) - float(shipping_charge or 0)
+        adj_cap = MAX_SHIPPING_ADJ_SHARE * target if target > 0 else 0.0
+        shipping_adjustment = _clamp(raw_adjustment, -adj_cap, adj_cap)
+        if abs(shipping_adjustment - raw_adjustment) > 1e-9:
+            flags.append("ship_adj_capped")
         target += shipping_adjustment
 
     # 4.5 Watcher demand pull. A live demand signal the comp pool can't see - pulls the
@@ -408,11 +460,37 @@ def compute_suggested_price(
     # queries), but never below the hard floor - hence the round-up retry.
     clamps: list[str] = []
 
+    # A stale listing holds at best: the upward leg of the change cap is removed, so
+    # the suggestion can only stay or come down. The downward leg still applies, and
+    # the floors below can still raise an already-underpriced listing - "never
+    # increase" means never above where it sits, not never above the floor.
+    stale_hold = days_listed is not None and days_listed >= STALE_NO_INCREASE_DAYS
+
+    # A seller veto holds one direction at the current price: 'up' forbids increases
+    # (cuts still allowed), 'down' forbids cuts (increases still allowed). Expires
+    # after FEEDBACK_HOLD_DAYS - an undated veto counts as fresh, so a lost
+    # timestamp can never silently void what the seller said.
+    feedback_hold = feedback_direction in ("up", "down") and (
+        days_since_feedback is None or days_since_feedback < FEEDBACK_HOLD_DAYS
+    )
+    feedback_up = feedback_hold and feedback_direction == "up"
+    feedback_down = feedback_hold and feedback_direction == "down"
+
     if current_price:
         cap = _clamp(CHANGE_CAP_PCT * float(current_price), CHANGE_CAP_MIN, CHANGE_CAP_MAX)
-        capped = _clamp(target, float(current_price) - cap, float(current_price) + cap)
+        hi = float(current_price) + cap
+        hi_note = "change_cap"
+        lo = float(current_price) - cap
+        lo_note = "change_cap"
+        if stale_hold or feedback_up:
+            hi = float(current_price)
+            hi_note = "stale_hold" if stale_hold else "feedback_hold"
+        if feedback_down:
+            lo = float(current_price)
+            lo_note = "feedback_hold"
+        capped = _clamp(target, lo, hi)
         if abs(capped - target) > 1e-9:
-            clamps.append("change_cap")
+            clamps.append(hi_note if target > hi else lo_note)
             target = capped
 
     lower = max(net_floor(shipping_charge), ABSOLUTE_PRICE_FLOOR)
@@ -423,6 +501,32 @@ def compute_suggested_price(
     target = psych_round(target)
     if target < lower:
         target = psych_round(lower, direction="up")
+
+    # Rounding works on conventional endings, so it can nudge a held price a few
+    # cents back over current - snap back to the exact hold rather than emit a
+    # trivial "increase" the model never argued for. Floors still win: a listing
+    # priced below its floor holds at the floor, not at its own price.
+    if (
+        stale_hold
+        and current_price
+        and float(current_price) >= lower
+        and target > float(current_price)
+    ):
+        if "stale_hold" not in clamps:
+            clamps.append("stale_hold")
+        target = float(current_price)
+
+    # Minimum meaningful move. A few cents either way is rounding noise, not a
+    # reprice - and an applied noise "change" still starts the 5-day cooldown.
+    # Floors still win: a listing below its floor keeps the floor.
+    if (
+        current_price
+        and float(current_price) >= lower
+        and abs(target - float(current_price)) >= 1e-9
+        and abs(target - float(current_price)) < MIN_SUGGESTION_STEP
+    ):
+        clamps.append("min_step")
+        target = float(current_price)
 
     # ESE ceiling, deliberately AFTER rounding. ESE_MAX_PRICE is itself a conventional
     # price ending, so clamping to it can't produce an odd number, and going last means
@@ -452,6 +556,12 @@ def compute_suggested_price(
         "watchers": watchers,
         "watcher_pull": round(watcher_pull, 3),
         "pre_guardrail": pre_guardrail,
+        "stale_hold": stale_hold,
+        "stale_no_increase_days": STALE_NO_INCREASE_DAYS,
+        "feedback_direction": feedback_direction if feedback_hold else None,
+        "days_since_feedback": round(days_since_feedback, 2)
+        if feedback_hold and days_since_feedback is not None else None,
+        "feedback_hold_days": FEEDBACK_HOLD_DAYS,
         "clamps": clamps,
         "flags": flags,
         "ese_shipping": uses_ese_shipping(shipping_charge),

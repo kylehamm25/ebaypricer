@@ -8,25 +8,10 @@ import { sortByName, uploadPhotos } from '../../lib/photos'
 // what actually enforces it.
 const MAX_PHOTOS = 24
 
-/** Photos of the actual card, hosted where eBay can fetch them.
- *
- *  Uploads write to the row immediately rather than waiting for Save, because the file
- *  has already left the browser by then and a cancelled dialog would orphan it in the
- *  bucket. The parent's form state is kept in step through `onChange`, so pressing
- *  Save afterwards can't put a stale list back over what was uploaded.
- *
- *  Order is meaningful: eBay uses the FIRST photo as the listing's main image, and its
- *  prefill flow reads that one to work out what the item is. A multi-select is sorted
- *  by filename on the way in because the browser cannot tell us the order they were
- *  clicked, and the Main badge is the manual correction when that guess is wrong.
- *  Nothing sorts the stored list after that. */
 export function PhotoUploader({ itemId, urls, onChange, enabled }: {
   itemId: number
-  /** Pipe-separated, as the row stores it. */
   urls: string
   onChange: (urls: string) => void
-  /** False when the server has no Supabase credentials - the control explains itself
-   *  rather than offering a button that fails on every file. */
   enabled: boolean
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
@@ -58,9 +43,6 @@ export function PhotoUploader({ itemId, urls, onChange, enabled }: {
       return res.photo_urls
     })
 
-  /** Promote one photo to the front. Written through the server rather than held in
-   *  form state, because uploads already write immediately - a reorder that only
-   *  lived until Save could be lost while the photos it reordered were not. */
   const makeMain = (url: string) =>
     run(async () => {
       const res = await apiPost(`/inventory/${itemId}/photos/reorder`, {

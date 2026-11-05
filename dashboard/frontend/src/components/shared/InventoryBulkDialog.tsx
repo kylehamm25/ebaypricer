@@ -17,15 +17,6 @@ const FIELD =
 
 const LABEL = 'text-xs font-medium text-slate-600 dark:text-neutral-300'
 
-/** Edit what a whole stack of cards has in common: where it lives, which lot it
- *  came from, what grade it is. Prices are per-card judgements and are deliberately
- *  not offered here.
- *
- *  Anything left blank is left alone - only filled-in fields are sent, so the
- *  backend never receives a key for them. Clearing a location or lot in bulk is
- *  deliberately not offered: a blank box already means "leave alone", and one
- *  control cannot mean both. Condition can be cleared, because a select has room
- *  to say so outright. */
 export function InventoryBulkDialog({ ids, locations, skus, onClose }: {
   ids: number[]
   locations: string[]

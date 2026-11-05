@@ -12,15 +12,6 @@ const MAX_QUERY_WORDS = 5
 
 type Option = { kind: 'card'; card: CardHit } | { kind: 'search' }
 
-/** Correct which catalog card a listing prices against.
- *
- *  The match comes from fuzzy-matching the eBay title, which is wrong in the ways
- *  fuzzy matching is always wrong - the right card in the wrong set, the base print
- *  of a stamped promo. That is not cosmetic: it prices the listing against a
- *  different card, so it has to be correctable.
- *
- *  Saving locks the value so the next sync cannot re-derive it; "Use the automatic
- *  match" clears both the value and the lock and hands the row back to the matcher. */
 export function CardMatchDialog({ itemId, current, locked, onClose }: {
   itemId: string
   current: string | null

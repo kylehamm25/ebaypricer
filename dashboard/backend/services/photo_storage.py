@@ -57,12 +57,21 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # No content-type allowlist. Browsers send `application/octet-stream` for a .HEIC off
 # an iPhone - the type header simply is not reliable enough to gate on, and an
 # allowlist rejected real photos over a header the browser guessed. What a file IS gets
-# decided by trying to decode it, in `_process`, which is the only test that can
+# decided by trying to decode it, in `process`, which is the only test that can
 # actually be wrong in the safe direction.
 
 BUCKET = config._env("SUPABASE_PHOTO_BUCKET", "card-photos")
 
 TIMEOUT = 30
+
+_UNREADABLE = (
+    "That file isn't an image this server can read. JPEG, PNG, WebP and HEIC "
+    "all work ({})"
+)
+
+# One session keeps the TCP/TLS connection to Supabase (and the catalog CDN) warm.
+# A scan batch uploads up to 100 photos, each of which used to pay a fresh handshake.
+_session = requests.Session()
 
 
 class PhotoStorageError(RuntimeError):
@@ -107,14 +116,14 @@ def ensure_bucket() -> None:
     if _bucket_ready:
         return
 
-    existing = requests.get(
+    existing = _session.get(
         f"{config.SUPABASE_URL}/storage/v1/bucket/{BUCKET}", headers=_headers(), timeout=TIMEOUT,
     )
     if existing.status_code == 200:
         _bucket_ready = True
         return
 
-    resp = requests.post(
+    resp = _session.post(
         f"{config.SUPABASE_URL}/storage/v1/bucket",
         headers={**_headers(), "Content-Type": "application/json"},
         json={"id": BUCKET, "name": BUCKET, "public": True},
@@ -128,8 +137,7 @@ def ensure_bucket() -> None:
     raise PhotoStorageError(f"Couldn't create the {BUCKET} bucket: {resp.status_code} {resp.text[:200]}")
 
 
-def _process(data: bytes) -> bytes:
-    """Re-encode to a JPEG no larger than MAX_EDGE, oriented the way it was taken."""
+def _decode(data: bytes) -> Image.Image:
     try:
         img = Image.open(io.BytesIO(data))
         # Bakes the EXIF orientation flag into the pixels. Without it a photo taken in
@@ -146,19 +154,49 @@ def _process(data: bytes) -> bytes:
             img = flat
         elif img.mode != "RGB":
             img = img.convert("RGB")
+        return img
+    except Exception as exc:
+        raise PhotoStorageError(_UNREADABLE.format(exc)) from exc
+
+
+def _encode(img: Image.Image, max_edge: int) -> bytes:
+    try:
         # thumbnail() only ever shrinks, so a small photo is left at its own size
         # rather than being upscaled into blur.
-        img.thumbnail((MAX_EDGE, MAX_EDGE), Image.LANCZOS)
+        img.thumbnail((max_edge, max_edge), Image.LANCZOS)
         out = io.BytesIO()
         img.save(out, format="JPEG", quality=JPEG_QUALITY, optimize=True)
         return out.getvalue()
-    except PhotoStorageError:
-        raise
     except Exception as exc:
-        raise PhotoStorageError(
-            "That file isn't an image this server can read. JPEG, PNG, WebP and HEIC "
-            f"all work ({exc})",
-        ) from exc
+        raise PhotoStorageError(_UNREADABLE.format(exc)) from exc
+
+
+def process(data: bytes, max_edge: int = MAX_EDGE) -> bytes:
+    """Re-encode to a JPEG no larger than `max_edge`, oriented the way it was taken.
+
+    The default is the size stored for eBay. Card scanning asks for a larger copy
+    because the collector number is only a few pixels tall on a 1200px image; that
+    copy is never uploaded.
+    """
+    return _encode(_decode(data), max_edge)
+
+
+def process_scan(data: bytes, max_edge: int = MAX_EDGE, ocr_edge: int = MAX_EDGE) -> tuple[bytes, bytes]:
+    """Make the stored copy and the recognition copy from a single decode.
+
+    `process` used to be called twice with the same bytes, so a 12MP phone photo was
+    decoded and oriented twice. Here the original is decoded once, shrunk to the
+    larger of the two sizes, and the smaller copy is derived from that. Returns
+    `(stored, ocr)`; only the first is ever uploaded.
+    """
+    img = _decode(data)
+    if ocr_edge >= max_edge:
+        ocr = _encode(img, ocr_edge)
+        stored = _encode(img.copy(), max_edge)
+    else:
+        stored = _encode(img, max_edge)
+        ocr = _encode(img.copy(), ocr_edge)
+    return stored, ocr
 
 
 def upload(user_id, item_id: int, data: bytes, content_type: str = "") -> str:
@@ -179,13 +217,51 @@ def upload(user_id, item_id: int, data: bytes, content_type: str = "") -> str:
     if len(data) > MAX_UPLOAD_BYTES:
         raise PhotoStorageError(f"That image is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
 
-    jpeg = _process(data)
+    jpeg = process(data)
     # .jpg, always: eBay requires the URL to END in an image extension, so the stored
     # name has to carry it whatever the file was called when it arrived.
-    path = f"{user_id}/{item_id}/{uuid.uuid4().hex}.jpg"
+    return _put(user_id, f"{item_id}/{uuid.uuid4().hex}", jpeg)
+
+
+def download(url: str) -> bytes:
+    """Fetch a photo this app hosts, for re-reading an existing scan."""
+    prefix = f"{config.SUPABASE_URL}/storage/v1/object/public/{BUCKET}/"
+    if not url.startswith(prefix):
+        raise PhotoStorageError("That photo is not hosted by this app")
+    try:
+        resp = _session.get(url, timeout=TIMEOUT)
+    except requests.RequestException as exc:
+        raise PhotoStorageError(f"Couldn't download the photo: {exc}") from exc
+    if resp.status_code != 200:
+        raise PhotoStorageError(f"Couldn't download the photo: {resp.status_code}")
+    if len(resp.content) > MAX_UPLOAD_BYTES:
+        raise PhotoStorageError(f"That image is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+    return resp.content
+
+
+def upload_import(user_id, key: str, jpeg: bytes) -> str:
+    """Store one already-processed scan photo under `<user>/imports/<key>.jpg`.
+
+    Imports have no inventory id yet, so they get their own prefix. The key is chosen
+    by the caller and kept in the import row separately; the path itself is opaque.
+    `jpeg` must come from `process` - this deliberately does not decode or re-encode
+    again, so the stored copy is exactly what the caller already prepared for the
+    inventory row.
+    """
+    if len(jpeg) > MAX_UPLOAD_BYTES:
+        raise PhotoStorageError(f"That image is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+    return _put(user_id, f"imports/{key}", jpeg)
+
+
+def _put(user_id, key: str, jpeg: bytes) -> str:
+    if not configured():
+        raise PhotoStorageError(
+            "Photo hosting needs SUPABASE_URL and SUPABASE_SERVICE_KEY to be set",
+        )
+    path = f"{user_id}/{key}.jpg"
 
     ensure_bucket()
-    resp = requests.post(
+    resp = _session.post(
         f"{config.SUPABASE_URL}/storage/v1/object/{BUCKET}/{path}",
         headers={**_headers(), "Content-Type": "image/jpeg", "x-upsert": "false"},
         data=jpeg,
@@ -208,7 +284,7 @@ def delete(url: str) -> None:
     if not url.startswith(prefix):
         return
     try:
-        requests.delete(
+        _session.delete(
             f"{config.SUPABASE_URL}/storage/v1/object/{BUCKET}/{url[len(prefix):]}",
             headers=_headers(),
             timeout=TIMEOUT,

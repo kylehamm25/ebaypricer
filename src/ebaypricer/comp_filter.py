@@ -113,6 +113,13 @@ _REVERSE_RE = re.compile(r"\breverse\b", re.IGNORECASE)
 # doesn't have one - see _title_pattern below.
 _POKE_BALL_RE = re.compile(r"\bpoke\s*-?\s*ball\b", re.IGNORECASE)
 _MASTER_BALL_RE = re.compile(r"\bmaster\s*-?\s*ball\b", re.IGNORECASE)
+# Stamped promos (Surprise Box / prerelease stamped prints) share the card name and
+# number of the ordinary print but trade several multiples above it - the Sylveon
+# ex 41 pool that prompted this carried ten $13-23 stamped comps against a $3-8
+# plain market and averaged $10.03. Symmetric like the Pokemon Center rule: a
+# stamped comp is wrong for a plain card, and a plain comp is equally wrong when
+# the search asked for a stamped one.
+_STAMPED_RE = re.compile(r"\bstamp(?:ed)?\b", re.IGNORECASE)
 # Distinct, materially pricier prints of the same card+number. A Shadowless Base Set
 # Charmander runs $6-90 against $0.99-4 for the Unlimited print we actually hold.
 _SPECIAL_PRINT_RE = re.compile(
@@ -216,8 +223,10 @@ def evaluate_comp(comp: dict, identity: dict | None) -> Verdict:
 
     comp     - a parse_active_item() dict (title, condition, ...)
     identity - cards.card_identity() output: {name, number, set_name, reverse,
-               pattern}, or None when the card could not be resolved, in which case
-               only the identity-free hard checks apply.
+               pattern, non_holo}, or None when the card could not be resolved, in
+               which case only the identity-free hard checks apply. A non-holo print
+               filters exactly like a regular one (reverse titles dropped, the rest
+               kept) - the suffix only changes what eBay gets asked for.
     """
     title = comp.get("title") or ""
     condition = comp.get("condition") or ""
@@ -271,6 +280,9 @@ def evaluate_comp(comp: dict, identity: dict | None) -> Verdict:
 
     if bool(_POKEMON_CENTER_RE.search(title)) != bool(identity.get("pokemon_center")):
         return Verdict(False, "pokemon_center_mismatch", "soft")
+
+    if bool(_STAMPED_RE.search(title)) != bool(identity.get("stamped")):
+        return Verdict(False, "stamped_mismatch", "soft")
 
     if _SPECIAL_PRINT_RE.search(title) and not _SPECIAL_PRINT_RE.search(name):
         return Verdict(False, "special_print", "soft")

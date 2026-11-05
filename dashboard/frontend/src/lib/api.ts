@@ -33,6 +33,29 @@ export async function apiDelete(path: string): Promise<unknown> {
   return send('DELETE', path)
 }
 
+// Multipart upload. The browser must set Content-Type itself so the multipart
+// boundary matches the body - passing it here would break every upload.
+export async function apiUpload<T>(
+  path: string,
+  file: File,
+  field = 'file',
+  extra?: Record<string, File>,
+): Promise<T> {
+  const form = new FormData()
+  form.append(field, file)
+  for (const [name, value] of Object.entries(extra ?? {})) form.append(name, value)
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: await headers(),
+    body: form,
+  })
+  if (!res.ok) {
+    const detail = await res.json().then((d) => d?.detail).catch(() => null)
+    throw new Error(typeof detail === 'string' ? detail : `API error: ${res.statusText}`)
+  }
+  return res.json()
+}
+
 async function send(method: string, path: string, body?: unknown): Promise<unknown> {
   const h = await headers()
   if (body !== undefined) h['Content-Type'] = 'application/json'

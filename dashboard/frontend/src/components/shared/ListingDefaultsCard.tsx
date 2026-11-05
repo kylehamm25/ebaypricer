@@ -32,9 +32,6 @@ const PRICED_SHIPPING_PROFILES = [
 
 const BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8000/api/v1'
 
-/** Multipart, so it can't go through `apiPut` — that helper JSON-encodes its body and
- *  sets Content-Type, and multipart needs the browser to set its own boundary. The
- *  auth header is built the way `lib/api.ts` builds it. */
 async function uploadTemplate(file: File): Promise<PrefillTemplateUpload> {
   const body = new FormData()
   body.append('file', file)
@@ -64,13 +61,6 @@ const EMPTY: ListingDefaults = {
   min_price: null,
 }
 
-/** The standing settings behind the Inventory page's listing CSV.
- *
- *  Here rather than in that dialog because they are the same on every export
- *  forever, and here rather than in localStorage because they are account facts, not
- *  a browser convenience: an eBay business policy name that doesn't match Seller Hub
- *  exactly is the commonest reason a bulk upload comes back rejected, so it should
- *  hold on every machine you sign in from. */
 export function ListingDefaultsCard() {
   const queryClient = useQueryClient()
   const { data, isLoading } = useQuery<ListingDefaultsResponse>({
@@ -251,14 +241,6 @@ export function ListingDefaultsCard() {
   )
 }
 
-
-/** eBay's blank prefill template, kept on file so the Inventory page's export stops
- *  asking for it.
- *
- *  Stored rather than generated because eBay's instructions say not to change the
- *  file's formatting — the app can only fill in theirs. Checked here rather than at
- *  export time: a template rejected now costs one re-download, while one rejected
- *  mid-export wastes the selection that was about to go into it. */
 function PrefillTemplateRow({ stored }: { stored: PrefillTemplateMeta | null }) {
   const queryClient = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)

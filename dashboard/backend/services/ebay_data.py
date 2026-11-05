@@ -1,18 +1,18 @@
 """
 Per-user eBay data sync (Phase 6).
 
-process_ebay_data(user_id) replaces the Excel workbook pipeline for connected users:
+process_ebay_data(user_id) is the sync pipeline: per-user OAuth data straight
+into Postgres (the legacy Excel/SQLite pipeline was retired Oct 2026):
   sold orders   <- GetMyeBaySelling (Trading API) + sell/finances fees/earnings merge
-  active listings <- GetMyeBaySelling ActiveList (price/watchers/days listed/condition/
-                   shipping charge/estimated fees+net, same logic as scripts/get_active.py;
-                   ad_rate/search_position aren't set here - ad_rate needs the
-                   sell.marketing OAuth scope, search_position comes from price_research.py)
+   active listings <- GetMyeBaySelling ActiveList (price/watchers/days listed/condition/
+                    shipping charge/estimated fees+net; ad_rate/search_position aren't
+                    set here - ad_rate needs the sell.marketing OAuth scope,
+                    search_position comes from price_research.py)
   inventory value history <- recomputed from active listings
 
 Runs on a background schedule (see start_scheduler) and on demand via POST /ebay/sync.
 """
 
-import os
 import threading
 import time
 import uuid
@@ -25,11 +25,9 @@ from ebaypricer.listing_economics import estimate_fees_and_net, resolve_shipping
 from ebaypricer.trading_api import fetch_active_listings, fetch_sold_orders, resolve_condition
 
 from dashboard.backend.config import (
-    EBAY_PIPELINE_INTERVAL_HOURS,
     EBAY_PRICE_RESEARCH_INTERVAL_HOURS,
     EBAY_SYNC_DAYS,
     EBAY_SYNC_INTERVAL_HOURS,
-    EXCEL_PATH,
 )
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import get_access_token
@@ -130,8 +128,7 @@ def _upsert_rows(conn, table: str, col_map: dict, key_cols: list[str], rows: lis
     if not rows:
         return 0
     # Every column in col_map has existed since migration 0001 except `number`
-    # (0019, active_listings) - filtered against the real schema, the same
-    # "degrade rather than crash" rule excel_sync.py's skip_cols follows, so an
+    # (0019, active_listings) - filtered against the real schema, so an
     # un-migrated database still syncs everything else instead of failing outright.
     present = existing_columns(conn, table)
     all_cols = key_cols + [c for c in col_map.values() if c not in key_cols and c in present]
@@ -398,27 +395,13 @@ def default_user_connected(default_user_id: str) -> bool:
 
 
 def _scheduler_loop() -> None:
-    pipeline_interval = EBAY_PIPELINE_INTERVAL_HOURS * 3600
     ebay_interval = EBAY_SYNC_INTERVAL_HOURS * 3600
     research_interval = EBAY_PRICE_RESEARCH_INTERVAL_HOURS * 3600
-    next_pipeline = time.monotonic() + pipeline_interval  # first round after one interval
     next_ebay = time.monotonic()  # immediate round for status/token refresh
     next_research = time.monotonic() + research_interval
     while True:
         now = time.monotonic()
         try:
-            if now >= next_pipeline:
-                next_pipeline = now + pipeline_interval
-                if os.path.exists(EXCEL_PATH):
-                    try:
-                        from dashboard.backend.services.pipeline_runner import run_pipeline_once
-
-                        run_pipeline_once()
-                    except Exception as e:
-                        print(f"[scheduler] pipeline round failed: {e}")
-                # else: legacy Excel-based pipeline isn't reachable from this environment
-                # (e.g. a container without the Google Drive mount) - the per-user OAuth
-                # sync below already covers sold orders + active listings without it.
             if now >= next_ebay:
                 next_ebay = now + ebay_interval
                 sync_all_users()

@@ -145,12 +145,12 @@ def _value_one(card_query: str, condition: str | None, today: date) -> CardValue
     #
     # stale      - nothing from today.
     # unfiltered - a snapshot that carries no pool_quality never went through
-    #              comp_filter. Those come from the legacy SQLite ingest, which writes
-    #              the same active_price_snapshots row with only six columns and wins
-    #              the race on days it runs first. It carries TODAY's date, so a
-    #              date check alone accepts it - and it may hold graded slabs,
-    #              multi-card lots and wrong prints. Pricing a purchase decision off
-    #              that is exactly what this page must not do.
+    #              comp_filter. Those came from the retired SQLite ingest, which wrote
+    #              the same active_price_snapshots row with only six columns; rows it
+    #              wrote before retirement can still be in the table. Such a row may
+    #              carry TODAY's date, so a date check alone accepts it - and it may
+    #              hold graded slabs, multi-card lots and wrong prints. Pricing a
+    #              purchase decision off that is exactly what this page must not do.
     #
     # force is required for the unfiltered case specifically: research_card_active's
     # own cache check finds that same-day row and would hand straight back the

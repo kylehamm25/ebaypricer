@@ -10,7 +10,6 @@ const STEP_NUM =
   'shrink-0 w-5 h-5 rounded-full bg-slate-100 dark:bg-neutral-700 text-slate-600 ' +
   'dark:text-neutral-300 text-xs font-medium grid place-items-center'
 
-/** The filled workbook, decoded from base64 straight to a file. */
 function download(filename: string, workbook: string) {
   const bytes = Uint8Array.from(atob(workbook), (c) => c.charCodeAt(0))
   const url = URL.createObjectURL(
@@ -27,17 +26,6 @@ function download(filename: string, workbook: string) {
   URL.revokeObjectURL(url)
 }
 
-/** Step 1 of eBay's prefill round trip: fill their template with the selected cards.
- *
- *  Builds on open and asks nothing. The template is eBay's own workbook — their
- *  instructions say not to change its formatting, so the app can only fill in theirs —
- *  and it is kept on the Settings page, since it is one unchanging file every export
- *  needs. Rows are appended below whatever is already in it, so a template part-filled
- *  by hand keeps what was typed.
- *
- *  Steps 2 and 3 are Seller Hub's: you upload the filled file there, eBay returns its
- *  suggested categories, titles and aspects, and you finish that file and upload it
- *  again. This app does not touch the returned file. */
 export function InventoryPrefillDialog({ ids, onClose }: {
   ids: number[]
   onClose: () => void

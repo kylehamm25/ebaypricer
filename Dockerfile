@@ -19,9 +19,17 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+# onnxruntime needs libgomp; OpenCV headless still links glib on Debian slim.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt pyproject.toml ./
 COPY src/ src/
-RUN pip install . && pip install -r requirements.txt
+# Editable on purpose: ebaypricer.paths resolves PROJECT_ROOT from the package file,
+# and a normal install places it in site-packages, where the copied data/ cache and
+# hashes are invisible. The source tree is already in the image.
+RUN pip install -e . && pip install -r requirements.txt
 
 COPY data/ data/
 COPY requirements-dashboard.txt ./

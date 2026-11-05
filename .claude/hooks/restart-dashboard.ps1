@@ -8,6 +8,9 @@
 #   -Mark     PostToolUse on Edit|Write. Drops a marker if the edited file is one
 #             the uvicorn process actually imports. Never restarts anything.
 #   -Restart  Stop hook. If a marker exists, restart, then clear the marker.
+#   -Stop     Manual. Stops the dashboard (both servers) without relaunching it.
+#             Run by hand when you are done for the day:
+#               .\.claude\hooks\restart-dashboard.ps1 -Stop
 #
 # The backend runs WITHOUT --reload in start-dashboard.bat (unlike the --reload
 # command in CLAUDE.md), so a running server keeps serving stale code until it is
@@ -18,7 +21,8 @@
 
 param(
     [switch]$Mark,
-    [switch]$Restart
+    [switch]$Restart,
+    [switch]$Stop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,7 +51,31 @@ if ($Mark) {
     exit 0
 }
 
-if (-not $Restart) { exit 0 }
+if (-not $Restart) {
+    if (-not $Stop) { exit 0 }
+
+    # Stop-only mode: same teardown as a restart, minus the relaunch. Clears the
+    # marker too - with no server running, nothing is serving stale code.
+    foreach ($port in 8000, 5173) {
+        try {
+            Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
+                Select-Object -ExpandProperty OwningProcess -Unique |
+                ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }
+        } catch {}
+    }
+    # The servers run in `cmd /k` windows titled by start-dashboard.bat. Killing the
+    # processes above leaves those windows lingering on a dead prompt, so ask them
+    # to close gracefully as well.
+    try {
+        Get-Process | Where-Object { $_.MainWindowTitle -like 'EbayPrice *' } | ForEach-Object {
+            $_.CloseMainWindow() | Out-Null
+        }
+    } catch {}
+    Remove-Item $marker -Force -ErrorAction SilentlyContinue
+    @{ systemMessage = "Stopped the dashboard (closed :8000 and :5173)." } |
+        ConvertTo-Json -Compress
+    exit 0
+}
 
 if (-not (Test-Path $marker)) { exit 0 }
 $changed = @(Get-Content $marker -ErrorAction SilentlyContinue | Where-Object { $_ }) |

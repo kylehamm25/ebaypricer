@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 import unicodedata
 import time
 from dataclasses import dataclass, field
@@ -11,7 +12,7 @@ from typing import Any
 import requests
 from rapidfuzz import fuzz, process as fuzz_process
 
-from .paths import CACHE_FILE, CARD_QUERY_LOOKUP, PRICING_CACHE, TCGDEX_SET_MAP
+from .paths import CACHE_FILE, CARD_QUERY_LOOKUP, PRICING_CACHE, TCGDEX_PROMO_CACHE, TCGDEX_SET_MAP
 
 GITHUB_BASE = "https://raw.githubusercontent.com/PokemonTCG/pokemon-tcg-data/master"
 TCGDEX_API = "https://api.tcgdex.net/v2/en"
@@ -76,7 +77,7 @@ PROMO_NUM_RE = re.compile(r"\b(SVP|MEP|SWSH|BW|SM|XY|DP|HGSS|POP)\s*(\d{1,4})\b"
 
 _PROMO_PREFIX_MAP: dict[str, tuple[str, int]] = {
     "svp":  ("svp",   0),
-    "mep":  ("svp",   0),
+    "mep":  ("mep",   0),
     "swsh": ("swshp", 3),
     "bw":   ("bwp",   0),
     "sm":   ("smp",   0),
@@ -95,6 +96,7 @@ CACHE_MAX_AGE_DAYS = 14
 
 _PROMO_SET_TO_PREFIX = {
     "svp": "SVP",
+    "mep": "MEP",
 }
 
 # Cards the upstream pokemon-tcg-data repo (GITHUB_BASE) is simply missing. Found by
@@ -130,6 +132,68 @@ _MISSING_PROMO_CARDS: list[dict] = [
         "set_series": "Sword & Shield", "set_release": "2019/11/15",
     },
 ]
+
+# Promo sets the GITHUB_BASE catalog lacks, backfilled from TCGdex at cache-build
+# time. Two cases, both verified Oct 2026: the upstream repo has no MEP Black Star
+# Promos set at all (89 cards), and its SVP set stops at SVP165 while promos run
+# to SVP225 plus the SVP500 box topper. Set metadata is pinned here (not read off
+# TCGdex) so a rebuild stamps identical set_name/series/release as the cards that
+# came from GitHub - svp values below match the existing cached SVP entries.
+_TCGDEX_PROMO_SETS: dict[str, dict[str, str]] = {
+    "svp": {
+        "set_name": "Scarlet & Violet Black Star Promos",
+        "set_series": "Scarlet & Violet",
+        "set_release": "2023/01/01",
+    },
+    "mep": {
+        "set_name": "MEP Black Star Promos",
+        "set_series": "Mega Evolution",
+        "set_release": "2025/09/26",
+    },
+}
+
+
+def _bare_promo_number(local_id: str) -> str:
+    """TCGdex pads promo numbers ("025"); the catalog stores them bare ("25"),
+    the same form GitHub-sourced promos arrive in. Non-numeric ids (MEP's
+    "Museum" box topper) pass through untouched."""
+    s = (local_id or "").strip()
+    if not s:
+        return ""
+    return s.lstrip("0") or "0" if s.isdigit() else s
+
+
+def _tcgdex_to_catalog(set_id: str, meta: dict[str, str], detail: dict) -> dict:
+    """Shape a TCGdex card-detail response like a GITHUB_BASE card entry, so the
+    merge below is indistinguishable downstream (matching, pricing, art URLs)."""
+    category = detail.get("category") or ""
+    supertype = "Pokémon" if category == "Pokemon" else category
+    subtypes: list[str] = []
+    stage = detail.get("stage")
+    if stage:
+        # TCGdex runs the words together ("Stage1"); the catalog does not.
+        subtypes.append(stage.replace("Stage1", "Stage 1").replace("Stage2", "Stage 2"))
+    suffix = detail.get("suffix")
+    if suffix:
+        subtypes.append(suffix)
+    trainer_type = detail.get("trainerType")
+    if trainer_type:
+        subtypes.append(trainer_type)
+    number = _bare_promo_number(detail.get("localId", ""))
+    return {
+        "id": f"{set_id}-{number}",
+        "name": detail.get("name", ""),
+        "number": number,
+        "rarity": detail.get("rarity", ""),
+        "supertype": supertype,
+        "subtypes": subtypes,
+        "types": detail.get("types") or [],
+        "set_id": set_id,
+        "set_name": meta["set_name"],
+        "set_series": meta["set_series"],
+        "set_release": meta["set_release"],
+    }
+
 
 RARITY_ABBREV = {
     "illustration rare": "IR",
@@ -290,12 +354,44 @@ def _load_json(path: str) -> dict:
     return {}
 
 
+def _atomic_write(path: str, dump) -> None:
+    """Write a JSON cache file atomically, tolerating transient Windows file locks.
+
+    Two backend processes (duplicate uvicorn instances each run their own scheduler,
+    plus antivirus/file-sync tools) contend on these cache files, and on Windows
+    os.replace onto a file another process has open raises WinError 5 instead of
+    succeeding. A fixed ".tmp" name made it worse - both processes truncated the same
+    temp file - so each attempt uses a unique name and the replace is retried with
+    backoff. Last writer wins, which is fine for derived caches. Raises only if every
+    attempt fails, so callers that treat the cache as a pure optimisation can catch
+    OSError and carry on without it.
+    """
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=parent, prefix=os.path.basename(path) + ".", suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            dump(f)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except OSError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.5 * (attempt + 1))
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+
+
 def _save_json(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    _atomic_write(path, lambda f: json.dump(data, f, ensure_ascii=False))
 
 
 def _fetch_tcg_set_map() -> dict[str, str]:
@@ -453,6 +549,8 @@ class CardDatabase:
 
         have_ids = {c["id"] for c in all_cards}
         all_cards.extend(c for c in _MISSING_PROMO_CARDS if c["id"] not in have_ids)
+        have_ids = {c["id"] for c in all_cards}
+        all_cards.extend(self._fetch_tcgdex_promos(have_ids))
 
         # Written once, at the end, and atomically (_save_cache writes a temp file then
         # os.replace). Previously this also saved every 25 sets, which was fine when a
@@ -473,12 +571,49 @@ class CardDatabase:
         resp.raise_for_status()
         return resp.json()
 
+    def _fetch_tcgdex_promos(self, have_ids: set[str]) -> list[dict]:
+        """Backfill promo sets GITHUB_BASE lacks (see _TCGDEX_PROMO_SETS). Card
+        details are cached persistently in TCGDEX_PROMO_CACHE - including misses
+        as None, so a removed card is not re-fetched on every rebuild - and only
+        cards whose id is not already catalogued are merged, so if upstream ever
+        adds these sets itself the GitHub copy wins silently."""
+        merged: list[dict] = []
+        cache = _load_json(TCGDEX_PROMO_CACHE)
+        dirty = False
+        for set_id, meta in _TCGDEX_PROMO_SETS.items():
+            try:
+                resp = requests.get(f"{TCGDEX_API}/sets/{set_id}", timeout=30)
+                resp.raise_for_status()
+                entries = resp.json().get("cards", [])
+            except requests.RequestException as e:
+                print(f"    TCGdex promo set {set_id} unreachable ({e}) -- skipping")
+                continue
+            for entry in entries:
+                tid = entry.get("id") or f"{set_id}-{entry.get('localId', '')}"
+                cid = f"{set_id}-{_bare_promo_number(entry.get('localId', ''))}"
+                if cid in have_ids:
+                    continue
+                if tid not in cache:
+                    try:
+                        d = requests.get(f"{TCGDEX_API}/cards/{tid}", timeout=10)
+                        cache[tid] = d.json() if d.status_code == 200 else None
+                        dirty = True
+                    except requests.RequestException:
+                        cache[tid] = None
+                        dirty = True
+                    time.sleep(0.2)
+                detail = cache.get(tid)
+                if not detail:
+                    continue
+                merged.append(_tcgdex_to_catalog(set_id, meta, detail))
+                have_ids.add(cid)
+        if dirty:
+            _save_json(TCGDEX_PROMO_CACHE, cache)
+        print(f"    Merged {len(merged)} TCGdex promo cards")
+        return merged
+
     def _save_cache(self, cards: list[dict]) -> None:
-        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-        tmp = CACHE_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cards, f, ensure_ascii=False)
-        os.replace(tmp, CACHE_FILE)
+        _atomic_write(CACHE_FILE, lambda f: json.dump(cards, f, ensure_ascii=False))
 
     def _load_cache(self) -> None:
         with open(CACHE_FILE, encoding="utf-8") as f:
@@ -879,6 +1014,27 @@ def _release_key(card: dict) -> int:
     return -int(raw) if raw.isdigit() else 0
 
 
+# Sets images.pokemontcg.io doesn't serve, mapped to the TCGdex (serie, set)
+# whose assets do. Verified Oct 2026 with live HEADs: every me1/me2 URL 200s,
+# while every me2pt5/me3/me4/me5/me55/me55c/mep URL 404s. GitHub set ids are
+# not TCGdex set ids (me1 -> me01, me2pt5 -> me02.5, me55 -> 30th), hence the
+# explicit table rather than a rewrite rule. TCGdex localIds are zero-padded
+# ("001"); the catalog stores them bare ("1"), padded back at URL build time.
+# Non-numeric numbers (mep's "Museum" box topper, me55's R/G/B energies) and the
+# whole me55c/30th-c Classic Collection have no art on either CDN yet and fall
+# through to the card-back placeholder via CardArt's onError; the mapping stays
+# so they start resolving with no code change once TCGdex uploads them.
+_TCGDEX_IMAGE_SETS: dict[str, tuple[str, str]] = {
+    "me2pt5": ("me", "me02.5"),
+    "me3": ("me", "me03"),
+    "me4": ("me", "me04"),
+    "me5": ("me", "me05"),
+    "mep": ("me", "mep"),
+    "me55": ("me", "30th"),
+    "me55c": ("me", "30th-c"),
+}
+
+
 def card_image_url(card: dict | None) -> str | None:
     """Art URL for a catalog card dict (needs set_id + number)."""
     if not card:
@@ -886,6 +1042,12 @@ def card_image_url(card: dict | None) -> str | None:
     set_id, number = card.get("set_id"), card.get("number")
     if not set_id or not number:
         return None
+    redir = _TCGDEX_IMAGE_SETS.get(set_id)
+    if redir:
+        serie, tset = redir
+        lid = str(number).strip()
+        lid = lid.zfill(3) if lid.isdigit() else lid
+        return f"https://assets.tcgdex.net/en/{serie}/{tset}/{lid}/low.png"
     return f"{CARD_IMAGE_BASE}/{set_id}/{number}.png"
 
 
@@ -959,11 +1121,26 @@ _POKEMON_CENTER_RE = re.compile(r"pok[eé]mon\s*center|poke\s*center|pokecent
 
 _BALL_PATTERN_TOKENS = {("poke", "ball"): "poke_ball", ("master", "ball"): "master_ball"}
 
+# Stamped promos (Surprise Box / prerelease stamped prints) share the card name and
+# number of the ordinary print but are a separate product with their own price -
+# the same contamination Pokemon Center promos were. Parsed here for the same
+# reason as _POKEMON_CENTER_RE: a comp with a stamp is wrong for a plain card,
+# and a plain comp is equally wrong when the search asked for a stamped one.
+_STAMPED_RE = re.compile(r"\bstamp(?:ed)?\b", re.IGNORECASE)
+
+# A trailing "Non Holo" (however punctuated) marks the plain, non-reverse print -
+# the finish the inventory/valuation search offers beside Reverse Holo. Stripped
+# before parsing for the same reason the reverse/ball suffixes are: it is a print
+# marker, not part of the set name, and leaving it in would read as one (breaking
+# catalog art/type resolution and the TCGdex market lookup downstream).
+_NON_HOLO_TOKEN_RE = re.compile(r"non[\s-]*holo", re.IGNORECASE)
+
 
 def card_identity(card_query: str) -> dict | None:
     """Structured identity behind a flat card_query string: name, set_name, number and
     which reverse-family print it is (plain reverse holo, or a Poke Ball / Master Ball
-    pattern - see _BALL_PATTERN_TOKENS). Feeds comp_filter.evaluate_comp, which needs to
+    pattern - see _BALL_PATTERN_TOKENS), plus whether it is the explicitly chosen
+    non-holo print. Feeds comp_filter.evaluate_comp, which needs to
     know what card we're actually pricing before it can judge a search result.
 
     Prefers the same title-anchored match enrich_rows() stashed (see lookup_market_price
@@ -976,6 +1153,7 @@ def card_identity(card_query: str) -> dict | None:
         return None
 
     pokemon_center = bool(_POKEMON_CENTER_RE.search(card_query))
+    stamped = bool(_STAMPED_RE.search(card_query))
 
     entry = _load_json(CARD_QUERY_LOOKUP).get(card_query)
     if entry:
@@ -988,14 +1166,16 @@ def card_identity(card_query: str) -> dict | None:
             # variant names, which don't distinguish a ball pattern from a plain
             # reverse holo - so a listing title is still the only way to catch one.
             "pattern": None,
+            "non_holo": False,
             "pokemon_center": pokemon_center,
+            "stamped": stamped,
             "parsed": True,
         }
 
-    # Fallback: "<name> [RARITY] <number> <set name> [Reverse | Poke Ball | Master
-    # Ball]". The number is the first token shaped like a card number, which is also
-    # what separates name from set - so "Charizard ex SIR 199 151" resolves to number
-    # 199 in set "151", not the reverse.
+    # Fallback: "<name> [RARITY] <number> <set name> [Reverse | Non Holo | Poke Ball
+    # | Master Ball]". The number is the first token shaped like a card number, which
+    # is also what separates name from set - so "Charizard ex SIR 199 151" resolves
+    # to number 199 in set "151", not the reverse.
     tokens = card_query.split()
     pattern = None
     if len(tokens) >= 2 and (tokens[-2].lower(), tokens[-1].lower()) in _BALL_PATTERN_TOKENS:
@@ -1005,9 +1185,25 @@ def card_identity(card_query: str) -> dict | None:
     # only checks the boolean (the TCGdex variant lookup in valuation.py, for one)
     # still asks for the closer of the two real prices rather than the plain one.
     reverse = pattern is not None
+    if pattern is None and len(tokens) >= 2 and tokens[-2].lower() == "reverse" and tokens[-1].lower() == "holo":
+        # Free-text searches say "reverse holo" where a card_query says "Reverse".
+        reverse = True
+        tokens = tokens[:-2]
     if pattern is None and tokens and tokens[-1].lower() == "reverse":
         reverse = True
         tokens = tokens[:-1]
+    # Stripped after the reverse checks, so the print still resolves the same way no
+    # matter which end a hand-typed suffix lands on. Either way the print is
+    # non-reverse, so a non-holo pool drops "reverse" titles exactly like a regular
+    # one does - the suffix only changes what eBay gets asked for.
+    non_holo = False
+    if not reverse and tokens:
+        if len(tokens) >= 2 and tokens[-2].lower() == "non" and tokens[-1].lower() == "holo":
+            non_holo = True
+            tokens = tokens[:-2]
+        elif _NON_HOLO_TOKEN_RE.fullmatch(tokens[-1]):
+            non_holo = True
+            tokens = tokens[:-1]
 
     abbrevs = {a.lower() for a in RARITY_ABBREV.values()}
     for i, tok in enumerate(tokens):
@@ -1020,7 +1216,9 @@ def card_identity(card_query: str) -> dict | None:
             "number": tok,
             "reverse": reverse,
             "pattern": pattern,
+            "non_holo": non_holo,
             "pokemon_center": pokemon_center,
+            "stamped": stamped,
             "parsed": True,
         }
 
@@ -1035,7 +1233,9 @@ def card_identity(card_query: str) -> dict | None:
         "number": "",
         "reverse": reverse,
         "pattern": pattern,
+        "non_holo": non_holo,
         "pokemon_center": pokemon_center,
+        "stamped": stamped,
         "parsed": False,
     }
 
@@ -1092,4 +1292,11 @@ def enrich_rows(rows: list[dict], title_key: str = "Item Title") -> None:
     if lookup_updates:
         cache = _load_json(CARD_QUERY_LOOKUP)
         cache.update(lookup_updates)
-        _save_json(CARD_QUERY_LOOKUP, cache)
+        try:
+            _save_json(CARD_QUERY_LOOKUP, cache)
+        except OSError as e:
+            # The lookup is a pure optimisation - card_identity() falls back to
+            # parsing the flat string without it - so a still-locked file must not
+            # take down the sync that just matched several hundred rows. It merges
+            # again on the next run.
+            print(f"  CARD_QUERY_LOOKUP write failed ({e}); continuing without it")

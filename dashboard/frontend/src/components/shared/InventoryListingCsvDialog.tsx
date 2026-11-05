@@ -6,10 +6,6 @@ import { apiPost } from '../../lib/api'
 import { formatCurrency } from '../../lib/utils'
 import type { ListingCsvMode, ListingCsvResponse } from '../../types'
 
-/** Hands the built file to the browser, in whichever form the server produced.
- *
- *  Nothing crosses the network twice - the table shown above and the file downloaded
- *  here came from the same response. */
 function download(result: ListingCsvResponse) {
   // No BOM: the Action header declares CC=UTF-8, so eBay reads the bytes as UTF-8
   // already, and a BOM ahead of the '#INFO' line risks that first line no longer
@@ -23,23 +19,6 @@ function download(result: ListingCsvResponse) {
   URL.revokeObjectURL(url)
 }
 
-/** Turn selected inventory rows into one of eBay's bulk-upload files.
- *
- *  Builds on open and asks nothing. Everything the file needs beyond the rows - the
- *  item location and the three business policy names - is the same on every export
- *  forever, so it lives on the Settings page; a user who hasn't filled it in gets the
- *  backend's message and a link there rather than a form to fill in twice.
- *
- *  It still shows what it built before handing it over. Every line becomes a live
- *  listing at a price this app chose, and preview-then-confirm is the house style for
- *  anything ending in a marketplace write (see the ebay-listing-dry-run skill) - even
- *  one the seller uploads themselves. The rows left out matter just as much as the
- *  ones in: a card nothing has priced silently missing from the file is how you
- *  discover it three weeks later, still in the box.
- *
- *  Nothing here computes a price or a title. Both arrive from services/listing_csv.py
- *  already decided, for the same reason the list and detail pages both read one
- *  server-side suggested price. */
 export function InventoryListingCsvDialog({ ids, onClose }: {
   ids: number[]
   onClose: () => void

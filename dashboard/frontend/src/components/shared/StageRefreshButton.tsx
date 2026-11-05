@@ -9,12 +9,9 @@ interface RefreshStatus {
 }
 
 interface Props {
-  /** GET path returning { state, last_run_at } for this stage's job_runs row. */
   statusPath: string
-  /** POST path that starts the stage in the background. */
   runPath: string
   label: string
-  /** Called once, right when a running refresh transitions back to idle. */
   onRefreshed?: () => void
 }
 

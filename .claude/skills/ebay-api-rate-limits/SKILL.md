@@ -77,8 +77,8 @@ advisory lock — an unbounded slow tail would block every future manual and
 scheduled run indefinitely. Any new long batch job needs the same treatment.
 
 **Advisory locks.** A thread lock plus a Postgres advisory lock guarantees one
-runner per job across processes. Keys in use: `727001` pipeline, `727002`
-research, `727003`/`727004` stage sold/active. **Pick a new key for a new job.**
+runner per job across processes. Keys in use: `727002`
+research, `727003`/`727004` stage sold/active (`727001` was the retired pipeline runner — don't reuse it for a while). **Pick a new key for a new job.**
 
 **Never research in a request handler.** `refresh_card` is the one synchronous
 per-card path (it deliberately bypasses the batch lock so a single-card refresh

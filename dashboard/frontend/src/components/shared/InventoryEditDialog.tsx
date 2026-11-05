@@ -1,29 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Loader2, Pencil, Search } from 'lucide-react'
-import { api, apiPut } from '../../lib/api'
+import { ArrowLeft, Loader2 } from 'lucide-react'
+import { apiPut } from '../../lib/api'
 import { PhotoUploader } from './PhotoUploader'
-import { CardFinishButtons } from './CardFinishButtons'
-import { applyFinish, finishLabel } from '../../lib/cardFinish'
+import { CardSearch } from './CardSearch'
+import { applyFinish } from '../../lib/cardFinish'
 import type { CardFinish } from '../../lib/cardFinish'
+import { CONDITIONS } from '../../lib/conditions'
 import type { CardHit, InventoryItem, LotOption } from '../../types'
-
-// Same vocabulary as CONDITION_MULTIPLIER in services/suggested_price.py. Labels
-// only - the multiplier is applied server-side, so this list can never disagree
-// with what a row is actually valued at.
-const CONDITIONS = ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged']
 
 const FIELD =
   'mt-1 w-full border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 ' +
   'dark:text-neutral-100 rounded-lg px-3 py-1.5 text-sm'
 
 const LABEL = 'text-xs font-medium text-slate-600 dark:text-neutral-300'
-
-const HIGHLIGHT = 'bg-slate-50 dark:bg-neutral-700/50'
-
-// Mirrors MAX_QUERY_WORDS in src/ebaypricer/browse_api.py, which truncates every
-// query before it reaches eBay.
-const MAX_QUERY_WORDS = 5
 
 // eBay's own ceiling on photos per item, mirrored from MAX_PHOTOS in
 // routers/inventory.py, which is what actually enforces it.
@@ -61,71 +51,14 @@ function fromItem(item: InventoryItem): Form {
   }
 }
 
-// One selectable row of the search results, flattened so the keyboard doesn't
-// have to know that the last one is an action rather than a catalog hit.
-type Option =
-  | { kind: 'card'; card: CardHit }
-  // A free-text eBay search: card_query holds the typed words rather than a
-  // catalog identity, which is what makes an off-catalog row priceable.
-  | { kind: 'search' }
-  | { kind: 'stated' }
-
-/** Re-identify the row: which catalog card this actually is. Gets the whole
- *  dialog rather than one field among nine, because picking the wrong printing is
- *  the mistake worth making easy to correct - it is what the value is read from. */
+// The shared search is the whole body of this step; only the heading and the
+// way back to the details form belong to the dialog.
 function SearchStep({ onPick, onSearchTerm, onFreeText, onBack }: {
-  /** Which print of the catalog card - see lib/cardFinish.ts. */
   onPick: (hit: CardHit, finish: CardFinish) => void
-  /** Price this row from an eBay search for these words. */
   onSearchTerm: (text: string) => void
-  /** No card and no search - the row carries a stated price instead. */
   onFreeText: (text: string) => void
   onBack: () => void
 }) {
-  const [query, setQuery] = useState('')
-  const [hits, setHits] = useState<CardHit[]>([])
-  const [searching, setSearching] = useState(false)
-  const [active, setActive] = useState(0)
-  const listRef = useRef<HTMLUListElement>(null)
-
-  // Debounced for the same reason the Valuation page debounces it: the search is
-  // a local scan on the server, so this is about request volume, not eBay calls.
-  useEffect(() => {
-    const q = query.trim()
-    if (q.length < 2) { setHits([]); return }
-    setSearching(true)
-    const t = setTimeout(() => {
-      api<CardHit[]>(`/valuation/cards/search?q=${encodeURIComponent(q)}&limit=15`)
-        .then(setHits)
-        .catch(() => setHits([]))
-        .finally(() => setSearching(false))
-    }, 200)
-    return () => { clearTimeout(t); setSearching(false) }
-  }, [query])
-
-  const typed = query.trim()
-  const options: Option[] = [
-    ...hits.map((card): Option => ({ kind: 'card', card })),
-    ...(typed.length >= 2 ? [{ kind: 'search' } as Option, { kind: 'stated' } as Option] : []),
-  ]
-
-  useEffect(() => { setActive(0) }, [query, hits])
-
-  useEffect(() => {
-    listRef.current?.querySelector(`[data-idx="${active}"]`)?.scrollIntoView({ block: 'nearest' })
-  }, [active])
-
-  // finish defaults to 'regular' so Enter and the row's own click keep adding at
-  // the same speed as before finishes existed - only the two small buttons beside
-  // each hit ask for anything else.
-  function choose(i: number, finish: CardFinish = 'regular') {
-    const o = options[i]
-    if (!o) return
-    if (o.kind === 'card') onPick(o.card, finish)
-    else if (o.kind === 'search') onSearchTerm(typed)
-    else onFreeText(typed)
-  }
-
   return (
     <div className="flex flex-col min-h-0">
       <div className="flex items-center gap-2 mb-3">
@@ -140,122 +73,19 @@ function SearchStep({ onPick, onSearchTerm, onFreeText, onBack }: {
         <h2 className="text-lg font-bold text-slate-900 dark:text-neutral-100">Which card?</h2>
       </div>
 
-      <div className="flex items-center gap-2 border border-slate-300 dark:border-neutral-600 dark:bg-neutral-900 rounded-lg px-3 py-2">
-        <Search className="w-4 h-4 text-slate-400 shrink-0" />
-        <input
-          value={query}
-          autoFocus
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (!options.length) return
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-              e.preventDefault()
-              const d = e.key === 'ArrowDown' ? 1 : -1
-              setActive((i) => (i + d + options.length) % options.length)
-            } else if (e.key === 'Enter') {
-              e.preventDefault()
-              choose(active)
-            }
-          }}
-          placeholder="Card name, set, or number"
-          className="w-full bg-transparent outline-none text-sm text-slate-900 dark:text-neutral-100 placeholder:text-slate-400"
-        />
-        {searching && <Loader2 className="w-4 h-4 animate-spin text-slate-400 shrink-0" />}
-      </div>
-
-      <ul ref={listRef} className="mt-2 flex-1 min-h-0 overflow-y-auto -mx-1">
-        {hits.map((h, i) => (
-          <li key={h.card_query + h.number} className={`flex items-center rounded-lg ${active === i ? HIGHLIGHT : ''}`}>
-            <button
-              type="button"
-              data-idx={i}
-              onMouseEnter={() => setActive(i)}
-              onClick={() => onPick(h, 'regular')}
-              title={`Add as ${finishLabel('regular')}`}
-              className="min-w-0 flex-1 text-left px-3 py-2"
-            >
-              <span className="text-sm text-slate-900 dark:text-neutral-100">{h.name}</span>
-              <span className="text-xs text-slate-500 dark:text-neutral-400 ml-2">
-                #{h.number} · {h.set_name}
-              </span>
-              {h.rarity && (
-                <span className="ml-2 rounded px-1.5 py-0.5 text-[10px] font-medium bg-slate-100 dark:bg-neutral-700 text-slate-600 dark:text-neutral-300 align-middle">
-                  {h.rarity}
-                </span>
-              )}
-            </button>
-            {/* Regular is the row's own click target above; these cover the other
-                prints of the same catalogued card - see lib/cardFinish.ts. */}
-            <CardFinishButtons setName={h.set_name} onPick={(finish) => onPick(h, finish)} />
-          </li>
-        ))}
-
-        {typed.length >= 2 && (
-          <li className={hits.length ? 'border-t border-slate-100 dark:border-neutral-700 mt-1 pt-1' : undefined}>
-            <button
-              type="button"
-              data-idx={hits.length}
-              onMouseEnter={() => setActive(hits.length)}
-              onClick={() => onSearchTerm(typed)}
-              className={`w-full text-left px-3 py-2 rounded-lg ${active === hits.length ? HIGHLIGHT : ''}`}
-            >
-              <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 dark:text-neutral-300">
-                <Search className="w-3.5 h-3.5" />
-                Price <span className="font-medium text-slate-900 dark:text-neutral-100">"{typed}"</span> from an eBay search
-              </span>
-              {typed.split(/\s+/).length > MAX_QUERY_WORDS && (
-                <span className="block text-xs text-amber-600 dark:text-amber-400 mt-0.5">
-                  eBay only uses the first {MAX_QUERY_WORDS} words:{' '}
-                  <strong>{typed.split(/\s+/).slice(0, MAX_QUERY_WORDS).join(' ')}</strong>
-                  {' '}— put the words that matter first
-                </span>
-              )}
-            </button>
-          </li>
-        )}
-        {typed.length >= 2 && (
-          <li className="border-t border-slate-100 dark:border-neutral-700 mt-1 pt-1">
-            <button
-              type="button"
-              data-idx={hits.length + 1}
-              onMouseEnter={() => setActive(hits.length + 1)}
-              onClick={() => onFreeText(typed)}
-              className={`w-full text-left px-3 py-2 rounded-lg ${active === hits.length + 1 ? HIGHLIGHT : ''}`}
-            >
-              <span className="inline-flex items-center gap-1.5 text-sm text-slate-600 dark:text-neutral-300">
-                <Pencil className="w-3.5 h-3.5" />
-                Use <span className="font-medium text-slate-900 dark:text-neutral-100">"{typed}"</span> and price it myself
-              </span>
-            </button>
-          </li>
-        )}
-      </ul>
-
-      {/* Sealed product and bulk have no catalog entry at all, so an empty search
-          must not be a dead end. Clears the link and keeps the name, which also
-          makes this the way to undo a card picked in error. */}
-      {typed.length < 2 && (
-        <button
-          type="button"
-          onClick={() => onFreeText('')}
-          className="mt-2 text-left text-xs text-slate-500 dark:text-neutral-400 hover:text-slate-800 dark:hover:text-neutral-200"
-        >
-          Not a catalog card? Keep the name and drop the card
-        </button>
-      )}
+      <CardSearch
+        onPick={onPick}
+        onSearchTerm={onSearchTerm}
+        onFreeText={onFreeText}
+      />
     </div>
   )
 }
 
-/** Everything about one row that the table can't edit in place - the name, the
- *  cost, the notes, and which catalog card it is. Adding happens on the page's
- *  own search box, so this only ever edits: it opens on the details and reaches
- *  the card search through Change. */
 export function InventoryEditDialog({ item, locations, skus, photoHostingEnabled, onClose }: {
   item: InventoryItem
   locations: string[]
   skus: LotOption[]
-  /** From GET /inventory. False when the server has no Supabase credentials. */
   photoHostingEnabled: boolean
   onClose: () => void
 }) {

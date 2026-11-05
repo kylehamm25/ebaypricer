@@ -18,3 +18,9 @@ src/*.egg-info/
 *.html
 node_modules
 .claude/settings.local.json
+# Obsidian per-machine cache inside the vault (notes themselves stay tracked)
+vault/.obsidian/workspace.json
+vault/.obsidian/workspace-mobile.json
+vault/.obsidian/cache/
+# Vault sync hook state (pending doc queue, machine-local)
+.opencode/.vault-sync-state.json

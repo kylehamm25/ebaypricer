@@ -7,6 +7,9 @@ import { useAuth } from '../lib/auth-context'
 import { formatCurrency } from '../lib/utils'
 import { KpiCard } from '../components/shared/KpiCard'
 import { CardArt } from '../components/shared/ViewToggle'
+import { CardFinishButtons } from '../components/shared/CardFinishButtons'
+import { applyFinish } from '../lib/cardFinish'
+import type { CardFinish } from '../lib/cardFinish'
 import type { CardHit, CardValue, LotsResponse } from '../types'
 
 // Matches CONDITION_MULTIPLIER in services/suggested_price.py. Kept as labels only -
@@ -22,9 +25,7 @@ interface Row {
   value?: CardValue
   loading: boolean
   error?: string
-  /** Priced by hand instead of from eBay comps - no lookup, no condition multiplier. */
   manual?: boolean
-  /** The typed price, kept as a string so a half-entered "12." doesn't reset the field. */
   price?: string
 }
 
@@ -94,10 +95,7 @@ const draftKey = (userId: string | undefined) => `ebayprice.valuation.v${DRAFT_V
 interface Draft {
   rows: Row[]
   offer: string
-  /** The half-filled Create-lot form. Part of the same working state as the card list -
-   *  losing a typed SKU and source to a refresh is the same annoyance as losing the
-   *  cards. `saved`/`error` are deliberately not kept: they are transient feedback about
-   *  one submission, and replaying "Lot L0042 saved" after a reload would be a lie. */
+  query: string
   lot?: { open: boolean; sku: string; title: string; source: string; date: string }
 }
 
@@ -115,6 +113,7 @@ function loadDraft(key: string): Draft | null {
       // rather than discarding the whole draft over a field that simply wasn't written.
       rows: rows.map((r) => ({ ...r, loading: false, manual: r.manual ?? false, price: r.price ?? '' })),
       offer: typeof d.offer === 'string' ? d.offer : '',
+      query: typeof (d as Draft).query === 'string' ? (d as Draft).query : '',
       lot: d.lot && typeof d.lot === 'object' ? d.lot : undefined,
     }
   } catch {
@@ -151,11 +150,18 @@ export function ValuationPage() {
   const [lotSaving, setLotSaving] = useState(false)
   const [lotError, setLotError] = useState<string | null>(null)
   const [lotSaved, setLotSaved] = useState<string | null>(null)
+  const [valuingAll, setValuingAll] = useState(false)
+  // Stops the bulk re-value loop if the page is left mid-run. Individual lookups
+  // can't be aborted (lib/api has no signal support), but at least no further ones
+  // start after unmount.
+  const cancelled = useRef(false)
+  useEffect(() => () => { cancelled.current = true }, [])
 
   useEffect(() => {
     const d = loadDraft(storageKey)
     setRows(d?.rows ?? [])
     setOffer(d?.offer ?? '')
+    setQuery(d?.query ?? '')
     setLotOpen(d?.lot?.open ?? false)
     setLotSku(d?.lot?.sku ?? '')
     setLotTitle(d?.lot?.title ?? '')
@@ -173,15 +179,15 @@ export function ValuationPage() {
   useEffect(() => {
     if (restoredFor.current !== storageKey) return
     const lot = { open: lotOpen, sku: lotSku, title: lotTitle, source: lotSource, date: lotDate }
-    const empty = rows.length === 0 && !offer && !lotOpen && !lotSku
+    const empty = rows.length === 0 && !offer && !query && !lotOpen && !lotSku
     try {
       if (empty) localStorage.removeItem(storageKey)
-      else localStorage.setItem(storageKey, JSON.stringify({ rows, offer, lot }))
+      else localStorage.setItem(storageKey, JSON.stringify({ rows, offer, query, lot }))
     } catch {
       // Quota exceeded or storage blocked (private mode). The page works fine without
       // persistence, so this must not surface as an error.
     }
-  }, [rows, offer, storageKey, lotOpen, lotSku, lotTitle, lotSource, lotDate])
+  }, [rows, offer, query, storageKey, lotOpen, lotSku, lotTitle, lotSource, lotDate])
 
   // Debounced so typing doesn't fire a request per keystroke. Search itself is a local
   // scan on the server (no eBay call), so this is purely about request volume.
@@ -232,6 +238,26 @@ export function ValuationPage() {
     }
   }
 
+  // Re-value every row that has no number yet: rows restored from a draft saved
+  // mid-lookup, rows whose lookup failed while the page was elsewhere, anything never
+  // attempted. Sequential, not parallel - restored rows usually hit today's cached
+  // snapshot, and the uncached remainder must not burst against the Browse quota (see
+  // MAX_BATCH in routers/valuation.py). Capped per click so a huge pile can't fire
+  // hundreds of calls from one button.
+  async function valueAllMissing() {
+    const targets = rows.filter((r) => !r.manual && !r.loading && r.value == null).slice(0, 25)
+    if (!targets.length || valuingAll) return
+    setValuingAll(true)
+    try {
+      for (const t of targets) {
+        if (cancelled.current) break
+        await fetchValue(t.id, t.card, t.condition)
+      }
+    } finally {
+      if (!cancelled.current) setValuingAll(false)
+    }
+  }
+
   // Recompute any hand-priced row whose typed price no longer matches its computed
   // value, debounced so typing "12.50" is one request rather than five. Settles because
   // fetchManual writes adjusted_value back to the same number the test compares against.
@@ -254,12 +280,14 @@ export function ValuationPage() {
     setQuery(''); setHits([]); setOpen(false)
   }
 
-  function addCard(card: CardHit) {
+  function addCard(card: CardHit, finish: CardFinish = 'regular') {
+    const { card_query, name } = applyFinish(card, finish)
+    const finished: CardHit = { ...card, card_query, name }
     const id = nextId++
     const condition = 'Near Mint'
-    setRows((rs) => [{ id, card, condition, qty: 1, loading: true }, ...rs])
+    setRows((rs) => [{ id, card: finished, condition, qty: 1, loading: true }, ...rs])
     setQuery(''); setHits([]); setOpen(false)
-    void fetchValue(id, card, condition)
+    void fetchValue(id, finished, condition)
   }
 
   function setQty(id: number, qty: number) {
@@ -333,6 +361,13 @@ export function ValuationPage() {
     }
     return { asking, net, cards, priced, missing, unfiltered }
   }, [rows])
+
+  // Rows with no number yet: restored from a draft saved mid-lookup, a lookup that
+  // failed while the page was elsewhere, or never attempted.
+  const unpricedCount = useMemo(
+    () => rows.filter((r) => !r.manual && !r.loading && r.value == null).length,
+    [rows],
+  )
 
   // The dropdown flattened into one selectable list, so the keyboard doesn't have to
   // know that the last two rows are actions rather than catalog hits.
@@ -415,7 +450,7 @@ export function ValuationPage() {
             className="absolute z-20 mt-1 w-full max-h-80 overflow-y-auto bg-white dark:bg-neutral-800 rounded-xl shadow-lg ring-1 ring-black/5 dark:ring-white/10"
           >
             {hits.map((h, i) => (
-              <li key={h.card_query + h.number}>
+              <li key={h.card_query + h.number} className={`flex items-center ${active === i ? HIGHLIGHT : ''}`}>
                 <button
                   id={`valuation-option-${i}`}
                   data-idx={i}
@@ -425,7 +460,8 @@ export function ValuationPage() {
                   // mouse and the arrow keys can never disagree about what Enter picks.
                   onMouseEnter={() => setActive(i)}
                   onClick={() => addCard(h)}
-                  className={`w-full text-left px-3 py-2 ${active === i ? HIGHLIGHT : ''}`}
+                  title="Add as Regular"
+                  className="min-w-0 flex-1 text-left px-3 py-2"
                 >
                   <span className="text-sm text-slate-900 dark:text-neutral-100">{h.name}</span>
                   <span className="text-xs text-slate-500 dark:text-neutral-400 ml-2">
@@ -440,6 +476,10 @@ export function ValuationPage() {
                     </span>
                   )}
                 </button>
+                {/* Regular is the row's own click target above (and what Enter adds);
+                    these cover the other prints of the same card, each with its own
+                    eBay search - the same buttons the Inventory page offers. */}
+                <CardFinishButtons setName={h.set_name} onPick={(finish) => addCard(h, finish)} />
               </li>
             ))}
             {query.trim().length >= 2 && (
@@ -528,7 +568,7 @@ export function ValuationPage() {
             </button>
             <button
               onClick={() => {
-                setRows([]); setOffer(''); setLotSaved(null); setLotError(null)
+                setRows([]); setOffer(''); setQuery(''); setLotSaved(null); setLotError(null)
                 setLotOpen(false); setLotSku(''); setLotTitle(''); setLotSource('')
               }}
               className="text-sm text-slate-500 dark:text-neutral-400 hover:underline"
@@ -603,6 +643,22 @@ export function ValuationPage() {
                 {totals.unfiltered} card{totals.unfiltered === 1 ? "'s" : "s'"} comps could not be refreshed, so
                 {totals.unfiltered === 1 ? ' its' : ' their'} value falls back to an unfiltered snapshot that may
                 include graded slabs, lots or wrong prints. Remove and re-add to try again.
+              </span>
+            </div>
+          )}
+
+          {unpricedCount > 0 && (
+            <div className="flex items-center gap-2 text-sm">
+              <button
+                onClick={() => void valueAllMissing()}
+                disabled={valuingAll}
+                className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1 bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {valuingAll && <Loader2 className="w-4 h-4 animate-spin" />}
+                {valuingAll ? 'Valuing…' : `Value ${unpricedCount} unpriced card${unpricedCount === 1 ? '' : 's'}`}
+              </button>
+              <span className="text-xs text-slate-400">
+                Restored rows keep their last number, not a live lookup — this re-runs the missing ones.
               </span>
             </div>
           )}

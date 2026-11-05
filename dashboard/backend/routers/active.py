@@ -1,5 +1,5 @@
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -12,7 +12,7 @@ from ebaypricer.trading_api import EbayReviseError, revise_item_price
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
 from dashboard.backend.services.ebay_oauth import NotConnectedError, get_access_token
-from dashboard.backend.services.suggested_price import REPRICE_COOLDOWN_DAYS
+from dashboard.backend.services.suggested_price import FEEDBACK_HOLD_DAYS, REPRICE_COOLDOWN_DAYS
 from dashboard.backend.services.stage_runner import ACTIVE_JOB_NAME, get_latest_run, run_active_refresh
 from dashboard.backend.services.type_sort import sort_by_card_type
 from dashboard.backend.services.upsert_rules import existing_columns
@@ -266,6 +266,8 @@ def get_active_item(item_id: str, user_id: UUID = Depends(get_current_user_id)):
     # _SELECT, which the list endpoint shares - before migration 0013 that would
     # have taken the whole listings page down instead of just this indicator.
     item["Card Locked"] = _card_locked(user_id, item_id)
+    # Any active thumbs-down on the suggestion, for the same reason.
+    item["Feedback"] = _feedback_state(user_id, item_id)
     return item
 
 
@@ -280,6 +282,31 @@ def _card_locked(user_id: UUID, item_id: str) -> bool:
         # Migration 0013 not run: nothing is locked, because nothing can be.
         return False
     return bool(row and row["card_locked"])
+
+
+FEEDBACK_MIGRATION_HINT = (
+    "Seller feedback needs db/migrations/0020_price_feedback.sql to be run first"
+)
+
+
+def _feedback_state(user_id: UUID, item_id: str) -> dict | None:
+    """The listing's active veto, if any - what the thumb button shows. Its own query
+    rather than a column in _SELECT, which the list endpoint shares (same reason as
+    _card_locked): a missing table must degrade to 'no veto', not 500 the page.
+    Expired vetoes read as absent, the same rule _feedback_for_row applies."""
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT direction, voted_at FROM price_feedback "
+                "WHERE user_id = %s AND item_id = %s AND voted_at > %s",
+                [user_id, item_id, datetime.now(timezone.utc) - timedelta(days=FEEDBACK_HOLD_DAYS)],
+            ).fetchone()
+    except UndefinedTable:
+        # Migration 0020 not run: no vetoes can exist.
+        return None
+    if row is None:
+        return None
+    return {"direction": row["direction"], "voted_at": row["voted_at"].isoformat()}
 
 
 @router.post("/item/{item_id}/refresh")
@@ -469,8 +496,220 @@ class BulkPriceItem(BaseModel):
     price: float
 
 
+class FeedbackVote(BaseModel):
+    vote: str
+
+
+@router.post("/item/{item_id}/feedback")
+def set_item_feedback(item_id: str, body: FeedbackVote, user_id: UUID = Depends(get_current_user_id)):
+    """Thumbs-down on the current suggestion: veto the direction it moved for
+    FEEDBACK_HOLD_DAYS. A vetoed increase can still cut, a vetoed decrease can
+    still rise - only the rejected direction holds at the current price. Voting
+    again replaces the veto (and restarts its clock); DELETE clears it.
+
+    Recomputes suggestions afterwards so the veto takes effect immediately rather
+    than on the next scheduled run - the same reason bulk-price recomputes.
+    """
+    if body.vote != "down":
+        raise HTTPException(422, "Only 'down' votes are supported")
+    try:
+        with get_db() as db:
+            row = db.execute(
+                "SELECT price, suggested_price FROM active_listings WHERE user_id = %s AND item_id = %s",
+                [user_id, item_id],
+            ).fetchone()
+    except UndefinedTable:
+        raise HTTPException(503, "Active listings table not found")
+    if row is None:
+        raise HTTPException(404, "Listing not found")
+    price = float(row["price"]) if row["price"] is not None else None
+    suggested = float(row["suggested_price"]) if row["suggested_price"] is not None else None
+    # Same epsilon the frontend uses to decide a suggestion "differs": a hold has no
+    # direction to veto.
+    if price is None or suggested is None or abs(suggested - price) < 0.01:
+        raise HTTPException(422, "Nothing to veto - this listing has no actionable suggestion")
+    direction = "up" if suggested > price else "down"
+    try:
+        with get_db(read_only=False) as db:
+            db.execute(
+                "INSERT INTO price_feedback (user_id, item_id, direction, suggested_price, voted_at) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (user_id, item_id) DO UPDATE SET "
+                "direction = EXCLUDED.direction, suggested_price = EXCLUDED.suggested_price, "
+                "voted_at = EXCLUDED.voted_at",
+                [user_id, item_id, direction, suggested, datetime.now(timezone.utc)],
+            )
+    except UndefinedTable:
+        raise HTTPException(503, FEEDBACK_MIGRATION_HINT)
+    from dashboard.backend.services.price_research import recompute_suggestions
+
+    recompute_suggestions(user_id=str(user_id))
+    return {"status": "ok", "direction": direction, "hold_days": FEEDBACK_HOLD_DAYS}
+
+
+@router.delete("/item/{item_id}/feedback")
+def clear_item_feedback(item_id: str, user_id: UUID = Depends(get_current_user_id)):
+    """Remove a veto (undo). Idempotent - clearing what isn't there is still ok."""
+    try:
+        with get_db(read_only=False) as db:
+            db.execute(
+                "DELETE FROM price_feedback WHERE user_id = %s AND item_id = %s",
+                [user_id, item_id],
+            )
+    except UndefinedTable:
+        raise HTTPException(503, FEEDBACK_MIGRATION_HINT)
+    from dashboard.backend.services.price_research import recompute_suggestions
+
+    recompute_suggestions(user_id=str(user_id))
+    return {"status": "ok"}
+
+
 class BulkPriceRequest(BaseModel):
     items: list[BulkPriceItem]
+
+
+class FloorPreviewRequest(BaseModel):
+    floor: float
+
+
+class FloorApplyRequest(BaseModel):
+    floor: float
+    item_ids: list[str]
+
+
+# Preview-then-confirm floor raise (see the ebay-listing-dry-run skill: every
+# marketplace write needs its exact item set shown first). Preview is pure read;
+# apply revises each listing's price to the floor and nothing else - same
+# price-only semantics as the single and bulk revise paths above, so Best Offer
+# thresholds are never touched. The target is the exact floor the seller typed,
+# not a psych-rounded value: rounding $2.00 "up" to $2.49 would overshoot what
+# was asked for, and rounding to nearest ($1.99) would land below the floor.
+MAX_FLOOR_PREVIEW_ITEMS = 500
+
+
+@router.post("/floor/preview")
+def preview_floor_raise(body: FloorPreviewRequest, user_id: UUID = Depends(get_current_user_id)):
+    """List every one of this user's active listings priced below `floor` and the
+    exact revision each would get. Read-only - call /floor/apply with an explicit
+    item_id list to move any of them."""
+    if body.floor <= 0:
+        raise HTTPException(400, "Floor must be greater than 0")
+    target = round(body.floor, 2)
+    with get_db() as db:
+        try:
+            total = db.execute(
+                "SELECT COUNT(*) AS c FROM active_listings "
+                "WHERE user_id = %s AND price IS NOT NULL AND price < %s",
+                [user_id, target],
+            ).fetchone()["c"]
+            rows = db.execute(
+                "SELECT item_id, title, card, price FROM active_listings "
+                "WHERE user_id = %s AND price IS NOT NULL AND price < %s "
+                "ORDER BY price ASC LIMIT %s",
+                [user_id, target, MAX_FLOOR_PREVIEW_ITEMS + 1],
+            ).fetchall()
+        except UndefinedTable:
+            return {"floor": target, "total_below": 0, "largest_move": 0,
+                    "truncated": False, "items": []}
+    items = [
+        {"item_id": r["item_id"], "title": r["title"], "card": r["card"],
+         "price": float(r["price"]), "new_price": target}
+        for r in rows[:MAX_FLOOR_PREVIEW_ITEMS]
+    ]
+    largest = round(max((target - i["price"] for i in items), default=0), 2)
+    return {"floor": target, "total_below": total, "largest_move": largest,
+            "truncated": total > MAX_FLOOR_PREVIEW_ITEMS, "items": items}
+
+
+FLOOR_RAISE_JOB = "floor_raise"
+
+
+@router.post("/floor/apply")
+def apply_floor_raise(body: FloorApplyRequest, user_id: UUID = Depends(get_current_user_id)):
+    """Revise each listed item up to `floor`. Items are re-checked at apply time:
+    anything no longer below the floor (or not ours) is reported `skipped`, never
+    revised. Each revision is attempted independently like bulk-price; applied
+    changes are logged to price_change_log (source "floor", which starts the
+    reprice cooldown for each) and suggestions are recomputed afterwards."""
+    if body.floor <= 0:
+        raise HTTPException(400, "Floor must be greater than 0")
+    if not body.item_ids:
+        raise HTTPException(400, "No items supplied")
+    if len(body.item_ids) > MAX_BULK_ITEMS:
+        raise HTTPException(400, f"Too many items in one request (max {MAX_BULK_ITEMS})")
+    target = round(body.floor, 2)
+
+    try:
+        token = get_access_token(user_id)
+    except NotConnectedError:
+        raise HTTPException(409, "eBay account not connected")
+
+    started = datetime.now(timezone.utc)
+    results: list[dict] = []
+    changes: list[tuple] = []
+    applied = 0
+    skipped = 0
+
+    with get_db() as db:
+        owned = {
+            r["item_id"]: (float(r["price"]) if r["price"] is not None else None)
+            for r in db.execute(
+                "SELECT item_id, price FROM active_listings WHERE user_id = %s", [user_id]
+            ).fetchall()
+        }
+
+    for item_id in body.item_ids:
+        current = owned.get(item_id)
+        if current is None:
+            results.append({"item_id": item_id, "status": "error", "error": "Listing not found"})
+            continue
+        if current >= target:
+            skipped += 1
+            results.append({"item_id": item_id, "status": "skipped",
+                            "error": f"Already at or above floor (${current:.2f})"})
+            continue
+        try:
+            revise_item_price(item_id, target, token)
+        except Exception as e:
+            results.append({"item_id": item_id, "status": "error", "error": str(e)[:200]})
+            continue
+        with get_db(read_only=False) as db:
+            db.execute(
+                "UPDATE active_listings SET price = %s WHERE user_id = %s AND item_id = %s",
+                [target, user_id, item_id],
+            )
+        applied += 1
+        changes.append((user_id, item_id, current, target, "floor"))
+        results.append({"item_id": item_id, "status": "ok", "price": target})
+
+    failed = len(results) - applied - skipped
+    # Before the recompute below, so the suggestions it writes already see the cooldown.
+    _log_price_changes(changes)
+
+    try:
+        with get_db(read_only=False) as db:
+            db.execute(
+                "INSERT INTO job_runs (job_name, user_id, status, started_at, finished_at, detail) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    FLOOR_RAISE_JOB, user_id, "ok" if failed == 0 else "partial",
+                    started, datetime.now(timezone.utc),
+                    Json({"floor": target, "requested": len(body.item_ids),
+                          "applied": applied, "skipped": skipped, "failed": failed}),
+                ),
+            )
+    except Exception as e:  # auditing must never fail the actual revision
+        print(f"[floor-raise] failed to record job_run: {e}")
+
+    # Prices changed, so the stored suggestions are now relative to stale prices.
+    try:
+        from dashboard.backend.services.price_research import recompute_suggestions
+
+        recompute_suggestions(user_id=str(user_id))
+    except Exception as e:
+        print(f"[floor-raise] suggestion recompute failed: {e}")
+
+    return {"applied": applied, "skipped": skipped, "failed": failed, "results": results}
 
 
 BULK_PRICE_JOB = "bulk_price_revision"

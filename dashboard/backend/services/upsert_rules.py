@@ -1,9 +1,10 @@
 """Columns a sync must not blindly overwrite.
 
-Both sync paths (services/excel_sync.py and services/ebay_data.py) build their own
-`ON CONFLICT ... DO UPDATE SET` clause, and both would otherwise put a fuzzy-matched
-value back over one a person corrected. The rule lives here so the two cannot
-disagree about which columns are protected.
+The per-user eBay sync builds its own `ON CONFLICT ... DO UPDATE SET` clause and
+would otherwise put a fuzzy-matched value back over one a person corrected. The
+rule lives here (rather than inline at the write site) so the read path in
+routers/active.py and any future second writer cannot disagree about which
+columns are protected.
 """
 
 # column -> the boolean column that protects it, per table. Adding an entry is all

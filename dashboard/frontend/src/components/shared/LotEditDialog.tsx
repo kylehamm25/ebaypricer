@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
-import { apiPut } from '../../lib/api'
+import { Loader2, Trash2 } from 'lucide-react'
+import { apiDelete, apiPut } from '../../lib/api'
 import type { Lot } from '../../types'
 
 interface EditState {
@@ -12,8 +12,6 @@ interface EditState {
   notes: string
 }
 
-/** The lot cost/details editor, shared by the lots list and a lot's own page so
- *  both save through one code path. */
 export function LotEditDialog({ lot, onClose }: { lot: Lot; onClose: () => void }) {
   const queryClient = useQueryClient()
   const [form, setForm] = useState<EditState>({
@@ -42,6 +40,21 @@ export function LotEditDialog({ lot, onClose }: { lot: Lot; onClose: () => void 
       queryClient.invalidateQueries({ queryKey: ['lot', lot.sku] })
       onClose()
     },
+  })
+
+  // Two-step inline confirm, not a second modal: the first click arms it, the
+  // second fires. Deletes only the saved cost record - listings, sales and
+  // inventory rows keep their SKU, so a lot with live activity stays visible as
+  // untracked rather than vanishing.
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const deleteMutation = useMutation({
+    mutationFn: () => apiDelete(`/lots/${encodeURIComponent(lot.sku)}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['lots'] })
+      queryClient.invalidateQueries({ queryKey: ['lot', lot.sku] })
+      onClose()
+    },
+    onError: () => setConfirmingDelete(false),
   })
 
   return (
@@ -122,23 +135,65 @@ export function LotEditDialog({ lot, onClose }: { lot: Lot; onClose: () => void 
           </p>
         )}
 
-        <div className="flex justify-end gap-2 pt-4">
-          <button
-            className="px-3 py-1.5 text-sm border border-slate-300 dark:border-neutral-600 rounded-lg text-slate-700 dark:text-neutral-200"
-            onClick={onClose}
-            disabled={saveMutation.isPending}
-          >
-            Cancel
-          </button>
-          <button
-            className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
-            onClick={() => saveMutation.mutate(form)}
-            disabled={saveMutation.isPending}
-          >
-            {saveMutation.isPending && <Loader2 size={14} className="animate-spin" />}
-            Save
-          </button>
-        </div>
+        {deleteMutation.isError && (
+          <p className="text-xs text-rose-600 dark:text-rose-400 mt-3">
+            {(deleteMutation.error as Error).message}
+          </p>
+        )}
+
+        {confirmingDelete ? (
+          <div className="mt-4 rounded-lg bg-rose-50 dark:bg-rose-500/10 px-3 py-2.5">
+            <p className="text-xs text-rose-700 dark:text-rose-300">
+              Delete the saved cost and details for lot {lot.sku}? Listings, sales and
+              inventory rows keep their SKU — a lot with live activity stays on the page
+              as untracked.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                className="px-3 py-1.5 text-sm border border-slate-300 dark:border-neutral-600 rounded-lg text-slate-700 dark:text-neutral-200"
+                onClick={() => setConfirmingDelete(false)}
+                disabled={deleteMutation.isPending}
+              >
+                Keep
+              </button>
+              <button
+                className="inline-flex items-center gap-2 px-4 py-1.5 bg-rose-600 text-white text-sm font-medium rounded-lg hover:bg-rose-700 disabled:opacity-50"
+                onClick={() => deleteMutation.mutate()}
+                disabled={deleteMutation.isPending}
+              >
+                {deleteMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+                Yes, delete
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between pt-4">
+            <button
+              className="inline-flex items-center gap-1.5 px-2 py-1.5 text-sm text-rose-600 dark:text-rose-400 hover:underline disabled:opacity-50"
+              onClick={() => setConfirmingDelete(true)}
+              disabled={saveMutation.isPending}
+            >
+              <Trash2 size={14} /> Delete
+            </button>
+            <div className="flex justify-end gap-2">
+              <button
+                className="px-3 py-1.5 text-sm border border-slate-300 dark:border-neutral-600 rounded-lg text-slate-700 dark:text-neutral-200"
+                onClick={onClose}
+                disabled={saveMutation.isPending}
+              >
+                Cancel
+              </button>
+              <button
+                className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                onClick={() => saveMutation.mutate(form)}
+                disabled={saveMutation.isPending}
+              >
+                {saveMutation.isPending && <Loader2 size={14} className="animate-spin" />}
+                Save
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -1,12 +1,9 @@
-import os
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from openpyxl import load_workbook
 
 from dashboard.backend.auth import get_current_user_id
-from dashboard.backend.config import EXCEL_PATH
 from dashboard.backend.database import get_db
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["dashboard"])
@@ -18,41 +15,6 @@ def _table_exists(db, name: str) -> bool:
             "SELECT to_regclass(%s) IS NOT NULL AS exists", (f"public.{name}",)
         ).fetchone()["exists"]
     )
-
-
-def _available_months_from_excel() -> list[str] | None:
-    """Read the Sold Orders sheet's Sale Date column directly, so the arrows' navigable
-    range reflects the workbook (the bookkeeping source of truth) even if the backend's
-    Postgres sync hasn't run since the workbook last changed. Returns None (caller falls
-    back to Postgres) if the file/sheet isn't reachable."""
-    if not os.path.exists(EXCEL_PATH):
-        return None
-    try:
-        wb = load_workbook(EXCEL_PATH, read_only=True, data_only=True)
-        try:
-            if "Sold Orders" not in wb.sheetnames:
-                return None
-            ws = wb["Sold Orders"]
-            headers = [c.value.strip() if isinstance(c.value, str) else c.value for c in next(ws.iter_rows(min_row=1, max_row=1))]
-            if "Sale Date" not in headers:
-                return None
-            date_idx = headers.index("Sale Date")
-            months: set[str] = set()
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                v = row[date_idx] if date_idx < len(row) else None
-                if v is None:
-                    continue
-                if isinstance(v, (datetime, date)):
-                    months.add(f"{v.year:04d}-{v.month:02d}")
-                else:
-                    s = str(v).strip()
-                    if len(s) >= 7 and s[4] == "-":
-                        months.add(s[:7])
-            return sorted(months, reverse=True)
-        finally:
-            wb.close()
-    except Exception:
-        return None
 
 
 def _parse_month(month: str | None, today: date) -> date:
@@ -97,17 +59,15 @@ def get_dashboard_kpis(
         available_months: list[str] = []
 
         if sold_exists:
-            available_months = _available_months_from_excel()
-            if available_months is None:
-                available_months = [
-                    r["m"]
-                    for r in db.execute(
-                        """SELECT DISTINCT to_char(sale_date, 'YYYY-MM') AS m
-                           FROM sold_orders WHERE user_id = %s AND sale_date IS NOT NULL
-                           ORDER BY m DESC""",
-                        [user_id],
-                    ).fetchall()
-                ]
+            available_months = [
+                r["m"]
+                for r in db.execute(
+                    """SELECT DISTINCT to_char(sale_date, 'YYYY-MM') AS m
+                       FROM sold_orders WHERE user_id = %s AND sale_date IS NOT NULL
+                       ORDER BY m DESC""",
+                    [user_id],
+                ).fetchall()
+            ]
             if month_str not in available_months:
                 available_months = sorted({*available_months, month_str}, reverse=True)
 

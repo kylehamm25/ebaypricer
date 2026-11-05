@@ -7,7 +7,6 @@ interface Column<T> {
   render?: (item: T) => ReactNode
   className?: string
   stopRowClick?: boolean
-  /** Backend sort key this header sorts by. Presence alone makes the header clickable. */
   sortKey?: string
 }
 
@@ -19,13 +18,7 @@ interface DataTableProps<T> {
   onToggleExpand?: (key: string) => void
   renderExpanded?: (item: T) => ReactNode
   onRowClick?: (item: T) => void
-  /** Marks a row as selected. Needed once a row click means "select this" rather
-   *  than "open this" - with no checkbox left, the tint is the only thing saying
-   *  what is picked. */
   isRowSelected?: (item: T) => boolean
-  /** Omit the separator above this row, merging it into the row above - used to
-   *  show consecutive rows as one block. Never applies to the first row, which
-   *  has no separator anyway. */
   hideRowDivider?: (item: T, index: number) => boolean
   hideHeader?: boolean
   sortBy?: string

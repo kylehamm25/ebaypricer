@@ -24,9 +24,6 @@ export function formatInt(n: number | string | null | undefined): string {
   return v.toLocaleString()
 }
 
-/** A lot is done when nothing from it is still listed and something actually
- *  sold. A lot with nothing listed AND nothing sold isn't complete - it just has
- *  no data yet (a cost entered before the cards were listed), so it stays unlabelled. */
 export function isLotComplete(lot: {
   active_items: number
   sold_items: number
@@ -37,9 +34,6 @@ export function isLotComplete(lot: {
   return lot.active_items === 0 && (lot.unlisted_items ?? 0) === 0 && lot.sold_items > 0
 }
 
-/** Tailwind text colour for a profit/loss figure: green above zero, red below,
- *  muted when there is no figure at all. Shared so every page colours money the
- *  same way. */
 export function profitTone(v: number | null | undefined): string {
   if (v == null) return 'text-slate-400'
   if (v > 0) return 'text-emerald-600 dark:text-emerald-400'
@@ -47,8 +41,6 @@ export function profitTone(v: number | null | undefined): string {
   return 'text-slate-500 dark:text-neutral-400'
 }
 
-/** Parses a possibly-formatted numeric field (e.g. a currency string with stray
- *  characters) from an API row into a plain number, or null if it isn't one. */
 export function toNumber(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null
   const n = Number(String(v).replace(/[^0-9.-]/g, ''))
@@ -64,13 +56,14 @@ export function toNumber(v: unknown): number | null {
 
 const CLAMP_LABELS: Record<string, string> = {
   change_cap: 'limited by max change per step',
+  stale_hold: 'holding — unsold 30+ days, never suggested up',
+  min_step: 'held — move under $0.05',
+  feedback_hold: 'held — you downvoted this direction',
   net_floor: 'held at minimum profitable price',
   absolute_floor: 'held at minimum price',
   ese_max_price: 'capped to stay under the eBay Standard Envelope $20 limit',
 }
 
-/** Human-readable explanation of a stored suggestion, for a tooltip. Presentation
- *  only - it reformats what the backend already decided, it never recomputes. */
 export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undefined): string {
   if (!basis) return 'No suggestion available.'
   if (basis.status === 'cooldown') {
@@ -93,6 +86,9 @@ export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undef
   if (basis.status === 'excluded') {
     return `No suggestion for print-defect/novelty variants${basis.matched_keyword ? ` (matched "${basis.matched_keyword}")` : ''}.`
   }
+  if (basis.status === 'multi_card') {
+    return 'No suggestion — this listing names multiple cards, but the competitor pool describes a single card.'
+  }
 
   const parts: string[] = []
   if (basis.days_listed != null) parts.push(`listed ${basis.days_listed}d`)
@@ -111,7 +107,12 @@ export function formatSuggestionReason(basis: SuggestedPriceBasis | null | undef
     parts.push(`${basis.watchers} watchers holding price closer to current`)
   }
   for (const c of basis.clamps ?? []) {
-    parts.push(CLAMP_LABELS[c] ?? c)
+    if (c === 'stale_hold') {
+      const days = basis.stale_no_increase_days ?? 30
+      parts.push(`holding — unsold ${days}+ days, never suggested up`)
+    } else {
+      parts.push(CLAMP_LABELS[c] ?? c)
+    }
   }
   if (basis.flags?.includes('low_confidence')) parts.push('low confidence')
   return parts.join(' · ')

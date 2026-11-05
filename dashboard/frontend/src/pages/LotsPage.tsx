@@ -121,32 +121,6 @@ export function LotsPage() {
           render: (r) => <span className="tabular-nums">{formatCurrency(r.listed_value)}</span>,
         },
         {
-          key: 'unlisted_value',
-          header: 'Unlisted Value',
-          sortKey: 'unlisted_value',
-          className: 'w-28',
-          render: (r) => (
-            r.unlisted_items === 0
-              ? <span className="text-slate-400 text-xs">—</span>
-              : (
-                <span
-                  className="tabular-nums"
-                  title={
-                    `${r.unlisted_entries} entr${r.unlisted_entries === 1 ? 'y' : 'ies'} still in hand` +
-                    (r.unlisted_unvalued ? ` · ${r.unlisted_unvalued} with no price yet` : '')
-                  }
-                >
-                  {formatCurrency(r.unlisted_value)}
-                  {r.unlisted_unvalued > 0 && (
-                    <span className="ml-1 text-xs text-amber-600 dark:text-amber-400">
-                      +{r.unlisted_unvalued}?
-                    </span>
-                  )}
-                </span>
-              )
-          ),
-        },
-        {
           key: 'sold_net',
           header: 'Sold Net',
           sortKey: 'sold_net',
@@ -225,16 +199,18 @@ export function LotsPage() {
               </span>,
         },
         {
-          key: 'edit',
+          key: 'actions',
           header: '',
           className: 'w-12',
+          // The row itself navigates to the lot detail; the pencil opens the cost
+          // editor instead, so its clicks must not bubble to the row.
           stopRowClick: true,
           render: (r) => (
             <button
               type="button"
-              aria-label={`Edit lot ${r.sku}`}
+              aria-label={`Edit ${r.sku}`}
               title="Edit cost and details"
-              className="text-slate-400 hover:text-blue-600 dark:hover:text-blue-400"
+              className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 dark:hover:text-neutral-200 dark:hover:bg-neutral-700"
               onClick={() => setEditing(r)}
             >
               <Pencil size={14} />
@@ -307,7 +283,6 @@ export function LotsPage() {
           {open.length > 0 && (hasCompleted ? (
             <section className="space-y-2">
               <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
-                Open <span className="text-slate-400 font-normal">({open.length})</span>
               </h2>
               {lotsTable(open)}
             </section>
@@ -316,7 +291,6 @@ export function LotsPage() {
           {hasCompleted && (
             <section className="space-y-2">
               <h2 className="text-sm font-semibold text-slate-700 dark:text-neutral-200">
-                Completed <span className="text-slate-400 font-normal">({completed.length})</span>
               </h2>
               {lotsTable(completed)}
             </section>

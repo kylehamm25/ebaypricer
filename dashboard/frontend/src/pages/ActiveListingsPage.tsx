@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Loader2, X } from 'lucide-react'
+import { Loader2, ThumbsDown, X } from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from 'recharts'
@@ -53,10 +53,6 @@ const SORTS: { key: string; label: string }[] = [
   { key: 'Search Position', label: 'Search Rank' },
 ]
 
-/** One live listing as a tile: art on top, the numbers under it, nothing editable.
- *  Selection is offered only where there is a suggested price to apply, exactly as
- *  in the table - a checkbox on a listing with nothing to change would arm a bulk
- *  action that then skipped it. */
 function ActiveCard({ item, selectable, selected, onToggle, onOpen }: {
   item: ActiveListing
   selectable: boolean
@@ -139,6 +135,7 @@ export function ActiveListingsPage() {
   const [view, chooseView] = useViewPreference('active')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [reviewOpen, setReviewOpen] = useState(false)
+  const [decreasesOnly, setDecreasesOnly] = useState(false)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
@@ -258,6 +255,14 @@ export function ActiveListingsPage() {
   // second click - these are live eBay listings.
   const selectedRows = (listData?.items ?? []).filter((r) => selected.has(r['Item ID'] as string))
 
+  // The review dialog can narrow to cuts only. Everything in the dialog - the
+  // rows, the Apply count, the batch itself - follows this, so toggling never
+  // applies something the dialog isn't showing.
+  const isDecrease = (r: ActiveListing) =>
+    r['Suggested Price'] != null && Number(r['Suggested Price']) < Number(r.Price)
+  const decreaseCount = selectedRows.filter(isDecrease).length
+  const visibleRows = decreasesOnly ? selectedRows.filter(isDecrease) : selectedRows
+
   const isPriceChanged = (r: ActiveListing) => {
     const suggested = r['Suggested Price'] != null ? Number(r['Suggested Price']) : null
     const current = r.Price != null ? Number(r.Price) : null
@@ -276,11 +281,24 @@ export function ActiveListingsPage() {
     setSelected(next)
   }
 
+  // Thumbs-down straight from the review batch: vetoes the row's suggestion
+  // direction server-side (which recomputes it to a hold), then drops the row
+  // from this batch - a hold is nothing to apply. Undo lives on the listing's
+  // detail page, where the veto state is shown.
+  const feedbackMutation = useMutation({
+    mutationFn: (id: string) =>
+      apiPost(`/active/item/${encodeURIComponent(id)}/feedback`, { vote: 'down' }),
+    onSuccess: (_data, id) => {
+      removeFromSelection(id)
+      queryClient.invalidateQueries({ queryKey: ['active-list'] })
+    },
+  })
+
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null)
 
   const bulkMutation = useMutation({
     mutationFn: async () => {
-      const items = selectedRows.map((r) => ({
+      const items = visibleRows.map((r) => ({
         item_id: r['Item ID'] as string,
         price: Number(r['Suggested Price']),
       }))
@@ -319,7 +337,7 @@ export function ActiveListingsPage() {
           {selected.size > 0 && (
             <button
               className="inline-flex items-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700"
-              onClick={() => { bulkMutation.reset(); setBulkProgress(null); setReviewOpen(true) }}
+              onClick={() => { bulkMutation.reset(); setBulkProgress(null); setDecreasesOnly(false); setReviewOpen(true) }}
             >
               Apply {selected.size} suggested {selected.size === 1 ? 'price' : 'prices'}
             </button>
@@ -341,14 +359,24 @@ export function ActiveListingsPage() {
 
       {reviewOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="bg-white dark:bg-neutral-800 rounded-xl p-5 max-w-2xl w-full max-h-[80vh] flex flex-col">
+          <div className="bg-white dark:bg-neutral-800 rounded-xl p-5 max-w-5xl w-full max-h-[80vh] flex flex-col">
             <h2 className="text-lg font-bold text-slate-900 dark:text-neutral-100 mb-1">
               Review price changes
             </h2>
-            <p className="text-xs text-slate-500 dark:text-neutral-400 mb-4">
+            <p className="text-xs text-slate-500 dark:text-neutral-400 mb-3">
               These will be applied to your live eBay listings. Price only — Best Offer
               auto-accept and minimum offer settings are left as they are.
             </p>
+            <label className="mb-3 inline-flex w-fit cursor-pointer items-center gap-1.5 text-sm text-slate-600 dark:text-neutral-300">
+              <input
+                type="checkbox"
+                className="w-4 h-4 accent-blue-600"
+                checked={decreasesOnly}
+                onChange={(e) => setDecreasesOnly(e.target.checked)}
+              />
+              Decreases only
+              <span className="text-xs text-slate-400">({decreaseCount})</span>
+            </label>
             <div className="overflow-y-auto flex-1 -mx-1 px-1">
               <table className="w-full text-sm">
                 <thead>
@@ -361,7 +389,7 @@ export function ActiveListingsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 dark:divide-neutral-700">
-                  {[...selectedRows]
+                  {[...visibleRows]
                     .sort((a, b) => {
                       const diffA = Math.abs(Number(a['Suggested Price']) - Number(a.Price))
                       const diffB = Math.abs(Number(b['Suggested Price']) - Number(b.Price))
@@ -380,7 +408,7 @@ export function ActiveListingsPage() {
                     const vsAvgPct = avgListed ? Math.round(((to - avgListed) / avgListed) * 100) : null
                     return (
                       <tr key={id}>
-                        <td className="py-2 pr-3 max-w-sm truncate text-slate-700 dark:text-neutral-200">{r.Title as string}</td>
+                        <td className="py-2 pr-3 max-w-sm truncate text-slate-700 dark:text-neutral-200" title={r.Title as string}>{r.Title as string}</td>
                         <td className="py-2 px-2 text-right tabular-nums text-slate-500 dark:text-neutral-400">{formatCurrency(from)}</td>
                         <td className="py-2 px-1 text-slate-400">→</td>
                         <td className={`py-2 pl-1 text-right tabular-nums font-medium ${to < from ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
@@ -407,15 +435,26 @@ export function ActiveListingsPage() {
                         </td>
                         <td className="py-2 pl-2 text-right">
                           {!bulkMutation.data && (
-                            <button
-                              onClick={() => removeFromSelection(id)}
-                              disabled={bulkMutation.isPending}
-                              className="p-1 rounded-md text-slate-300 hover:text-rose-600 hover:bg-rose-50 dark:text-neutral-600 dark:hover:text-rose-400 dark:hover:bg-rose-500/10 disabled:opacity-30"
-                              title="Remove from this batch"
-                              aria-label={`Remove ${r.Title as string} from batch`}
-                            >
-                              <X size={14} />
-                            </button>
+                            <span className="inline-flex items-center gap-1">
+                              <button
+                                onClick={() => feedbackMutation.mutate(id)}
+                                disabled={bulkMutation.isPending || feedbackMutation.isPending}
+                                className="p-1 rounded-md text-slate-300 hover:text-rose-600 hover:bg-rose-50 dark:text-neutral-600 dark:hover:text-rose-400 dark:hover:bg-rose-500/10 disabled:opacity-30"
+                                title="Downvote — hold this direction for 30 days and remove from batch"
+                                aria-label={`Downvote suggestion for ${r.Title as string}`}
+                              >
+                                <ThumbsDown size={14} />
+                              </button>
+                              <button
+                                onClick={() => removeFromSelection(id)}
+                                disabled={bulkMutation.isPending}
+                                className="p-1 rounded-md text-slate-300 hover:text-rose-600 hover:bg-rose-50 dark:text-neutral-600 dark:hover:text-rose-400 dark:hover:bg-rose-500/10 disabled:opacity-30"
+                                title="Remove from this batch"
+                                aria-label={`Remove ${r.Title as string} from batch`}
+                              >
+                                <X size={14} />
+                              </button>
+                            </span>
                           )}
                         </td>
                       </tr>
@@ -423,13 +462,20 @@ export function ActiveListingsPage() {
                   })}
                 </tbody>
               </table>
-              {selectedRows.length === 0 && (
-                <p className="text-center text-sm text-slate-400 py-6">No items left in this batch.</p>
+              {visibleRows.length === 0 && (
+                <p className="text-center text-sm text-slate-400 py-6">
+                  {decreasesOnly ? 'No decreases in this batch.' : 'No items left in this batch.'}
+                </p>
               )}
             </div>
             {bulkMutation.isError && (
               <p className="text-xs text-rose-600 dark:text-rose-400 mt-3">
                 {(bulkMutation.error as Error).message}
+              </p>
+            )}
+            {feedbackMutation.isError && (
+              <p className="text-xs text-rose-600 dark:text-rose-400 mt-3">
+                {(feedbackMutation.error as Error).message}
               </p>
             )}
             {bulkMutation.data && bulkMutation.data.failed > 0 && (
@@ -448,12 +494,12 @@ export function ActiveListingsPage() {
               <button
                 className="inline-flex items-center gap-2 px-4 py-1.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 onClick={() => bulkMutation.mutate()}
-                disabled={bulkMutation.isPending || !!bulkMutation.data || selectedRows.length === 0}
+                disabled={bulkMutation.isPending || !!bulkMutation.data || visibleRows.length === 0}
               >
                 {bulkMutation.isPending && <Loader2 size={14} className="animate-spin" />}
                 {bulkMutation.isPending
                   ? `Applying${bulkProgress ? ` ${bulkProgress.done}/${bulkProgress.total}` : '...'}`
-                  : `Apply ${selectedRows.length}`}
+                  : `Apply ${visibleRows.length}`}
               </button>
             </div>
           </div>

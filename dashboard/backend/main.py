@@ -1,4 +1,5 @@
 import os
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,10 +9,17 @@ from fastapi.staticfiles import StaticFiles
 
 from dashboard.backend.config import ALLOWED_ORIGINS, DEFAULT_USER_ID, FRONTEND_DIST
 from dashboard.backend.database import close_pool
-from dashboard.backend.routers import dashboard, sold, active, lots, pricing, pipeline, promotion, ebay, valuation, inventory, settings
-from dashboard.backend.services.excel_sync import sync_excel
+from dashboard.backend.routers import dashboard, sold, active, lots, pricing, pipeline, promotion, ebay, valuation, inventory, inventory_imports, settings
+from dashboard.backend.services import card_scan
 from dashboard.backend.services.ebay_data import has_connections, start_scheduler
 from dashboard.backend.services.price_research import reconcile_stale_job_runs
+
+
+def _warm_card_scanner() -> None:
+    try:
+        card_scan.warm()
+    except Exception as e:
+        print(f"Card scanner warm-up skipped: {e}")
 
 
 @asynccontextmanager
@@ -22,10 +30,9 @@ async def lifespan(app: FastAPI):
             print(f"Reconciled {orphaned} job_runs row(s) orphaned by a previous crash/restart")
         if has_connections():
             start_scheduler()
-        result = sync_excel()
-        print(f"Excel sync on startup: {result}")
     except Exception as e:
         print(f"Startup sync skipped: {e}")
+    threading.Thread(target=_warm_card_scanner, daemon=True, name="card-scan-warm").start()
     yield
     close_pool()
 
@@ -50,12 +57,8 @@ app.include_router(promotion.router)
 app.include_router(ebay.router)
 app.include_router(valuation.router)
 app.include_router(inventory.router)
+app.include_router(inventory_imports.router)
 app.include_router(settings.router)
-
-
-@app.get("/api/v1/pipeline/sync-excel")
-def trigger_excel_sync():
-    return sync_excel()
 
 
 @app.get("/")

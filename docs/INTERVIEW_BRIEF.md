@@ -97,13 +97,15 @@ Two halves that share a database but run independently.
           └────────────────────┘   JWT    └─────────────────────┘
 ```
 
-### Why two paths exist
-The legacy path is the original working system: it treats an Excel workbook on Google Drive as
+### Why two paths existed
+The legacy path was the original working system: it treated an Excel workbook on Google Drive as
 the bookkeeping source of truth, because the business owner actually reads and edits that
-workbook. The modern path (`services/ebay_data.py`) replaces it entirely for any user who
-connects their own eBay account via OAuth — no workbook required. Both write into the same
-Postgres tables, so the dashboard doesn't care which produced the data. The migration plan
-(`docs/SOFTWARE_PLAN.md` §7) retires the workbook once the OAuth path fully covers it.
+workbook. The modern path (`services/ebay_data.py`) replaced it entirely for any user who
+connects their own eBay account via OAuth — no workbook required. Both wrote into the same
+Postgres tables, so the dashboard didn't care which produced the data. In Oct 2026 the workbook
+path was deleted outright (parity-verified first: 686/686 sold orders, 408/408 active listings),
+leaving the OAuth path as the only writer — the migration plan (`docs/SOFTWARE_PLAN.md` §7)
+is now complete.
 
 This is a good thing to volunteer in an interview: **it's a strangler-fig migration.** New
 system built alongside the old one, sharing a data store, with the old one deleted path by path
@@ -414,7 +416,7 @@ This is where to demonstrate seniority — it's the part most side projects skip
 | 4 | Single-host deploy (FastAPI serving built frontend) | Done |
 | 5 | Per-user eBay OAuth (`ebay_connections`, encrypted tokens) | Done |
 | 6 | Per-user sync replacing the workbook pipeline | Done |
-| 7 | Retire the Drive workbook entirely | In progress — both paths still live |
+| 7 | Retire the Drive workbook entirely | Done Oct 2026 — legacy chain, `excel_sync.py`, `pipeline_runner.py`, hourly task and SQLite db removed |
 
 The full current-vs-target design, schema, and SQLite→Postgres dialect mapping rules live in
 `docs/SOFTWARE_PLAN.md`. It's maintained as a living design doc, not a historical record.

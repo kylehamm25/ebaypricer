@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from dashboard.backend.auth import get_current_user_id
 from dashboard.backend.database import get_db
-from dashboard.backend.services import listing_csv, listing_settings, photo_storage
+from dashboard.backend.services import inventory_store, listing_csv, listing_settings, photo_storage
 from dashboard.backend.services import prefill_template as prefill_template_service
 from dashboard.backend.services.inventory_value import latest_snapshots, row_value
 from dashboard.backend.services.type_sort import sort_by_card_type
@@ -34,7 +34,7 @@ from ebaypricer.cards import image_url_for_query
 
 router = APIRouter(prefix="/api/v1/inventory", tags=["inventory"])
 
-MIGRATION_HINT = "Unlisted inventory needs db/migrations/0011_inventory.sql to be run first"
+MIGRATION_HINT = inventory_store.MIGRATION_HINT
 
 # Sorting is done in SQL so it stays correct across the whole pile rather than
 # within whatever the page happens to hold - there is no pagination here (the whole
@@ -311,62 +311,18 @@ def list_inventory(
     }
 
 
-# Same pair-of-statements shape as _SELECTS and for the same reason: the first
-# writes manual_value, the second is the pre-0012 fallback. A supplied manual value
-# is refused rather than silently dropped by the fallback - see _write.
-# Columns every install has (0011). Order is only for readability - the statements
-# below are built from these names, so nothing has to be kept in step by hand.
-_WRITE_COLUMNS = (
-    "name", "card_query", "set_name", "number", "condition", "quantity",
-    "location", "sku", "cost", "notes",
-)
-
-# Columns a later migration added, written only when the database has them. Each one
-# names the migration to run, because a value supplied for a missing column is refused
-# out loud rather than silently dropped - a stated price that vanished would show the
-# row as unpriced with no explanation, and photos that vanished would come back as an
-# empty prefill cell.
-_OPTIONAL_WRITE_COLUMNS = {
-    "manual_value":
-        "A stated price needs db/migrations/0012_inventory_manual_value.sql to be run first",
-    "photo_urls":
-        "Photos need db/migrations/0016_inventory_photo_urls.sql to be run first",
-}
-
-
 def _write(params: dict, item_id: int | None = None):
-    """Insert or update a row, using the widest column set this database can take.
+    """Insert or update a row through the shared builder.
 
-    Built from `existing_columns` rather than from a tuple of hand-written fallback
-    statements, for the reason `_select_for` gives about reads: two optional columns
-    already need four statements and the next migration doubles it again. One
-    information_schema query per write is a fair price for that not happening.
+    The builder lives in services/inventory_store.py so the scan importer can create a
+    row and mark its import confirmed on one connection. This wrapper keeps the route
+    code's existing shape and turns the builder's migration errors into HTTP 503s.
     """
     with get_db(read_only=False) as db:
-        present = existing_columns(db, "inventory")
-        if not present:
-            raise HTTPException(503, MIGRATION_HINT)
-
-        columns = list(_WRITE_COLUMNS)
-        for column, hint in _OPTIONAL_WRITE_COLUMNS.items():
-            if column in present:
-                columns.append(column)
-            elif params.get(column) is not None:
-                raise HTTPException(503, hint)
-
-        if item_id is None:
-            sql = (
-                f"INSERT INTO inventory (user_id, {', '.join(columns)}) "
-                f"VALUES (%(uid)s, {', '.join(f'%({c})s' for c in columns)}) "
-                "RETURNING id"
-            )
-        else:
-            params["id"] = item_id
-            sql = (
-                f"UPDATE inventory SET {', '.join(f'{c} = %({c})s' for c in columns)}, "
-                "updated_at = now() WHERE id = %(id)s AND user_id = %(uid)s RETURNING id"
-            )
-        return db.execute(sql, params).fetchone()
+        try:
+            return inventory_store.write(db, params, item_id)
+        except inventory_store.InventoryWriteError as exc:
+            raise HTTPException(exc.status, str(exc))
 
 
 def _params(body: InventoryItem, user_id: UUID) -> dict:
@@ -671,7 +627,7 @@ def _photos_of(db, item_id: int, user_id: UUID) -> list[str]:
             [item_id, user_id],
         ).fetchone()
     except UndefinedColumn:
-        raise HTTPException(503, _OPTIONAL_WRITE_COLUMNS["photo_urls"])
+        raise HTTPException(503, inventory_store.OPTIONAL_WRITE_COLUMNS["photo_urls"])
     except UndefinedTable:
         raise HTTPException(503, MIGRATION_HINT)
     if row is None:

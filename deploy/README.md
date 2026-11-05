@@ -26,11 +26,9 @@ for every deploy after that.
    (`desiredCount: 1` to start) using the target group above. The task definition
    itself gets registered by `deploy.sh`, not created manually here.
 
-5. **`EBAY_EXCEL_PATH` is deliberately not set** in `task-definition.json` - leave it
-   out. The backend checks whether that path exists before running the legacy
-   Excel-based pipeline round and skips it cleanly when it doesn't (see
-   `dashboard/backend/services/ebay_data.py`), so nothing needs to point at a
-   Google-Drive-synced file that won't exist in the container.
+5. No workbook dependency exists anymore — the legacy Excel/SQLite pipeline was
+   retired Oct 2026 and per-user OAuth sync is the only writer, so there is no
+   file path to configure and nothing to mount.
 
 ## Every deploy after that
 

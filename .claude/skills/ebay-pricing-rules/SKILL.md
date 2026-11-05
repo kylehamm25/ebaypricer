@@ -62,9 +62,12 @@ $2.98 instead of a real price ending. There is a round-up retry so rounding can
 never re-cross the hard floor.
 
 **Declining to suggest is a valid, meaningful output.** `price is None` with a
-`status` of `cooldown` / `excluded` / `thin_comps` / `no_comps` / `comp_mismatch`.
+`status` of `cooldown` / `excluded` / `thin_comps` / `no_comps` / `comp_mismatch` / `multi_card`.
 Do not fill these with a fallback number — a wrong suggestion is worse than none,
-and the status is what the UI shows the user.
+and the status is what the UI shows the user. `multi_card` is decided in
+`price_research._suggestion_for_row`, not the pure function (which never sees the
+title): a bundle names several cards while its comp pool describes one, so any
+derived number misprices it by construction.
 
 **A comp pool wildly out of line with our own price is not usable.** Beyond
 `MAX_ANCHOR_RATIO` in either direction, Browse matched the card name but found a

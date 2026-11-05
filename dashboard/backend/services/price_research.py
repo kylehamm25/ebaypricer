@@ -23,7 +23,7 @@ inter-step data channel. The card list here comes from the union of all
 users' active_listings.card values in Postgres instead.
 
 A Postgres advisory lock guarantees a single active runner across processes,
-same pattern as pipeline_runner.py's legacy pipeline lock (different key).
+same pattern as stage_runner.py's refresh locks (different key).
 """
 
 import logging
@@ -37,13 +37,14 @@ import psycopg
 import requests
 from psycopg.types.json import Json
 
-from ebaypricer.browse_api import OUTLIER_SIGMA, parse_active_item, search_active_listings
+from ebaypricer.browse_api import OUTLIER_SIGMA, parse_active_item, search_active_listings, truncate_query
 from ebaypricer.cards import card_identity
-from ebaypricer.comp_filter import filter_comps
+from ebaypricer.comp_filter import filter_comps, is_multi_card
 
 from dashboard.backend.config import DATABASE_URL
 from dashboard.backend.database import get_db
 from dashboard.backend.services.suggested_price import (
+    FEEDBACK_HOLD_DAYS,
     REPRICE_COOLDOWN_DAYS,
     Suggestion as SuggestionResult,
     compute_suggested_price,
@@ -116,7 +117,9 @@ GENERIC_TITLE_WORDS = {
 def _candidate_queries(title: str, card: str) -> list[str]:
     queries: list[str] = []
     if card:
-        queries.append(" ".join(card.split()[:5]))
+        # Truncated the same way the comp search is, so the finish picked on the
+        # page (" Reverse", " Non Holo") is part of the position lookup too.
+        queries.append(truncate_query(card))
     words = (title or "").split()
     if words:
         q = " ".join(words[:5])
@@ -593,7 +596,41 @@ def _days_since_change(row, changes: dict[tuple[str, str], datetime], now: datet
     return (now - changed_at).total_seconds() / 86400
 
 
-def _suggestion_for_row(row, active_snapshot: dict | None, days_since_price_change: float | None = None):
+def recent_feedback() -> dict[tuple[str, str], tuple[str, datetime]]:
+    """(user_id, item_id) -> (direction, voted_at) for seller vetoes on suggestions.
+
+    Read once per run and passed down, the same shape as recent_price_changes.
+    Runs on its own connection and swallows failures: price_feedback arrives in
+    migration 0020, and a deployment that hasn't run it yet should lose the vetoes,
+    not the whole research run. An empty map just means "nobody vetoed anything".
+    """
+    try:
+        with get_db() as conn:
+            rows = conn.execute(
+                "SELECT user_id, item_id, direction, voted_at FROM price_feedback"
+            ).fetchall()
+    except Exception as e:
+        log.warning("Price feedback lookup failed (has migration 0020 been run?): %s", e)
+        return {}
+    return {(str(r["user_id"]), str(r["item_id"])): (r["direction"], r["voted_at"]) for r in rows}
+
+
+def _feedback_for_row(row, feedback: dict[tuple[str, str], tuple[str, datetime]], now: datetime) -> tuple[str | None, float | None]:
+    """The veto inputs compute_suggested_price takes, for one row. Expired vetoes
+    read as absent here, so the model - and the basis it persists - never sees them.
+    """
+    found = feedback.get((str(row["user_id"]), str(row["item_id"])))
+    if found is None:
+        return None, None
+    direction, voted_at = found
+    age = (now - voted_at).total_seconds() / 86400 if voted_at is not None else None
+    if age is not None and age >= FEEDBACK_HOLD_DAYS:
+        return None, None
+    return direction, age
+
+
+def _suggestion_for_row(row, active_snapshot: dict | None, days_since_price_change: float | None = None,
+                       feedback: tuple[str | None, float | None] | None = None):
     """Run the suggested-price model for one active_listings row. Falls back to
     min_price when p25_price is absent, so rows still get a sane suggestion before a
     fresh research run has populated the newer column.
@@ -607,8 +644,19 @@ def _suggestion_for_row(row, active_snapshot: dict | None, days_since_price_chan
             None, "excluded",
             {"v": 1, "status": "excluded", "matched_keyword": matched_keyword},
         )
+    # A bundle priced off single-card comps: the pool behind card_query describes one
+    # card, so any number derived from it misprices the lot by construction. Mirrors
+    # the comp-side multi_card hard drop - a multi-card listing is equally useless AS
+    # a suggestion target. Measured Oct 2026: exactly one such title, no false
+    # positives across the inventory, so this declines only genuine bundles.
+    if is_multi_card(row.get("title") or ""):
+        return SuggestionResult(
+            None, "multi_card",
+            {"v": 1, "status": "multi_card"},
+        )
     snapshot = active_snapshot or {}
     floor_anchor = snapshot.get("p25_price") or snapshot.get("min_price")
+    feedback_direction, days_since_feedback = feedback or (None, None)
     return compute_suggested_price(
         current_price=float(row["price"]) if row["price"] is not None else None,
         anchor_avg=snapshot.get("avg_price"),
@@ -625,12 +673,15 @@ def _suggestion_for_row(row, active_snapshot: dict | None, days_since_price_chan
         comp_avg_shipping=snapshot.get("avg_shipping"),
         watchers=row.get("watchers"),
         days_since_price_change=days_since_price_change,
+        feedback_direction=feedback_direction,
+        days_since_feedback=days_since_feedback,
     )
 
 
 def update_active_listing_derived_columns(
     conn, card_query: str, active_snapshot: dict | None, today: date,
     price_changes: dict[tuple[str, str], datetime],
+    feedback: dict[tuple[str, str], tuple[str, datetime]],
 ) -> int:
     """Apply this card's research to every user's matching active_listings rows in one pass
     (ports price_active_listings.py/avg_active_price.py::write_price_data).
@@ -641,7 +692,8 @@ def update_active_listing_derived_columns(
 
     price_changes comes from recent_price_changes() and is passed in rather than looked
     up here: `conn` is already a checked-out write connection, and taking a second one
-    from a 5-slot pool while holding it invites a deadlock under concurrency."""
+    from a 5-slot pool while holding it invites a deadlock under concurrency. Same
+    for `feedback` (recent_feedback())."""
     rows = conn.execute(
         "SELECT user_id, item_id, price, condition, days_listed, search_position, shipping_charge, watchers, title "
         "FROM active_listings WHERE card = %s",
@@ -663,7 +715,8 @@ def update_active_listing_derived_columns(
         if price is not None and active_avg is not None and float(active_avg) != 0:
             price_accuracy = round((float(price) - float(active_avg)) / float(active_avg), 4)
 
-        suggestion = _suggestion_for_row(r, active_snapshot, _days_since_change(r, price_changes, now))
+        suggestion = _suggestion_for_row(r, active_snapshot, _days_since_change(r, price_changes, now),
+                                           _feedback_for_row(r, feedback, now))
 
         updates.append(
             (
@@ -738,6 +791,7 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
         with get_db() as conn:
             rows = conn.execute(sql_no_shipping, params).fetchall()
     price_changes = recent_price_changes(now)
+    feedback = recent_feedback()
 
     for r in rows:
         snapshot = None
@@ -749,7 +803,8 @@ def recompute_suggestions(user_id: str | None = None) -> dict:
                 "sample_size": r["sample_size"],
                 "avg_shipping": r["avg_shipping"] if "avg_shipping" in r else None,
             })
-        suggestion = _suggestion_for_row(r, snapshot, _days_since_change(r, price_changes, now))
+        suggestion = _suggestion_for_row(r, snapshot, _days_since_change(r, price_changes, now),
+                                           _feedback_for_row(r, feedback, now))
         if suggestion.price is None:
             nulled += 1
             if suggestion.status == "cooldown":
@@ -795,10 +850,11 @@ def refresh_card(card_query: str) -> dict:
     updated_rows = 0
     if items:
         price_changes = recent_price_changes(datetime.now(timezone.utc))
+        feedback = recent_feedback()
         with get_db(read_only=False) as conn:
             research_card_positions(conn, card_query, items, today)
             updated_rows = update_active_listing_derived_columns(
-                conn, card_query, active_snapshot, today, price_changes
+                conn, card_query, active_snapshot, today, price_changes, feedback
             )
 
     return {
@@ -905,6 +961,7 @@ def run_shared_price_research(force: bool = False) -> dict:
         # so a change landing mid-run is already inside it and would only shift a
         # suggestion that is being suppressed either way.
         price_changes = recent_price_changes(started)
+        feedback = recent_feedback()
         # Same idea: our own item_ids are one set for the whole run. Reading them per
         # card meant ~200 full reads of active_listings against a remote database.
         # A listing added mid-run is simply not excluded from that run's pools, which
@@ -938,7 +995,7 @@ def run_shared_price_research(force: bool = False) -> dict:
                     if items:
                         research_card_positions(conn, card, items, today)
                         rows = update_active_listing_derived_columns(
-                            conn, card, snapshot, today, price_changes
+                            conn, card, snapshot, today, price_changes, feedback
                         )
                 if card_force:
                     _mark_researched(card)

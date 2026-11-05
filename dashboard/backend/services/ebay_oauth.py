@@ -103,7 +103,7 @@ def complete_connection(code: str, state: str, error: str | None = None) -> str:
         ).fetchall()
     if not rows:
         raise EbayOAuthError("OAuth state expired or invalid - please try connecting again")
-    user_id = rows[0]["usfier_id"]
+    user_id = rows[0]["user_id"]
 
     if error:
         raise EbayOAuthError(f"eBay authorization failed: {error}")
@@ -157,9 +157,9 @@ def complete_connection(code: str, state: str, error: str | None = None) -> str:
                    (user_id, ebay_user_id, refresh_token, scopes, token_issued_at, token_expires_at, sync_status)
                VALUES (%s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (user_id) DO UPDATE SET
-                   ebay_user_id = EXCLUDED.ebay_user_id,
-            e       refresh_token = EXCLUDED.refresh_token,
-                   scopes = EXCLUDED.scopes,ad
+                    ebay_user_id = EXCLUDED.ebay_user_id,
+                    refresh_token = EXCLUDED.refresh_token,
+                    scopes = EXCLUDED.scopes,
                    token_issued_at = EXCLUDED.token_issued_at,
                    token_expires_at = EXCLUDED.token_expires_at,
                    sync_status = 'connected'""",

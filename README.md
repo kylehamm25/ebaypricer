@@ -1,9 +1,9 @@
 # eBay Automation
 
 Automated eBay selling pipeline for Pokemon cards, plus a dashboard to view the data. Two halves that share a database but run independently:
+1. **Pipeline** (`src/ebaypricer/` + `dashboard/backend/services/ebay_data.py`) — per-user OAuth sync that pulls sold orders and active listings from eBay's Trading/Finances APIs straight into Postgres, on a background scheduler and on demand. (The hourly Excel/`scripts/main.py` pipeline was retired Oct 2026.)
 
-1. **Pipeline** (`src/ebaypricer/` + `scripts/`) — talks to eBay's Trading/Browse/Marketing/Finances APIs, refreshes sold orders and active listings, and keeps an Excel workbook as the bookkeeping source of truth. Runs hourly via Windows Task Scheduler.
-2. **Dashboard** (`dashboard/backend` FastAPI + `dashboard/frontend` React/Vite) — sold orders, active listings, inventory, lots, and pricing, backed by Postgres/Supabase. Syncs the Excel workbook on startup.
+2. **Dashboard** (`dashboard/backend` FastAPI + `dashboard/frontend` React/Vite) — sold orders, active listings, inventory, lots, and pricing, backed by Postgres/Supabase.
 
 A third piece, `ebay-defaults-extension/`, is a standalone Chrome extension for filling eBay listing form defaults.
 

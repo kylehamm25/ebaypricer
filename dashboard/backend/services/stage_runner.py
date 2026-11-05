@@ -1,16 +1,13 @@
 """
-Page-triggered pipeline stage runner.
+Page-triggered refresh runner.
 
 Lets a single dashboard page (Sold Orders, Active Listings) refresh just the
-slice of the pipeline it depends on, instead of the full scripts/main.py run
-that pipeline_runner.py does. Reuses the same advisory-lock + job_runs
-pattern as pipeline_runner.py and price_research.py so status/history stay
+slice it depends on, instead of a full sync round. Reuses the same
+advisory-lock + job_runs pattern as price_research.py so status/history stay
 visible through the same job_runs table, just under different job names.
 """
 
 import logging
-import subprocess
-import sys
 import threading
 from datetime import datetime, timezone
 
@@ -19,13 +16,12 @@ from psycopg.types.json import Json
 
 from dashboard.backend.config import DATABASE_URL
 from dashboard.backend.database import get_db
-from dashboard.backend.services.excel_sync import sync_excel
+from dashboard.backend.services.ebay_data import sync_all_users
 from dashboard.backend.services.price_research import run_shared_price_research
-from ebaypricer.paths import PROJECT_ROOT
 
 log = logging.getLogger(__name__)
 
-# Distinct from pipeline_runner.py's 727001 and price_research.py's 727002.
+# Distinct from price_research.py's 727002.
 _SOLD_LOCK_KEY = 727003
 _ACTIVE_LOCK_KEY = 727004
 
@@ -34,8 +30,6 @@ ACTIVE_JOB_NAME = "active_refresh"
 
 _SOLD_GUARD = threading.Lock()
 _ACTIVE_GUARD = threading.Lock()
-
-_STAGE_TIMEOUT_S = 20 * 60
 
 
 def _try_advisory_lock(key: int) -> psycopg.Connection | None:
@@ -93,18 +87,8 @@ def get_latest_run(job_name: str) -> dict | None:
     return dict(row) if row else None
 
 
-def _run_script(script: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, script],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=_STAGE_TIMEOUT_S,
-    )
-
-
 def _run_stage(job_name: str, guard: threading.Lock, lock_key: int, work) -> dict:
-    """work() does the actual script run + sync, called with the lock held."""
+    """work() does the actual sync, called with the lock held."""
     if not guard.acquire(blocking=False):
         return {"status": "skipped", "reason": "already running locally"}
 
@@ -120,10 +104,6 @@ def _run_stage(job_name: str, guard: threading.Lock, lock_key: int, work) -> dic
         summary["duration_s"] = round((datetime.now(timezone.utc) - started).total_seconds())
         _finish_job_run(job_id, job_name, summary.get("status", "ok"), summary)
         return summary
-    except subprocess.TimeoutExpired:
-        detail = {"status": "error", "error": f"timed out after {_STAGE_TIMEOUT_S}s"}
-        _finish_job_run(job_id, job_name, "error", detail)
-        return detail
     except Exception as e:
         detail = {"status": "error", "error": str(e)[:300]}
         _finish_job_run(job_id, job_name, "error", detail)
@@ -137,24 +117,21 @@ def _run_stage(job_name: str, guard: threading.Lock, lock_key: int, work) -> dic
 
 
 def run_sold_refresh() -> dict:
-    """Runs append_sold_orders.py (pulls new sold orders + Finances fee data from eBay),
-    then syncs the updated workbook into Postgres."""
+    """Per-user OAuth sync of sold orders + Finances fee data, straight into Postgres."""
 
     def work() -> dict:
-        result = _run_script("scripts/append_sold_orders.py")
-        if result.returncode != 0:
-            tail = "\n".join(result.stdout.splitlines()[-10:]) + "\n" + "\n".join(result.stderr.splitlines()[-10:])
-            return {"status": "error", "exit_code": result.returncode, "log_tail": tail[-1500:]}
-        excel = sync_excel()
-        return {"status": "ok", "exit_code": 0, "excel": excel}
+        try:
+            synced = sync_all_users()
+        except Exception as e:
+            return {"status": "error", "error": str(e)[:300]}
+        return {"status": "ok", "sync": synced}
 
     return _run_stage(SOLD_JOB_NAME, _SOLD_GUARD, _SOLD_LOCK_KEY, work)
 
 
 def run_active_refresh() -> dict:
-    """Runs get_active.py (refreshes the Active Listings sheet from eBay), syncs it into
-    Postgres, then kicks off shared price research so pricing columns (Sold Avg, Spread,
-    Search Rank) reflect the refreshed listing set too.
+    """Per-user OAuth sync of active listings, then shared price research so pricing
+    columns (comp averages, search rank, suggestions) reflect the refreshed set too.
 
     The research is forced: pressing Refresh means "go and look now", and unforced it
     short-circuits on _all_cards_researched_today, so the second refresh of any day
@@ -171,12 +148,11 @@ def run_active_refresh() -> dict:
     stays cheap."""
 
     def work() -> dict:
-        result = _run_script("scripts/get_active.py")
-        if result.returncode != 0:
-            tail = "\n".join(result.stdout.splitlines()[-10:]) + "\n" + "\n".join(result.stderr.splitlines()[-10:])
-            return {"status": "error", "exit_code": result.returncode, "log_tail": tail[-1500:]}
-        excel = sync_excel()
+        try:
+            synced = sync_all_users()
+        except Exception as e:
+            return {"status": "error", "error": str(e)[:300]}
         research = run_shared_price_research(force=True)
-        return {"status": "ok", "exit_code": 0, "excel": excel, "price_research": research}
+        return {"status": "ok", "sync": synced, "price_research": research}
 
     return _run_stage(ACTIVE_JOB_NAME, _ACTIVE_GUARD, _ACTIVE_LOCK_KEY, work)

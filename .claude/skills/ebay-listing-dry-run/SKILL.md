@@ -31,6 +31,7 @@ Know these on sight. Anything reaching one of them is a live write.
 **HTTP endpoints — `dashboard/backend/routers/`**
 - `POST /api/v1/active/item/{item_id}/price` — applies immediately, no preview
 - `POST /api/v1/active/bulk-price` — up to `MAX_BULK_ITEMS` (100) per request
+- `POST /api/v1/active/floor/apply` — raises listed items to a seller-given floor, up to 100 per request; its twin `POST /api/v1/active/floor/preview` is the read-only diff and must come first
 - `POST /api/v1/ebay/promotion-boost`
 
 **Scripts**

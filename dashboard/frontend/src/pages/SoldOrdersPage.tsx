@@ -34,26 +34,12 @@ interface SoldOrderItem extends Record<string, unknown> {
   'Total eBay Fees': string
   'Order Earnings': string
   Card?: string
-  /** Real card art, resolved server-side from Card. Null when the order line never
-   *  matched a catalog card - the sprite is the fallback. */
   card_image_url?: string | null
   sprite_url?: string
 }
 
-/** Present only for rows in a multi-item order. `first` marks the row that opens
- *  the run - it keeps its separator, the rest drop theirs. */
 type GroupPos = { first: boolean }
 
-/**
- * Marks runs of adjacent rows that belong to the same order, so the rows of one
- * multi-item order can be merged into a single block by dropping the separators
- * between them.
- *
- * Adjacency-based on purpose: the backend orders by (sale_date, order_id, ...) so
- * an order's rows arrive together, but if that ever stops holding — a different
- * sort, or an order split across a page boundary — this finds shorter runs rather
- * than merging rows that aren't actually neighbours.
- */
 function groupRows(items: SoldOrderItem[]): Map<SoldOrderItem, GroupPos> {
   // Keyed by the row object rather than its index, so lookups during render are
   // O(1) instead of an indexOf scan.
@@ -71,9 +57,6 @@ function groupRows(items: SoldOrderItem[]): Map<SoldOrderItem, GroupPos> {
   return out
 }
 
-/** Fees and earnings are reported once per ORDER, not per item, so continuation
- *  rows of a multi-item order are legitimately blank. Explain that on hover
- *  rather than showing a bare dash that reads like missing data. */
 function OrderLevelCell(
   { row, field, grouped }: { row: SoldOrderItem; field: 'Total eBay Fees' | 'Order Earnings'; grouped: boolean }
 ) {
@@ -91,13 +74,6 @@ function OrderLevelCell(
   )
 }
 
-/** One sold line as a tile.
- *
- *  Shows the LINE's own money only - price and quantity. Fees and earnings are
- *  order-level and sit on one row of a multi-item order, so a tile is the wrong
- *  shape for them entirely: it has no neighbours to be "the first row of" and a
- *  blank on the other tiles would read as missing data. A tile from a multi-item
- *  order is badged instead, and the table is where the order-level figures live. */
 function SoldCard({ item, grouped }: { item: SoldOrderItem; grouped: boolean }) {
   return (
     <GridShell>
